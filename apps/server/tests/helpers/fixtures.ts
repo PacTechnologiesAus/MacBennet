@@ -94,7 +94,7 @@ export async function registerTestWorker(
   const name = overrides.name ?? `test-worker-${Math.floor(Math.random() * 1e9)}`;
 
   const response = await app.inject({
-    method: 'POST',
+    method: 'POST' as const,
     url: '/api/worker/register',
     headers: { authorization: `Bearer ${enrollment.token}` },
     payload: {

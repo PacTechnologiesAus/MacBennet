@@ -174,7 +174,7 @@ describe('plane separation', () => {
 
   it('rejects an enrollment token used as an operating credential', async () => {
     const enrollment = await createEnrollmentToken({ label: 'wrong-use', expiresInHours: 1 }, SYSTEM_ACTOR);
-    const response = await asWorker(app, enrollment.token).post('/api/worker/heartbeat', {
+    const response = await asWorker(app, enrollment.token!).post('/api/worker/heartbeat', {
       status: 'idle',
       currentRunId: null,
     });

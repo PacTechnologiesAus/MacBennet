@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
 import { sql } from 'drizzle-orm';
 import { buildApp } from '../../src/app.js';
 import { config } from '../../src/config.js';
@@ -138,15 +138,24 @@ export async function createAndLogin(
   return { cookie, user: response.json().user };
 }
 
+type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+
+function inject(
+  app: FastifyInstance,
+  method: Method,
+  url: string,
+  headers: Record<string, string>,
+  payload?: unknown,
+): Promise<LightMyRequestResponse> {
+  const options: InjectOptions = { method, url, headers };
+  if (payload !== undefined) options.payload = payload as InjectOptions['payload'];
+  return app.inject(options);
+}
+
 /** Convenience wrapper so tests read as requests rather than as inject boilerplate. */
 export function asUser(app: FastifyInstance, session: Session) {
-  const call = (method: 'GET' | 'POST' | 'PATCH' | 'DELETE') => (url: string, payload?: unknown) =>
-    app.inject({
-      method,
-      url,
-      headers: { cookie: session.cookie },
-      ...(payload !== undefined ? { payload } : {}),
-    });
+  const call = (method: Method) => (url: string, payload?: unknown) =>
+    inject(app, method, url, { cookie: session.cookie }, payload);
 
   return { get: call('GET'), post: call('POST'), patch: call('PATCH'), delete: call('DELETE') };
 }
@@ -155,11 +164,6 @@ export function asUser(app: FastifyInstance, session: Session) {
 export function asWorker(app: FastifyInstance, token: string) {
   return {
     post: (url: string, payload?: unknown) =>
-      app.inject({
-        method: 'POST',
-        url,
-        headers: { authorization: `Bearer ${token}` },
-        ...(payload !== undefined ? { payload } : {}),
-      }),
+      inject(app, 'POST', url, { authorization: `Bearer ${token}` }, payload),
   };
 }
