@@ -117,7 +117,7 @@ export async function workerRoutes(
       const body = progressRequestSchema.parse(request.body);
       await assertRunBelongsToWorker(runId, worker.id, worker.name);
 
-      await recordProgress(runId, worker.id, {
+      await recordProgress(runId, { id: worker.id, name: worker.name }, {
         stage: body.stage,
         percent: body.percent ?? null,
         ...(body.message !== undefined ? { message: body.message } : {}),
@@ -144,7 +144,7 @@ export async function workerRoutes(
       const body = completeRequestSchema.parse(request.body);
       await assertRunBelongsToWorker(runId, worker.id, worker.name);
 
-      const runStatus = await completeRun(runId, worker.id, {
+      const runStatus = await completeRun(runId, { id: worker.id, name: worker.name }, {
         outcome: body.outcome,
         stopReason: body.stopReason ?? null,
         ...(body.summary !== undefined ? { summary: body.summary } : {}),

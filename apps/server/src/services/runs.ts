@@ -530,13 +530,13 @@ export async function leaseNextRun(
 
 export async function recordProgress(
   runId: string,
-  workerId: string,
+  worker: { id: string; name: string },
   input: { stage: string; percent?: number | null; message?: string },
 ): Promise<void> {
   await db.transaction(async (tx) => {
     const [run] = await tx.select().from(runs).where(eq(runs.id, runId)).for('update').limit(1);
     if (!run) throw AppError.notFound('Run');
-    assertRunOwnedBy(run, workerId);
+    assertRunOwnedBy(run, worker.id);
 
     if (run.status !== 'running') {
       throw AppError.conflict('RUN_NOT_RUNNING', `Cannot report progress for a run that is '${run.status}'.`);
@@ -560,9 +560,9 @@ export async function recordProgress(
     if (stageChanged) {
       const [ctx] = await tx.select({ projectId: tasks.projectId }).from(tasks).where(eq(tasks.id, run.taskId)).limit(1);
       await record(tx, {
-        actor: { type: 'worker', id: workerId, label: `worker:${workerId}` },
+        actor: { type: 'worker', id: worker.id, label: worker.name },
         eventType: 'run.progress_stage_changed',
-        context: { runId, taskId: run.taskId, projectId: ctx?.projectId ?? null, workerId },
+        context: { runId, taskId: run.taskId, projectId: ctx?.projectId ?? null, workerId: worker.id },
         // Deliberately `fromStage`/`toStage`, not `from`/`to`: those keys mean
         // a lifecycle status transition everywhere else in the trail, and
         // reusing them here made a stage change look like a status change.
@@ -586,13 +586,13 @@ const OUTCOME_TO_EVENT = {
 
 export async function completeRun(
   runId: string,
-  workerId: string,
+  worker: { id: string; name: string },
   input: { outcome: RunOutcome; stopReason?: StopReason | null; summary?: string; confidence?: number | null },
 ): Promise<RunStatus> {
   return db.transaction(async (tx) => {
     const [run] = await tx.select().from(runs).where(eq(runs.id, runId)).for('update').limit(1);
     if (!run) throw AppError.notFound('Run');
-    assertRunOwnedBy(run, workerId);
+    assertRunOwnedBy(run, worker.id);
 
     if (isTerminalRunStatus(run.status as RunStatus)) {
       // A retried completion after a network blip is not an error; the worker
@@ -620,7 +620,7 @@ export async function completeRun(
     await transition(tx, {
       runId,
       to: target,
-      actor: { type: 'worker', id: workerId, label: `worker:${workerId}` },
+      actor: { type: 'worker', id: worker.id, label: worker.name },
       eventType,
       patch: {
         completedAt: new Date(),
@@ -639,7 +639,7 @@ export async function completeRun(
     await tx
       .update(workers)
       .set({ status: 'idle', currentRunId: null, updatedAt: new Date() })
-      .where(eq(workers.id, workerId));
+      .where(eq(workers.id, worker.id));
 
     await tx
       .update(tasks)

@@ -427,6 +427,27 @@ describe('progress and logs', () => {
     expect(events).toHaveLength(2); // "sleeping" and "finishing", not four ticks
   });
 
+  it('attributes worker-authored events to the worker by name, not by uuid', async () => {
+    // The audit trail is meant to be read by a human. "mac-worker-01" tells
+    // them which machine did it; a bare uuid makes them go and look it up.
+    const worker = await registerTestWorker(app, { name: 'named-worker-07' });
+    const run = await makeApprovedRun(app, operator, taskId, { jobKind: 'sleep', jobParams: { seconds: 5 } });
+    await lease(worker.token);
+    const w = asWorker(app, worker.token);
+
+    await w.post(`/api/worker/runs/${run.id}/progress`, { stage: 'working', percent: 50 });
+    await w.post(`/api/worker/runs/${run.id}/complete`, { outcome: 'succeeded' });
+
+    const trail = await queryAuditEvents({ runId: run.id, limit: 50, offset: 0 });
+    const workerEvents = trail.filter((e) => e.actorType === 'worker');
+
+    expect(workerEvents.length).toBeGreaterThan(0);
+    for (const event of workerEvents) {
+      expect(event.actorLabel, event.eventType).toBe('named-worker-07');
+      expect(event.actorId).toBe(worker.workerId);
+    }
+  });
+
   it('accepts a log batch and deduplicates a retried one', async () => {
     const worker = await registerTestWorker(app);
     const run = await makeApprovedRun(app, operator, taskId);
