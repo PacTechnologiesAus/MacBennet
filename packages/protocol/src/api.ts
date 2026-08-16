@@ -241,6 +241,12 @@ export interface EnrollmentTokenDto {
 
 export interface AuditEventDto {
   id: string;
+  /**
+   * Monotonic insertion sequence, and the authoritative ordering key.
+   * Several events are written inside one transaction and therefore share a
+   * timestamp, so `ts` alone cannot order the trail.
+   */
+  seq: number;
   ts: string;
   actorType: z.infer<typeof actorTypeSchema>;
   actorId: string | null;

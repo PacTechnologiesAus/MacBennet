@@ -4,6 +4,15 @@
   "private": true,
   "type": "module",
   "description": "Mac Bennett worker agent — runs on a dedicated Linux VM",
+  "main": "./src/worker.ts",
+  "types": "./src/worker.ts",
+  "exports": {
+    ".": "./src/worker.ts",
+    "./config": "./src/config.ts",
+    "./logger": "./src/logger.ts",
+    "./log-buffer": "./src/log-buffer.ts",
+    "./jobs": "./src/jobs/index.ts"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",

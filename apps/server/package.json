@@ -10,7 +10,6 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "tsc --noEmit -p tsconfig.json",
     "migrate": "tsx src/db/migrate.ts",
-    "migrate:generate": "drizzle-kit generate",
     "seed": "tsx scripts/seed.ts",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
@@ -32,6 +31,6 @@
   },
   "devDependencies": {
     "@types/pg": "^8.11.10",
-    "drizzle-kit": "^0.28.1"
+    "@mac/worker": "*"
   }
 }

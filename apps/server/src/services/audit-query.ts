@@ -17,16 +17,19 @@ export async function queryAuditEvents(query: AuditQuery): Promise<AuditEventDto
   if (query.workerId) conditions.push(eq(auditEvents.workerId, query.workerId));
   if (query.eventType) conditions.push(eq(auditEvents.eventType, query.eventType));
 
+  // Ordered by `seq`, not `ts`: events written in one transaction share a
+  // clock value, and a tie there would make the trail's order arbitrary.
   const rows = await db
     .select()
     .from(auditEvents)
     .where(conditions.length ? and(...conditions) : undefined)
-    .orderBy(desc(auditEvents.ts), desc(auditEvents.id))
+    .orderBy(desc(auditEvents.seq))
     .limit(query.limit)
     .offset(query.offset);
 
   return rows.map((r) => ({
     id: r.id,
+    seq: Number(r.seq),
     ts: r.ts.toISOString(),
     actorType: r.actorType as AuditEventDto['actorType'],
     actorId: r.actorId,

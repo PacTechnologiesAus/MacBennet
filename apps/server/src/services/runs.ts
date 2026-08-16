@@ -563,7 +563,10 @@ export async function recordProgress(
         actor: { type: 'worker', id: workerId, label: `worker:${workerId}` },
         eventType: 'run.progress_stage_changed',
         context: { runId, taskId: run.taskId, projectId: ctx?.projectId ?? null, workerId },
-        metadata: { from: run.progressStage, to: input.stage, percent: input.percent ?? null },
+        // Deliberately `fromStage`/`toStage`, not `from`/`to`: those keys mean
+        // a lifecycle status transition everywhere else in the trail, and
+        // reusing them here made a stage change look like a status change.
+        metadata: { fromStage: run.progressStage, toStage: input.stage, percent: input.percent ?? null },
       });
     }
   });

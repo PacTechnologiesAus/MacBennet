@@ -320,6 +320,13 @@ export const auditEvents = pgTable(
   'audit_events',
   {
     id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    /**
+     * Authoritative ordering key. `ts` alone is not sufficient: several events
+     * are written inside one transaction, and clock values can tie. `seq` is
+     * allocated at INSERT time, so it always reflects the order things actually
+     * happened — which is what makes the trail replayable.
+     */
+    seq: bigserial('seq', { mode: 'number' }).notNull(),
     ts: timestamp('ts', { withTimezone: true }).notNull().defaultNow(),
     actorType: enumText('actor_type', ACTOR_TYPES).notNull(),
     actorId: uuid('actor_id'),
