@@ -2,6 +2,8 @@ import type { FastifyBaseLogger } from 'fastify';
 import { markStaleWorkersOffline } from '../services/workers.js';
 import { stopRunsPastOvernightCutoff } from '../services/runs.js';
 import { requestRotationForAgedTokens } from '../services/worker-credentials.js';
+import { nightShiftTick } from '../services/night-shift.js';
+import { deliverPendingMondayWrites } from '../services/monday/outbox.js';
 
 /**
  * Two periodic tasks, run in-process with setInterval.
@@ -17,6 +19,17 @@ const HEARTBEAT_SWEEP_MS = 15_000;
 const CUTOFF_SWEEP_MS = 30_000;
 /** Credential age is a slow-moving property; checking it often would be noise. */
 const CREDENTIAL_SWEEP_MS = 5 * 60_000;
+/**
+ * The night-shift loop.
+ *
+ * A third `setInterval` next to the two Sprint 1 already runs, for the same
+ * reasons: the tick is idempotent, cheap, and safe to miss. Introducing a queue
+ * or a workflow engine for it would be exactly the premature complexity spec
+ * §31 warns against.
+ */
+const NIGHT_TICK_MS = 30_000;
+/** The monday.com outbox. Fast enough that a board looks live to a human. */
+const MONDAY_SWEEP_MS = 10_000;
 
 export interface Sweepers {
   stop: () => void;
@@ -24,6 +37,8 @@ export interface Sweepers {
   sweepWorkers: () => Promise<string[]>;
   sweepCutoffs: () => Promise<string[]>;
   sweepCredentials: () => Promise<string[]>;
+  tickNightShift: () => Promise<unknown>;
+  deliverMondayWrites: () => Promise<unknown>;
 }
 
 export function startSweepers(logger: FastifyBaseLogger): Sweepers {
@@ -59,23 +74,53 @@ export function startSweepers(logger: FastifyBaseLogger): Sweepers {
     return flagged;
   };
 
+  /**
+   * One turn of the night-shift loop.
+   *
+   * Serialised with a guard flag rather than by a lock: two overlapping ticks
+   * would both see the same idle worker and could both start a task, and the
+   * cheapest way to prevent that is not to have two.
+   */
+  let ticking = false;
+  const tickNightShift = async (): Promise<unknown> => {
+    if (ticking) return { decision: 'skipped_overlapping_tick' };
+    ticking = true;
+    try {
+      const result = await nightShiftTick();
+      if (result.decision !== 'no_shift' && result.decision !== 'continue') {
+        logger.info({ nightShift: result }, 'night-shift decision');
+      }
+      return result;
+    } finally {
+      ticking = false;
+    }
+  };
+
+  const deliverMondayWrites = async (): Promise<unknown> => {
+    const result = await deliverPendingMondayWrites();
+    if (result.dead > 0 || result.refused > 0) {
+      logger.warn({ monday: result }, 'monday.com writes were refused or dead-lettered');
+    }
+    return result;
+  };
+
   const workerTimer = setInterval(guarded(sweepWorkers, 'heartbeat'), HEARTBEAT_SWEEP_MS);
   const cutoffTimer = setInterval(guarded(sweepCutoffs, 'cutoff'), CUTOFF_SWEEP_MS);
   const credentialTimer = setInterval(guarded(sweepCredentials, 'credential'), CREDENTIAL_SWEEP_MS);
+  const nightTimer = setInterval(guarded(tickNightShift, 'night-shift'), NIGHT_TICK_MS);
+  const mondayTimer = setInterval(guarded(deliverMondayWrites, 'monday-outbox'), MONDAY_SWEEP_MS);
 
   // Do not hold the process open purely for a sweep.
-  workerTimer.unref();
-  cutoffTimer.unref();
-  credentialTimer.unref();
+  for (const timer of [workerTimer, cutoffTimer, credentialTimer, nightTimer, mondayTimer]) timer.unref();
 
   return {
     stop: () => {
-      clearInterval(workerTimer);
-      clearInterval(cutoffTimer);
-      clearInterval(credentialTimer);
+      for (const timer of [workerTimer, cutoffTimer, credentialTimer, nightTimer, mondayTimer]) clearInterval(timer);
     },
     sweepWorkers,
     sweepCutoffs,
     sweepCredentials,
+    tickNightShift,
+    deliverMondayWrites,
   };
 }

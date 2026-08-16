@@ -28,6 +28,31 @@ const envSchema = z.object({
   SEED_ADMIN_PASSWORD: z.string().min(8).optional(),
   SEED_ADMIN_NAME: z.string().optional(),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+
+  // --- Sprint 3 -------------------------------------------------------------
+  //
+  // Every credential below lives ONLY in the control plane. None is sent to the
+  // worker, written to the database, or reachable from a sandboxed agent, whose
+  // environment is built from empty rather than filtered.
+
+  /** monday.com API token. Absent means the fake provider, which is inert. */
+  MONDAY_API_TOKEN: z.string().optional(),
+  /** Mac's own monday.com user id, so he can assign work to himself. */
+  MONDAY_MAC_USER_ID: z.string().optional(),
+
+  /** Microsoft Graph, for sending from Mac's real PAC Technologies mailbox. */
+  MAC_MAIL_TENANT_ID: z.string().optional(),
+  MAC_MAIL_CLIENT_ID: z.string().optional(),
+  MAC_MAIL_CLIENT_SECRET: z.string().optional(),
+  /** The mailbox Mac sends as. Must be one the app registration may send from. */
+  MAC_MAIL_FROM: z.string().optional(),
+
+  /** Model provider for the optional model-backed resolvers. Off by default. */
+  ANTHROPIC_API_KEY: z.string().optional(),
+  MAC_MODEL_NAME: z.string().default('claude-sonnet-5'),
+
+  /** Base URL used in report links back to the Mac UI. */
+  MAC_APP_URL: z.string().default('http://localhost:5173'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -78,6 +103,23 @@ export const config = Object.freeze({
   repoRoot,
   /** Hard ceiling on request bodies. The worker is a semi-trusted client. */
   bodyLimitBytes: 256 * 1024,
+
+  // --- Sprint 3 ---
+  appUrl: env.MAC_APP_URL.replace(/\/+$/, ''),
+  monday: {
+    token: env.MONDAY_API_TOKEN,
+    macUserId: env.MONDAY_MAC_USER_ID,
+  },
+  mail: {
+    tenantId: env.MAC_MAIL_TENANT_ID,
+    clientId: env.MAC_MAIL_CLIENT_ID,
+    clientSecret: env.MAC_MAIL_CLIENT_SECRET,
+    from: env.MAC_MAIL_FROM,
+  },
+  model: {
+    apiKey: env.ANTHROPIC_API_KEY,
+    name: env.MAC_MODEL_NAME,
+  },
 });
 
 export type Config = typeof config;

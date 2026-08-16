@@ -212,7 +212,6 @@ function makeAssignment(overrides: Partial<CodingAssignment> = {}): RunAssignmen
         acceptanceCriteria: [],
         testingExpectations: [],
         implementationConsiderations: [],
-        dependencies: [],
         openQuestions: [],
         assumptions: [],
         risks: [],
