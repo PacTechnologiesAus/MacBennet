@@ -31,15 +31,19 @@ import {
 
 /**
  * Enumerations are expressed as text columns with CHECK constraints rather than
- * Postgres ENUM types. Adding a value to a Postgres ENUM is awkward inside a
- * transaction and cannot be removed at all; a CHECK constraint is a one-line
- * migration in either direction. The authoritative list still lives in
- * @mac/protocol, and the constraint is generated from it, so they cannot drift.
+ * Postgres ENUM types: adding a value to a Postgres ENUM is awkward inside a
+ * transaction and it can never be removed, whereas a CHECK is a one-line
+ * migration in either direction.
+ *
+ * The CHECK constraints themselves live in the hand-written migrations, so the
+ * enum lists are necessarily duplicated between here and `drizzle/*.sql`. That
+ * duplication is made safe by `ENUM_CHECKS` below plus the schema-parity test,
+ * which fails if the two ever disagree.
+ *
+ * `values` is not used to build the column — it is passed so each declaration
+ * names, at the point of use, which enum the column is constrained to.
  */
-const enumText = (name: string, values: readonly string[]) => text(name);
-
-const checkIn = (column: string, values: readonly string[]) =>
-  sql.raw(`${column} IN (${values.map((v) => `'${v}'`).join(', ')})`);
+const enumText = (name: string, _values: readonly string[]) => text(name);
 
 export const users = pgTable(
   'users',
@@ -376,5 +380,3 @@ export const ENUM_CHECKS: Array<{ table: string; column: string; values: readonl
   { table: 'audit_events', column: 'actor_type', values: ACTOR_TYPES },
   { table: 'audit_events', column: 'event_type', values: AUDIT_EVENT_TYPES },
 ];
-
-export { checkIn };

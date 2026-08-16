@@ -627,3 +627,33 @@ Avoided: no managed-cloud primitives (no Lambda/Cloud Run/SQS/Firebase), no prop
 ### 26.6 Verdict
 
 The design covers every Sprint 1 requirement in spec §32 and every item in the implementation brief. Nothing in it is built for a system larger than the one described. Proceeding to implementation.
+
+---
+
+## 27. Implementation notes — where reality differed from this design
+
+Written *after* implementation, so this document describes what was built rather than only what was intended. Each item below is a change the design above did not anticipate, and every one was found by a test or by driving the real UI.
+
+### 27.1 Defects found during implementation
+
+| # | Defect | Fix |
+|---|---|---|
+| D-1 | **Audit events for rejected actions were rolled back with the transaction that produced them.** A blocked approval or an invalid transition wrote its audit event inside the transaction that then threw, so the record of the refusal vanished along with the refusal. | `recordRejection()` writes these events on a separate connection. This is the single most important correction in the sprint: without it, the trail silently omitted every attempt that was denied. |
+| D-2 | **Audit events written in one transaction shared a timestamp** (`now()` is transaction-start time), leaving their order to a random UUID tiebreak. `run.approved` and `run.queued` could be reported in either order. | Migration `0003` adds a `bigserial seq`, allocated at INSERT, as the authoritative ordering key; `ts` now defaults to `clock_timestamp()`. |
+| D-3 | **Fastify plugin errors were reported as 500.** A working rate limiter surfaced as a server crash, because the error handler only understood its own error types. | The handler now passes through any 4xx `statusCode` a plugin raises. |
+| D-4 | **The log poll cursor could not advance over both log spaces.** Worker lines use ascending non-negative sequences and control-plane notes descending negative ones, so no single `seq` watermark covered both — a UI polling on `seq` would never have seen system notes. | The cursor is the insertion-ordered row `id`; `seq` remains the deduplication key. |
+| D-5 | **The log-buffer overflow marker could evict a real line**, incrementing the drop count again and emitting a further marker — a small cascade consuming the log it was annotating. | The marker is placed at the front of the buffer and bypasses the capacity check. |
+| D-6 | **`TRUNCATE` bypassed the audit-immutability trigger**, because row-level `BEFORE DELETE` triggers do not fire for it. The append-only guarantee had a hole. | Migration `0002` adds a statement-level `BEFORE TRUNCATE` trigger. |
+| D-7 | **CSS matched `input[type="text"]`,** which does not match an `<input>` with no `type` attribute; several form fields rendered unstyled and half-width. | Matched by exclusion instead. |
+| D-8 | **Worker-authored audit events were labelled `worker:<uuid>`** rather than the worker's name, making the trail harder to read than it needed to be. | The worker name is threaded into progress and completion. Locked in by a test. |
+
+### 27.2 Design changes made during implementation
+
+- **drizzle-kit was dropped.** Its CJS loader could not resolve the ESM protocol package, and it cannot generate the CHECK constraints or the audit triggers anyway. Migrations are hand-written plain SQL — more portable, and the artefact a reviewer actually reads. The cost is duplicated enum lists, which the schema-parity test makes safe.
+- **`checkDispatch` is now genuinely called.** It was written and unit-tested but the lease path re-implemented the checks piecemeal, leaving a tested-but-unused function. It now runs against the selected row as defence in depth behind the SQL predicate, so the guardrail module is the single definition of the rules and the SQL is an optimisation of them.
+- **A dead `sql.raw` helper was removed** from the schema. It was unused after the migration change, and an unused raw-SQL string builder is precisely what someone later reaches for with user input.
+- **Login rate limiting is injectable** (`buildApp({ authRateLimitMax })`). The suite logs in dozens of times from one IP; rather than disable the limiter under test, one dedicated test builds an app with a low limit and asserts it returns 429.
+
+### 27.3 Verified end to end in a browser
+
+Beyond the automated suite, the full loop was driven manually against a real worker process: project and task created, a 45-second `sleep` run created and confirmed **undispatchable while unapproved**, then approved, dispatched, observed streaming logs and progress, and stopped remotely — the abort reached the worker in approximately one second and the audit trail recorded every transition with correct human-versus-machine attribution.

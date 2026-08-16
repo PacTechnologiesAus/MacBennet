@@ -15,7 +15,7 @@ import type { RunRow } from '../db/schema.js';
 import { AppError, GuardrailError } from '../http/errors.js';
 import { assertTransition, IMMEDIATELY_CANCELLABLE, REQUIRES_WORKER_CANCEL } from '../domain/run-lifecycle.js';
 import { checkApprovalConfidence, parseConfidence } from '../domain/confidence.js';
-import { checkJobAllowed, checkWorkerCapability } from '../domain/guardrails.js';
+import { checkDispatch, checkJobAllowed } from '../domain/guardrails.js';
 import { nextCutoffAfter } from '../domain/overnight.js';
 import { getSettings, toConfidencePolicy, toCutoffConfig } from './settings.js';
 import { recordedSpendForWindow } from './budget.js';
@@ -470,8 +470,44 @@ export async function leaseNextRun(
       return null;
     }
 
-    const capability = checkWorkerCapability(capabilities, candidate.jobKind);
-    if (!capability.ok) return null;
+    /*
+     * Defence in depth: re-run the ENTIRE dispatch guardrail set against the
+     * row we actually selected.
+     *
+     * The SQL predicate above already excludes unapproved, cancelled and
+     * past-cutoff runs, so in normal operation this always passes. It exists
+     * because the two must never be able to disagree: if someone edits the
+     * query and drops a predicate, this catches it rather than silently
+     * dispatching work no human approved. The guardrail module is the single
+     * definition of the rules; the SQL is an optimisation of them.
+     */
+    const verdict = checkDispatch({
+      run: {
+        status: candidate.status as RunStatus,
+        approvalState: candidate.approvalState as RunDto['approvalState'],
+        cancelRequestedAt: candidate.cancelRequestedAt,
+        overnightDeadlineAt: candidate.overnightDeadlineAt,
+        jobKind: candidate.jobKind,
+        jobParams: candidate.jobParams,
+      },
+      workerCapabilities: capabilities,
+      budget: {
+        recordedSpendCents: spend.recordedSpendCents,
+        nightlyBudgetCents: settings.nightlyBudgetCents,
+        budgetStopPct: settings.budgetStopPct,
+      },
+      now,
+    });
+
+    if (!verdict.ok) {
+      await record(tx, {
+        actor: SYSTEM_ACTOR,
+        eventType: 'guardrail.blocked',
+        context: { runId: candidate.id, taskId: candidate.taskId, workerId: worker.id },
+        metadata: { guardrail: 'dispatch', code: verdict.code, reason: verdict.message },
+      });
+      return null;
+    }
 
     const leaseExpiresAt = new Date(now.getTime() + LEASE_SECONDS * 1000);
     const updated = await transition(tx, {
