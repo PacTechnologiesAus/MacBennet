@@ -1,0 +1,12 @@
+# Normalise line endings so the repository is identical on Windows and Linux.
+* text=auto eol=lf
+
+# These are executed inside a Linux container / on the worker VM. CRLF would
+# break the shebang, so they must stay LF regardless of platform.
+*.sh text eol=lf
+*.sql text eol=lf
+
+# Never mangle binaries.
+*.png binary
+*.jpg binary
+*.ico binary

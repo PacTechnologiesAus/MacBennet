@@ -189,6 +189,15 @@ export interface ApprovalDto {
 }
 
 export interface RunLogDto {
+  /**
+   * Insertion-ordered row id, and the cursor the UI polls with.
+   *
+   * `seq` cannot serve as the cursor: worker lines use ascending non-negative
+   * sequences while control-plane notes use descending negative ones (so the
+   * two can never collide), which means no single `seq` watermark covers both.
+   * The row id is monotonic across both spaces.
+   */
+  id: number;
   seq: number;
   ts: string;
   stream: z.infer<typeof logStreamSchema>;
