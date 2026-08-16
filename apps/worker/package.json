@@ -1,0 +1,19 @@
+{
+  "name": "@mac/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mac Bennett worker agent — runs on a dedicated Linux VM",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mac/protocol": "*",
+    "dotenv": "^16.4.7",
+    "zod": "^3.23.8"
+  }
+}

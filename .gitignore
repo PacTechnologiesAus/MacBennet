@@ -6,3 +6,5 @@ dist/
 coverage/
 .vite/
 .DS_Store
+.mac-worker-state.json
+workspace/
