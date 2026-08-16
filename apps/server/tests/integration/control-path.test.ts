@@ -160,8 +160,14 @@ describe('run creation', () => {
     const response = await api().get('/api/job-catalogue');
     expect(response.statusCode).toBe(200);
     const kinds = response.json().jobs.map((j: { kind: string }) => j.kind);
-    expect(kinds).toEqual(['noop', 'echo', 'sleep', 'system_info', 'workspace_check', 'fail']);
-    // The protocol has no field in which a command could even be expressed.
+    expect(kinds).toEqual([
+      'noop', 'echo', 'sleep', 'system_info', 'workspace_check', 'fail',
+      // Sprint 2. These execute processes, but they are still a CLOSED
+      // allowlist: their parameters are identifiers the control plane resolves,
+      // never a command, a script, a path or an argument list.
+      'claude_code', 'repo_inspect',
+    ]);
+    // The protocol still has no field in which a command could be expressed.
     expect(kinds.some((k: string) => /shell|exec|command|bash/.test(k))).toBe(false);
   });
 });

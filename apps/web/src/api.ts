@@ -1,7 +1,16 @@
 import type {
+  AgentQuestionDto,
   ApprovalDto,
   AuditEventDto,
+  BriefDto,
   BudgetStatusDto,
+  CodingRunDetailDto,
+  CreateCodingRunRequest,
+  CreateRepositoryRequest,
+  DiscoverySessionDto,
+  MorningReportDto,
+  RepositoryDto,
+  StartDiscoveryRequest,
   CreateProjectRequest,
   CreateRunRequest,
   CreateTaskRequest,
@@ -120,6 +129,35 @@ export const api = {
   createEnrollmentToken: (label: string, expiresInHours: number) =>
     post<{ token: EnrollmentTokenDto }>('/api/worker-enrollment-tokens', { label, expiresInHours }),
   listEnrollmentTokens: () => get<{ tokens: EnrollmentTokenDto[] }>('/api/worker-enrollment-tokens'),
+
+  // --- Repositories (Sprint 2) --------------------------------------------
+  listRepositories: (projectId?: string) =>
+    get<{ repositories: RepositoryDto[] }>(`/api/repositories${projectId ? `?projectId=${projectId}` : ''}`),
+  createRepository: (body: CreateRepositoryRequest) =>
+    post<{ repository: RepositoryDto }>('/api/repositories', body),
+  approveRepository: (id: string, approved: boolean, notes?: string) =>
+    post<{ repository: RepositoryDto }>(`/api/repositories/${id}/approve`, { approved, notes }),
+
+  // --- Discovery and briefs (Sprint 2) -------------------------------------
+  listDiscovery: (projectId?: string) =>
+    get<{ sessions: DiscoverySessionDto[] }>(`/api/discovery${projectId ? `?projectId=${projectId}` : ''}`),
+  getDiscovery: (id: string) => get<{ session: DiscoverySessionDto }>(`/api/discovery/${id}`),
+  startDiscovery: (body: StartDiscoveryRequest) =>
+    post<{ session: DiscoverySessionDto }>('/api/discovery', body),
+  sendDiscoveryMessage: (id: string, message: string) =>
+    post<{ session: DiscoverySessionDto }>(`/api/discovery/${id}/messages`, { message }),
+  generateBrief: (id: string) =>
+    post<{ session: DiscoverySessionDto; brief: BriefDto }>(`/api/discovery/${id}/brief`, {}),
+  getBrief: (id: string) => get<{ brief: BriefDto }>(`/api/briefs/${id}`),
+  getTaskBrief: (taskId: string) => get<{ brief: BriefDto | null }>(`/api/tasks/${taskId}/brief`),
+
+  // --- Coding runs (Sprint 2) ----------------------------------------------
+  createCodingRun: (body: CreateCodingRunRequest) => post<{ run: RunDto }>('/api/coding-runs', body),
+  getCodingRun: (id: string) => get<{ detail: CodingRunDetailDto }>(`/api/runs/${id}/coding`),
+  getRunQuestions: (id: string) => get<{ questions: AgentQuestionDto[] }>(`/api/runs/${id}/questions`),
+  getRunReport: (id: string) => get<{ report: MorningReportDto }>(`/api/runs/${id}/report`),
+  listReports: (since?: string) =>
+    get<{ reports: MorningReportDto[] }>(`/api/reports${since ? `?since=${since}` : ''}`),
 
   // --- Settings, budget, audit -------------------------------------------
   getSettings: () => get<{ settings: SettingsDto }>('/api/settings'),

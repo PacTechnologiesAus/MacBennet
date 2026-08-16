@@ -37,7 +37,14 @@ export async function resetDatabase(): Promise<void> {
   await db.execute(sql`
     TRUNCATE TABLE
       run_logs, run_usage, approvals, runs, tasks, projects,
-      worker_enrollment_tokens, workers, sessions, users
+      worker_enrollment_tokens, workers, sessions, users,
+      -- Sprint 2. Most of these would be reached by the CASCADE above, but
+      -- globally scoped memory has no foreign key to anything and would
+      -- otherwise leak between tests.
+      repositories, worktrees, handoff_briefs, discovery_sessions,
+      agent_sessions, agent_questions, run_assumptions, run_blockers,
+      git_violations, run_reviews, pull_requests, usage_snapshots,
+      run_reports, memory_entries
     RESTART IDENTITY CASCADE
   `);
   /*

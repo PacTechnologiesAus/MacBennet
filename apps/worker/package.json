@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Mac Bennett worker agent — runs on a dedicated Linux VM",
+  "description": "Mac Bennett worker agent \u2014 runs on a dedicated Linux VM",
   "main": "./src/worker.ts",
   "types": "./src/worker.ts",
   "exports": {
@@ -11,7 +11,14 @@
     "./config": "./src/config.ts",
     "./logger": "./src/logger.ts",
     "./log-buffer": "./src/log-buffer.ts",
-    "./jobs": "./src/jobs/index.ts"
+    "./jobs": "./src/jobs/index.ts",
+    "./git": "./src/git/git-runner.ts",
+    "./git/worktree": "./src/git/worktree.ts",
+    "./git/shim": "./src/git/shim.ts",
+    "./coding/mock-agent": "./src/coding/mock-agent.ts",
+    "./coding/claude-code-adapter": "./src/coding/claude-code-adapter.ts",
+    "./coding/pull-request": "./src/coding/pull-request.ts",
+    "./testing/test-runner": "./src/testing/test-runner.ts"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",

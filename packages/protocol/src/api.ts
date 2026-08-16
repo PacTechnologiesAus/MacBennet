@@ -14,6 +14,17 @@ import {
   workerStatusSchema,
 } from './enums.js';
 import { jobKindSchema } from './jobs.js';
+import { handoffBriefContentSchema, scopeKindSchema } from './brief.js';
+import { usageSourceSchema } from './usage.js';
+import {
+  decisionRiskSchema,
+  discoveryStatusSchema,
+  memoryScopeSchema,
+  reviewVerdictSchema,
+  riskLevelSchema,
+  worktreeStatusSchema,
+} from './enums.js';
+import { agentAnswerDecisionSchema, agentSessionStateSchema, codingAgentProviderSchema } from './coding-agent.js';
 
 /**
  * Request and response contracts for the human-facing API.
@@ -288,6 +299,16 @@ export const updateSettingsRequestSchema = z
     budgetStopPct: z.number().int().min(1).max(200).optional(),
     heartbeatIntervalSeconds: z.number().int().min(1).max(600).optional(),
     heartbeatGraceSeconds: z.number().int().min(1).max(3600).optional(),
+    // --- Sprint 2 ---
+    /** Soft threshold on non-exact usage. Warns; stops only if explicitly enabled. */
+    softUsageThresholdPct: z.number().int().min(1).max(100).optional(),
+    softUsageStopsExecution: z.boolean().optional(),
+    /** Master switch for delegating work to a coding agent. */
+    codingAgentEnabled: z.boolean().optional(),
+    maxAgentMinutes: z.number().int().min(1).max(720).optional(),
+    maxQuestionsPerRun: z.number().int().min(0).max(200).optional(),
+    /** Confidence at or above which Mac answers a question rather than assuming. */
+    answerConfidenceThreshold: confidenceSchema.optional(),
   })
   .strict();
 export type UpdateSettingsRequest = z.infer<typeof updateSettingsRequestSchema>;
@@ -303,6 +324,12 @@ export interface SettingsDto {
   budgetStopPct: number;
   heartbeatIntervalSeconds: number;
   heartbeatGraceSeconds: number;
+  softUsageThresholdPct: number;
+  softUsageStopsExecution: boolean;
+  codingAgentEnabled: boolean;
+  maxAgentMinutes: number;
+  maxQuestionsPerRun: number;
+  answerConfidenceThreshold: number;
   updatedAt: string;
 }
 
@@ -318,11 +345,415 @@ export interface BudgetStatusDto {
   windowStart: string;
   windowEnd: string;
   /**
-   * False for the whole of Sprint 1 — no provider cost integration exists yet.
-   * Spec §25 forbids presenting an estimate as exact provider usage, so the UI
-   * shows "Provider usage unavailable" rather than a fabricated number.
+   * Whether any provider usage at all was recorded for this window. Spec §25
+   * forbids presenting an estimate as exact provider usage, so when this is
+   * false the UI shows "Provider usage unavailable" rather than a zero that
+   * looks like a measurement.
    */
   providerUsageAvailable: boolean;
+  /**
+   * Sprint 2 §17. A dollar budget is only genuinely enforceable when exact
+   * monetary cost is available. Under subscription access it is not, and the UI
+   * must not imply otherwise.
+   */
+  costEnforceable: boolean;
+  /** The weakest source among usage recorded in this window. */
+  usageSource: z.infer<typeof usageSourceSchema>;
+  /** Non-exact usage against the soft threshold, reported with its uncertainty. */
+  softUsage: {
+    thresholdPct: number;
+    observedPct: number | null;
+    estimatedSpendCents: number;
+    warning: boolean;
+    note: string;
+  };
+}
+
+// --- Repositories (Sprint 2) -----------------------------------------------
+
+/**
+ * `testCommand` and `buildCommand` are argv ARRAYS, not strings.
+ *
+ * This is the one place a project-specific command enters the system, so it is
+ * bounded on every axis that matters: admin-only to set, audited on change,
+ * executed with `shell: false`, and validated to reject anything that looks
+ * like shell syntax. A pipeline, a redirect or a `;` cannot be expressed here.
+ */
+export const commandArgvSchema = z
+  .array(z.string().min(1).max(300))
+  .max(30)
+  .refine((argv) => argv.every((a) => !/[;&|`$><\n\r]/.test(a)), {
+    message: 'Command arguments must not contain shell metacharacters; this is an argv array, not a shell command.',
+  });
+
+export const createRepositoryRequestSchema = z.object({
+  projectId: z.string().uuid(),
+  name: z.string().min(1).max(150),
+  remoteUrl: z.string().min(1).max(500),
+  /** Absolute path of the clone on the worker VM. Admin-configured. */
+  localPath: z.string().min(1).max(1000),
+  defaultBranch: z.string().min(1).max(100).default('main'),
+  remoteName: z.string().min(1).max(60).default('origin'),
+  testCommand: commandArgvSchema.default([]),
+  buildCommand: commandArgvSchema.default([]),
+});
+export type CreateRepositoryRequest = z.infer<typeof createRepositoryRequestSchema>;
+
+export const updateRepositoryRequestSchema = createRepositoryRequestSchema
+  .omit({ projectId: true })
+  .partial()
+  .strict();
+export type UpdateRepositoryRequest = z.infer<typeof updateRepositoryRequestSchema>;
+
+export const approveRepositoryRequestSchema = z.object({
+  approved: z.boolean(),
+  notes: z.string().max(1000).optional(),
+});
+export type ApproveRepositoryRequest = z.infer<typeof approveRepositoryRequestSchema>;
+
+export interface RepositoryDto {
+  id: string;
+  projectId: string;
+  name: string;
+  remoteUrl: string;
+  localPath: string;
+  defaultBranch: string;
+  remoteName: string;
+  isApproved: boolean;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  lastFetchedAt: string | null;
+  lastKnownDefaultSha: string | null;
+  testCommand: string[];
+  buildCommand: string[];
+  /** Worktrees Mac currently holds against this repository. */
+  activeWorktrees: WorktreeDto[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorktreeDto {
+  id: string;
+  runId: string;
+  repositoryId: string;
+  path: string;
+  branch: string;
+  baseBranch: string;
+  baseSha: string;
+  headSha: string | null;
+  commitCount: number;
+  status: z.infer<typeof worktreeStatusSchema>;
+  createdAt: string;
+  releasedAt: string | null;
+  removedAt: string | null;
+}
+
+// --- Discovery and briefs (Sprint 2) ---------------------------------------
+
+export const startDiscoveryRequestSchema = z.object({
+  /** Explicit. Mac never infers the project when several are available. */
+  projectId: z.string().uuid(),
+  /** An existing task, or a title from which one is created. */
+  taskId: z.string().uuid().optional(),
+  title: z.string().min(1).max(200).optional(),
+});
+export type StartDiscoveryRequest = z.infer<typeof startDiscoveryRequestSchema>;
+
+export const discoveryMessageRequestSchema = z.object({
+  /** The human talking freely. Mac listens; he does not impose a form. */
+  message: z.string().min(1).max(20000),
+});
+export type DiscoveryMessageRequest = z.infer<typeof discoveryMessageRequestSchema>;
+
+export interface DiscoveryMessageDto {
+  role: 'human' | 'mac';
+  message: string;
+  at: string;
+  /** Set when this Mac turn was a gap-analysis question. */
+  questionId?: string;
+}
+
+export interface DiscoverySessionDto {
+  id: string;
+  projectId: string;
+  projectName: string;
+  taskId: string;
+  taskTitle: string;
+  status: z.infer<typeof discoveryStatusSchema>;
+  messages: DiscoveryMessageDto[];
+  contextSummary: string | null;
+  contextInspectedAt: string | null;
+  briefId: string | null;
+  /** The single next question Mac wants answered. One at a time, per spec §4. */
+  pendingQuestion: { id: string; question: string; dimension: string } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const generateBriefRequestSchema = z.object({
+  /** Optional operator edits applied on top of what Mac derived. */
+  overrides: handoffBriefContentSchema.partial().optional(),
+});
+export type GenerateBriefRequest = z.infer<typeof generateBriefRequestSchema>;
+
+export const updateBriefRequestSchema = z.object({
+  content: handoffBriefContentSchema.partial(),
+});
+export type UpdateBriefRequest = z.infer<typeof updateBriefRequestSchema>;
+
+export const answerBriefQuestionRequestSchema = z.object({
+  questionId: z.string().min(1).max(80),
+  answer: z.string().min(1).max(4000),
+});
+export type AnswerBriefQuestionRequest = z.infer<typeof answerBriefQuestionRequestSchema>;
+
+export interface CompletenessDto {
+  dimension: string;
+  satisfied: boolean;
+  weight: number;
+  /** Non-null when the repository can answer it, so Mac must not ask the human. */
+  discoverableFrom: string[];
+  question: string;
+}
+
+export interface BriefDto {
+  id: string;
+  taskId: string;
+  projectId: string;
+  version: number;
+  status: string;
+  content: z.infer<typeof handoffBriefContentSchema>;
+  markdown: string;
+  confidence: number;
+  confidenceBand: string;
+  completeness: CompletenessDto[];
+  /** What Mac may execute at this confidence, and whether the human must approve a narrower scope. */
+  executionAdvice: {
+    executionPermitted: boolean;
+    scopeKind: z.infer<typeof scopeKindSchema>;
+    requiresExplicitScopeApproval: boolean;
+    message: string;
+  };
+  contextSummary: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// --- Coding runs (Sprint 2) ------------------------------------------------
+
+export const createCodingRunRequestSchema = z.object({
+  taskId: z.string().uuid(),
+  repositoryId: z.string().uuid(),
+  briefId: z.string().uuid(),
+  provider: codingAgentProviderSchema.default('claude_code'),
+  executionMode: executionModeSchema.default('interactive'),
+  maxMinutes: z.number().int().min(1).max(720).default(60),
+  openPullRequest: z.boolean().default(true),
+});
+export type CreateCodingRunRequest = z.infer<typeof createCodingRunRequestSchema>;
+
+export interface AgentSessionDto {
+  id: string;
+  runId: string;
+  provider: z.infer<typeof codingAgentProviderSchema>;
+  providerSessionId: string | null;
+  providerVersion: string | null;
+  model: string | null;
+  state: z.infer<typeof agentSessionStateSchema>;
+  currentActivity: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  error: string | null;
+}
+
+export interface AgentQuestionDto {
+  id: string;
+  runId: string;
+  seq: number;
+  question: string;
+  answer: string | null;
+  decision: z.infer<typeof agentAnswerDecisionSchema> | null;
+  confidence: number | null;
+  reasoning: string | null;
+  sources: string[];
+  risk: z.infer<typeof decisionRiskSchema>;
+  requiredHuman: boolean;
+  affectedImplementation: boolean;
+  askedAt: string;
+  answeredAt: string | null;
+}
+
+export interface RunAssumptionDto {
+  id: string;
+  runId: string;
+  statement: string;
+  confidence: number;
+  reversible: boolean;
+  /** True when it must be surfaced prominently — below the autonomy threshold. */
+  flagged: boolean;
+  source: string | null;
+  createdAt: string;
+}
+
+export interface RunBlockerDto {
+  id: string;
+  runId: string;
+  description: string;
+  reason: string;
+  risk: z.infer<typeof decisionRiskSchema>;
+  resolved: boolean;
+  createdAt: string;
+}
+
+export interface GitViolationDto {
+  id: string;
+  runId: string;
+  code: string;
+  argv: string[];
+  message: string;
+  origin: 'mac' | 'agent';
+  at: string;
+}
+
+export interface RunReviewDto {
+  id: string;
+  runId: string;
+  verdict: z.infer<typeof reviewVerdictSchema>;
+  riskLevel: z.infer<typeof riskLevelSchema>;
+  satisfiesBrief: boolean;
+  acceptanceCriteriaMet: boolean;
+  unexpectedScope: boolean;
+  humanAttentionRequired: boolean;
+  prRecommended: boolean;
+  prDeclineReason: string | null;
+  anomalies: string[];
+  evidence: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface PullRequestDto {
+  id: string;
+  runId: string;
+  provider: string;
+  number: number | null;
+  url: string;
+  title: string;
+  branch: string;
+  baseBranch: string;
+  createdAt: string;
+}
+
+export interface CodingRunDetailDto {
+  run: RunDto;
+  repository: RepositoryDto | null;
+  worktree: WorktreeDto | null;
+  brief: BriefDto | null;
+  session: AgentSessionDto | null;
+  questions: AgentQuestionDto[];
+  assumptions: RunAssumptionDto[];
+  blockers: RunBlockerDto[];
+  violations: GitViolationDto[];
+  review: RunReviewDto | null;
+  pullRequest: PullRequestDto | null;
+  usage: RunUsageSummaryDto;
+}
+
+// --- Usage (Sprint 2) ------------------------------------------------------
+
+export interface UsageSnapshotDto {
+  id: string;
+  runId: string;
+  provider: string;
+  phase: 'before' | 'after';
+  source: z.infer<typeof usageSourceSchema>;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheCreationTokens: number | null;
+  costCents: number | null;
+  percentUsed: number | null;
+  state: string | null;
+  reportingPeriod: string | null;
+  note: string | null;
+  capturedAt: string;
+}
+
+export interface RunUsageSummaryDto {
+  provider: string | null;
+  /** The weakest source among the readings — never upgraded. */
+  source: z.infer<typeof usageSourceSchema>;
+  before: UsageSnapshotDto | null;
+  after: UsageSnapshotDto | null;
+  delta: {
+    inputTokens: number | null;
+    outputTokens: number | null;
+    cacheReadTokens: number | null;
+    cacheCreationTokens: number | null;
+    costCents: number | null;
+    percentUsedDelta: number | null;
+    meaningful: boolean;
+    note: string | null;
+  };
+  /** Display string; equals "Provider usage unavailable" when nothing is known. */
+  label: string;
+  /** True only when a monetary figure is exact and therefore enforceable. */
+  costEnforceable: boolean;
+}
+
+// --- Morning report (Sprint 2) ---------------------------------------------
+
+export interface MorningReportDto {
+  runId: string;
+  taskTitle: string;
+  projectName: string;
+  generatedAt: string;
+  /** Deliberately short. Engineers stop reading essays. */
+  whatChanged: string;
+  why: string;
+  risk: z.infer<typeof riskLevelSchema>;
+  riskRationale: string;
+  exceptions: string[];
+  decisionsNeeded: string[];
+  /** Only assumptions below the autonomy threshold reach this list. */
+  flaggedAssumptions: Array<{ statement: string; confidence: number }>;
+  questionsAnswered: number;
+  lowConfidenceAnswers: number;
+  /** Detailed Q&A lives behind this link, not in the report body. */
+  questionsLogUrl: string;
+  pullRequestUrl: string | null;
+  pullRequestDeclineReason: string | null;
+  estimatedHumanHours: number;
+  estimatedHumanHoursBasis: string;
+  usage: RunUsageSummaryDto;
+  outcome: string;
+  markdown: string;
+}
+
+// --- Memory (Sprint 2, spec §9) --------------------------------------------
+
+export const createMemoryRequestSchema = z.object({
+  scope: memoryScopeSchema,
+  projectId: z.string().uuid().nullable().optional(),
+  taskId: z.string().uuid().nullable().optional(),
+  key: z.string().min(1).max(200),
+  value: z.string().min(1).max(8000),
+  confidence: confidenceSchema.default(1),
+  source: z.string().max(300).optional(),
+});
+export type CreateMemoryRequest = z.infer<typeof createMemoryRequestSchema>;
+
+export interface MemoryEntryDto {
+  id: string;
+  scope: z.infer<typeof memoryScopeSchema>;
+  projectId: string | null;
+  taskId: string | null;
+  key: string;
+  value: string;
+  confidence: number;
+  source: string | null;
+  /** True once promoted from task memory into project memory after validation. */
+  promoted: boolean;
+  createdAt: string;
 }
 
 // --- Dashboard -------------------------------------------------------------

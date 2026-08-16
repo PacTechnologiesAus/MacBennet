@@ -1,16 +1,29 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { JobKind, JobSpec } from '@mac/protocol';
+import type { JobKind, JobSpec, RunAssignment } from '@mac/protocol';
+import type { ControlPlaneClient } from '../client.js';
 
 /**
- * The Sprint 1 job handlers.
+ * The job handlers.
  *
- * Read this file as a security boundary, not just a feature list. There is no
- * `child_process` import, no `exec`, no `eval`, no dynamic `import()`, and no
- * filesystem write outside the configured workspace. The protocol has no field
- * in which a command could be expressed, so there is nothing here to smuggle
- * one into.
+ * Read this file as a security boundary, not just a feature list.
+ *
+ * The Sprint 1 handlers below spawn nothing at all: no `child_process`, no
+ * `exec`, no `eval`, no dynamic `import()`, and no filesystem write outside the
+ * configured workspace.
+ *
+ * Sprint 2 adds two handlers that DO execute processes — `claude_code` and
+ * `repo_inspect` — and they are the reason to read the parameter schemas in
+ * `@mac/protocol/jobs.ts` carefully. Neither takes a command, a script, a path
+ * or an argument list. They take identifiers, which the control plane resolves
+ * against its own database into a repository and a brief. The commands actually
+ * run are fixed by worker code (git, the coding agent) or by admin-configured
+ * argv on the repository row (the project's own test command).
+ *
+ * So the protocol still has no field in which a shell command could be
+ * expressed, and adding a coding agent did not turn the worker into a remote
+ * shell.
  *
  * Every handler receives an AbortSignal and is expected to honour it promptly —
  * that is what makes remote cancellation real rather than advisory.
@@ -25,6 +38,15 @@ export interface JobContext {
   signal: AbortSignal;
   /** The worker's persistent workspace root. */
   workspace: string;
+  /**
+   * The full assignment and a control-plane client, supplied only for the
+   * repository job kinds. The Sprint 1 handlers neither receive nor need them,
+   * which keeps their "no I/O beyond the workspace" property intact.
+   */
+  assignment?: RunAssignment;
+  client?: ControlPlaneClient;
+  /** Test seams for the coding job: a mock agent, a recording PR gateway. */
+  codingOverrides?: Record<string, unknown>;
 }
 
 export interface JobResult {
@@ -152,7 +174,45 @@ const handlers: Record<JobKind, JobHandler> = {
     ctx.log(`fail: ${message}`, 'stderr');
     throw new Error(message);
   },
+
+  /**
+   * Sprint 2's coding job. Imported lazily so the Sprint 1 handlers — and the
+   * tests that cover them — never pull in git, process spawning or the coding
+   * adapters at all.
+   */
+  async claude_code(_params, ctx) {
+    const { assignment, client } = requireRepositoryContext(ctx, 'claude_code');
+    const { runCodingJob } = await import('./claude-code.js');
+    return runCodingJob(assignment, ctx, {
+      client,
+      ...(ctx.codingOverrides as Record<string, never> | undefined),
+    });
+  },
+
+  async repo_inspect(_params, ctx) {
+    const { assignment, client } = requireRepositoryContext(ctx, 'repo_inspect');
+    const { runRepoInspectJob } = await import('./repo-inspect.js');
+    return runRepoInspectJob(assignment, ctx, { client });
+  },
 };
+
+/**
+ * The repository jobs cannot run without the resolved assignment the control
+ * plane builds at lease time. Failing loudly here beats improvising a
+ * repository path from somewhere less trustworthy.
+ */
+function requireRepositoryContext(
+  ctx: JobContext,
+  kind: string,
+): { assignment: RunAssignment; client: ControlPlaneClient } {
+  if (!ctx.assignment || !ctx.client) {
+    throw new Error(`The "${kind}" job requires a run assignment and a control-plane client.`);
+  }
+  if (!ctx.assignment.coding) {
+    throw new Error(`The "${kind}" job requires an approved repository, and none was resolved for this run.`);
+  }
+  return { assignment: ctx.assignment, client: ctx.client };
+}
 
 export function getHandler(kind: string): JobHandler | null {
   return Object.prototype.hasOwnProperty.call(handlers, kind) ? handlers[kind as JobKind] : null;

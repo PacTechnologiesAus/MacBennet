@@ -4,6 +4,7 @@ import type { ApprovalDto, AuditEventDto, CurrentUser, RunDto, RunLogDto, Settin
 import { isTerminalRunStatus } from '@mac/protocol';
 import { api, ApiError } from '../api.js';
 import { Alert, ApprovalBadge, Badge, Confidence, Empty, Field, RunStatusBadge, Time, humanise } from '../components/ui.js';
+import { CodingRunPanels } from './CodingRun.js';
 
 /**
  * Run Detail.
@@ -267,6 +268,12 @@ export function RunDetail({ user }: { user: CurrentUser }) {
           Lines marked in italics are written by the control plane. Everything else came from the worker.
         </p>
       </div>
+
+      {/*
+        Sprint 2 panels. They render nothing at all for a run with no
+        repository, so a Sprint 1 job's page looks exactly as it did.
+      */}
+      {run && <CodingRunPanels runId={run.id} status={run.status} />}
 
       <div className="card">
         <h2>Audit events</h2>

@@ -25,6 +25,12 @@ export interface Settings {
   budgetStopPct: number;
   heartbeatIntervalSeconds: number;
   heartbeatGraceSeconds: number;
+  softUsageThresholdPct: number;
+  softUsageStopsExecution: boolean;
+  codingAgentEnabled: boolean;
+  maxAgentMinutes: number;
+  maxQuestionsPerRun: number;
+  answerConfidenceThreshold: number;
   updatedAt: Date;
 }
 
@@ -47,6 +53,12 @@ export async function getSettings(handle: DbHandle = db): Promise<Settings> {
     budgetStopPct: row.budgetStopPct,
     heartbeatIntervalSeconds: row.heartbeatIntervalSeconds,
     heartbeatGraceSeconds: row.heartbeatGraceSeconds,
+    softUsageThresholdPct: row.softUsageThresholdPct,
+    softUsageStopsExecution: row.softUsageStopsExecution,
+    codingAgentEnabled: row.codingAgentEnabled,
+    maxAgentMinutes: row.maxAgentMinutes,
+    maxQuestionsPerRun: row.maxQuestionsPerRun,
+    answerConfidenceThreshold: Number(row.answerConfidenceThreshold),
     updatedAt: row.updatedAt,
   };
 }
@@ -72,6 +84,12 @@ export const toSettingsDto = (s: Settings): SettingsDto => ({
   budgetStopPct: s.budgetStopPct,
   heartbeatIntervalSeconds: s.heartbeatIntervalSeconds,
   heartbeatGraceSeconds: s.heartbeatGraceSeconds,
+  softUsageThresholdPct: s.softUsageThresholdPct,
+  softUsageStopsExecution: s.softUsageStopsExecution,
+  codingAgentEnabled: s.codingAgentEnabled,
+  maxAgentMinutes: s.maxAgentMinutes,
+  maxQuestionsPerRun: s.maxQuestionsPerRun,
+  answerConfidenceThreshold: s.answerConfidenceThreshold,
   updatedAt: s.updatedAt.toISOString(),
 });
 
@@ -97,6 +115,17 @@ export async function updateSettings(
       throw AppError.badRequest(
         'INVALID_CONFIDENCE_POLICY',
         `Minimum execution confidence (${floor}) cannot exceed the autonomy threshold (${threshold}).`,
+      );
+    }
+
+    // The answering threshold governs when Mac stops answering outright and
+    // starts recording flagged assumptions. Below the execution floor it would
+    // mean "answer confidently on no evidence", which is exactly backwards.
+    const answerAt = patch.answerConfidenceThreshold ?? before.answerConfidenceThreshold;
+    if (answerAt < floor) {
+      throw AppError.badRequest(
+        'INVALID_CONFIDENCE_POLICY',
+        `The answering threshold (${answerAt}) cannot be below the minimum execution confidence (${floor}).`,
       );
     }
 
@@ -128,6 +157,14 @@ export async function updateSettings(
           heartbeatIntervalSeconds: patch.heartbeatIntervalSeconds,
         }),
         ...(patch.heartbeatGraceSeconds !== undefined && { heartbeatGraceSeconds: patch.heartbeatGraceSeconds }),
+        ...(patch.softUsageThresholdPct !== undefined && { softUsageThresholdPct: patch.softUsageThresholdPct }),
+        ...(patch.softUsageStopsExecution !== undefined && { softUsageStopsExecution: patch.softUsageStopsExecution }),
+        ...(patch.codingAgentEnabled !== undefined && { codingAgentEnabled: patch.codingAgentEnabled }),
+        ...(patch.maxAgentMinutes !== undefined && { maxAgentMinutes: patch.maxAgentMinutes }),
+        ...(patch.maxQuestionsPerRun !== undefined && { maxQuestionsPerRun: patch.maxQuestionsPerRun }),
+        ...(patch.answerConfidenceThreshold !== undefined && {
+          answerConfidenceThreshold: patch.answerConfidenceThreshold.toFixed(3),
+        }),
         updatedAt: new Date(),
         updatedBy: actor.id,
       })

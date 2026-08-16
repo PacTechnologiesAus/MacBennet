@@ -10,6 +10,8 @@ import { projectRoutes } from './http/routes/projects.js';
 import { taskRoutes } from './http/routes/tasks.js';
 import { runRoutes } from './http/routes/runs.js';
 import { adminRoutes } from './http/routes/admin.js';
+import { repositoryRoutes } from './http/routes/repositories.js';
+import { discoveryRoutes } from './http/routes/discovery.js';
 import { workerRoutes } from './http/routes/worker.js';
 import { startSweepers, type Sweepers } from './jobs/sweepers.js';
 
@@ -88,6 +90,8 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
   await fastify.register(taskRoutes);
   await fastify.register(runRoutes);
   await fastify.register(adminRoutes);
+  await fastify.register(repositoryRoutes);
+  await fastify.register(discoveryRoutes);
   await fastify.register(workerRoutes, limits);
 
   const sweepers = options.startBackgroundJobs === false ? null : startSweepers(fastify.log);

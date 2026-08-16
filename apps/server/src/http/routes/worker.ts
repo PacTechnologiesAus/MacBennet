@@ -1,11 +1,19 @@
 import type { FastifyInstance } from 'fastify';
 import {
+  agentEventBatchRequestSchema,
+  askQuestionRequestSchema,
   completeRequestSchema,
+  contextSnapshotRequestSchema,
+  gitViolationReportRequestSchema,
   heartbeatRequestSchema,
   leaseRequestSchema,
   logBatchRequestSchema,
   progressRequestSchema,
+  pullRequestReportRequestSchema,
   registerRequestSchema,
+  submitReviewRequestSchema,
+  usageSnapshotRequestSchema,
+  worktreeReportRequestSchema,
   ENROLLMENT_TOKEN_PREFIX,
   PROTOCOL_VERSION,
 } from '@mac/protocol';
@@ -14,9 +22,20 @@ import { bearerToken, currentWorker, requireWorkerAuth } from '../worker-auth.js
 import { buildControlEnvelope, recordHeartbeat, registerWorker } from '../../services/workers.js';
 import { completeRun, leaseNextRun, recordProgress } from '../../services/runs.js';
 import { appendWorkerLogs } from '../../services/logs.js';
+import {
+  ingestAgentEvents,
+  recordGitViolation,
+  recordWorktree,
+  startAgentSession,
+} from '../../services/coding-sessions.js';
+import { answerAgentQuestion } from '../../services/supervision.js';
+import { recordPullRequest, submitReview } from '../../services/reviews.js';
+import { recordUsageSnapshot } from '../../services/usage.js';
+import { recordContextSnapshot } from '../../services/discovery.js';
+import { recordFetch } from '../../services/repositories.js';
 import { record } from '../../services/audit.js';
 import { db } from '../../db/client.js';
-import { runs } from '../../db/schema.js';
+import { discoverySessions, runs } from '../../db/schema.js';
 import { eq } from 'drizzle-orm';
 
 /**
@@ -154,8 +173,164 @@ export async function workerRoutes(
       const control = await buildControlEnvelope(worker.id);
       return reply.send({ control, runStatus });
     });
+
+    // -----------------------------------------------------------------------
+    // Sprint 2 — coding sessions
+    //
+    // Every route below carries the same two properties as the Sprint 1 ones:
+    // it is initiated by the worker over outbound HTTPS, and it is scoped to a
+    // run assigned to that worker. Nothing here opens an inbound path to the
+    // VM, and nothing here accepts a command.
+    // -----------------------------------------------------------------------
+
+    /** The worker reports the isolated worktree it created for this run. */
+    scope.post('/api/worker/runs/:runId/worktree', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      const body = worktreeReportRequestSchema.parse(request.body);
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      const [run] = await db.select({ repositoryId: runs.repositoryId }).from(runs).where(eq(runs.id, runId)).limit(1);
+      if (!run?.repositoryId) {
+        throw AppError.conflict('NOT_A_REPOSITORY_RUN', 'This run has no repository, so it cannot have a worktree.');
+      }
+
+      const result = await recordWorktree(runId, run.repositoryId, body, workerActor(worker));
+      if (body.status === 'active') await recordFetch(run.repositoryId, body.baseSha);
+
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, ...result });
+    });
+
+    scope.post('/api/worker/runs/:runId/agent-session', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      const body = request.body as {
+        provider: 'claude_code' | 'mock';
+        providerSessionId?: string | null;
+        providerVersion?: string | null;
+        model?: string | null;
+      };
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      const session = await startAgentSession(runId, body, workerActor(worker));
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, session });
+    });
+
+    scope.post('/api/worker/runs/:runId/agent-events', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      const body = agentEventBatchRequestSchema.parse(request.body);
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      const result = await ingestAgentEvents(runId, body, workerActor(worker));
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, ...result });
+    });
+
+    /**
+     * The supervision endpoint.
+     *
+     * The worker asks; MAC answers. The worker has no answering logic of its
+     * own, which is what keeps every decision made during an autonomous run in
+     * the control plane where it is persisted, audited and reviewable.
+     */
+    scope.post('/api/worker/runs/:runId/questions', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      const body = askQuestionRequestSchema.parse(request.body);
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      const outcome = await answerAgentQuestion(runId, body, workerActor(worker));
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, answer: outcome.answer });
+    });
+
+    /**
+     * A refused git operation. Separate from the log endpoint because this is a
+     * security event: it must be countable, queryable, and impossible to lose
+     * in log volume — and its presence blocks pull-request creation.
+     */
+    scope.post('/api/worker/runs/:runId/git-violation', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      const body = gitViolationReportRequestSchema.parse(request.body);
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      await recordGitViolation(runId, body, workerActor(worker));
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, accepted: true });
+    });
+
+    scope.post('/api/worker/runs/:runId/usage', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      const body = usageSnapshotRequestSchema.parse(request.body);
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      await recordUsageSnapshot(runId, body.snapshot, workerActor(worker));
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, accepted: true });
+    });
+
+    /**
+     * The worker submits FACTS; Mac returns the verdict and, when he decides one
+     * is warranted, the exact pull request to open. The worker never decides
+     * whether a pull request should exist.
+     */
+    scope.post('/api/worker/runs/:runId/review', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      const body = submitReviewRequestSchema.parse(request.body);
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      const verdict = await submitReview(runId, body.evidence, workerActor(worker));
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, ...verdict });
+    });
+
+    scope.post('/api/worker/runs/:runId/pull-request', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      const body = pullRequestReportRequestSchema.parse(request.body);
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      const result = await recordPullRequest(runId, body, workerActor(worker));
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, ...result });
+    });
+
+    /** Discovery Phase A: the read-only repository inspection result. */
+    scope.post('/api/worker/runs/:runId/context-snapshot', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      const body = contextSnapshotRequestSchema.parse(request.body);
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      const [run] = await db.select({ taskId: runs.taskId }).from(runs).where(eq(runs.id, runId)).limit(1);
+      if (!run) throw AppError.notFound('Run');
+
+      const [session] = await db
+        .select({ id: discoverySessions.id })
+        .from(discoverySessions)
+        .where(eq(discoverySessions.taskId, run.taskId))
+        .limit(1);
+
+      if (session) {
+        await recordContextSnapshot(session.id, body.snapshot, workerActor(worker));
+      }
+      await recordFetch(body.snapshot.repositoryId, body.snapshot.headSha);
+
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, accepted: true });
+    });
   });
 }
+
+/** Worker-authored audit events carry the worker's NAME, not its uuid. */
+const workerActor = (worker: { id: string; name: string }) =>
+  ({ type: 'worker' as const, id: worker.id, label: worker.name });
 
 /**
  * Authorisation, distinct from authentication: an authenticated worker may act

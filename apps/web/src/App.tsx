@@ -13,6 +13,8 @@ import { RunDetail } from './pages/RunDetail.js';
 import { Workers } from './pages/Workers.js';
 import { Audit } from './pages/Audit.js';
 import { Settings } from './pages/Settings.js';
+import { Discovery } from './pages/Discovery.js';
+import { Reports } from './pages/Reports.js';
 
 export function App() {
   const [user, setUser] = useState<CurrentUser | null>(null);
@@ -50,13 +52,15 @@ function Shell({ user, onSignedOut }: { user: CurrentUser; onSignedOut: () => vo
       <aside className="sidebar">
         <div className="brand">
           <strong>Mac Bennett</strong>
-          <span>Automation Engineer · Sprint 1</span>
+          <span>Automation Engineer · Sprint 2</span>
         </div>
         <nav className="nav">
           <NavLink to="/" end>Dashboard</NavLink>
+          <NavLink to="/discovery">Discovery</NavLink>
           <NavLink to="/projects">Projects</NavLink>
           <NavLink to="/tasks">Tasks</NavLink>
           <NavLink to="/runs">Runs</NavLink>
+          <NavLink to="/reports">Reports</NavLink>
           <NavLink to="/workers">Workers</NavLink>
           <NavLink to="/audit">Audit</NavLink>
           <NavLink to="/settings">Settings</NavLink>
@@ -73,6 +77,8 @@ function Shell({ user, onSignedOut }: { user: CurrentUser; onSignedOut: () => vo
       <main className="main">
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/discovery" element={<Discovery user={user} />} />
+          <Route path="/reports" element={<Reports />} />
           <Route path="/projects" element={<Projects user={user} />} />
           <Route path="/projects/:id" element={<ProjectDetail user={user} />} />
           <Route path="/tasks" element={<Tasks user={user} />} />

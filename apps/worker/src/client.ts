@@ -11,6 +11,22 @@ import type {
   ProgressResponse,
   RegisterRequest,
   RegisterResponse,
+  AgentEventBatchRequest,
+  AgentEventBatchResponse,
+  AskQuestionRequest,
+  AskQuestionResponse,
+  ContextSnapshotRequest,
+  ContextSnapshotResponse,
+  GitViolationReportRequest,
+  GitViolationReportResponse,
+  PullRequestReportRequest,
+  PullRequestReportResponse,
+  ReviewVerdictResponse,
+  SubmitReviewRequest,
+  UsageSnapshotRequest,
+  UsageSnapshotResponse,
+  WorktreeReportRequest,
+  WorktreeReportResponse,
 } from '@mac/protocol';
 import type { Logger } from './logger.js';
 
@@ -173,6 +189,62 @@ export class ControlPlaneClient {
     // Retried hard: a completion that never lands leaves a run stuck
     // "running" forever, which is the worst state for an operator to inherit.
     return this.request<CompleteResponse>(`/api/worker/runs/${runId}/complete`, body, { attempts: 10 });
+  }
+
+  // --- Sprint 2: coding sessions -------------------------------------------
+
+  reportWorktree(runId: string, body: WorktreeReportRequest): Promise<WorktreeReportResponse> {
+    return this.request<WorktreeReportResponse>(`/api/worker/runs/${runId}/worktree`, body);
+  }
+
+  startAgentSession(
+    runId: string,
+    body: { provider: string; providerSessionId?: string | null; providerVersion?: string | null; model?: string | null },
+  ): Promise<{ control: ControlEnvelope; session: { id: string } }> {
+    return this.request(`/api/worker/runs/${runId}/agent-session`, body);
+  }
+
+  sendAgentEvents(runId: string, body: AgentEventBatchRequest): Promise<AgentEventBatchResponse> {
+    return this.request<AgentEventBatchResponse>(`/api/worker/runs/${runId}/agent-events`, body);
+  }
+
+  /**
+   * Asks Mac a question on the coding agent's behalf.
+   *
+   * Retried harder than an ordinary call and with a long timeout, because the
+   * coding session is blocked waiting for the answer: giving up here would
+   * strand a live agent rather than merely losing a status update.
+   */
+  askQuestion(runId: string, body: AskQuestionRequest): Promise<AskQuestionResponse> {
+    return this.request<AskQuestionResponse>(`/api/worker/runs/${runId}/questions`, body, {
+      attempts: 8,
+      timeoutMs: 30_000,
+    });
+  }
+
+  reportGitViolation(runId: string, body: GitViolationReportRequest): Promise<GitViolationReportResponse> {
+    return this.request<GitViolationReportResponse>(`/api/worker/runs/${runId}/git-violation`, body);
+  }
+
+  reportUsage(runId: string, body: UsageSnapshotRequest): Promise<UsageSnapshotResponse> {
+    return this.request<UsageSnapshotResponse>(`/api/worker/runs/${runId}/usage`, body);
+  }
+
+  submitReview(runId: string, body: SubmitReviewRequest): Promise<ReviewVerdictResponse> {
+    return this.request<ReviewVerdictResponse>(`/api/worker/runs/${runId}/review`, body, {
+      attempts: 8,
+      timeoutMs: 30_000,
+    });
+  }
+
+  reportPullRequest(runId: string, body: PullRequestReportRequest): Promise<PullRequestReportResponse> {
+    return this.request<PullRequestReportResponse>(`/api/worker/runs/${runId}/pull-request`, body);
+  }
+
+  reportContextSnapshot(runId: string, body: ContextSnapshotRequest): Promise<ContextSnapshotResponse> {
+    return this.request<ContextSnapshotResponse>(`/api/worker/runs/${runId}/context-snapshot`, body, {
+      timeoutMs: 30_000,
+    });
   }
 }
 

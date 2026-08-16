@@ -1,4 +1,5 @@
 import {
+  bigint,
   bigserial,
   boolean,
   index,
@@ -15,18 +16,31 @@ import {
 import { sql } from 'drizzle-orm';
 import {
   ACTOR_TYPES,
+  AGENT_ANSWER_DECISIONS,
+  AGENT_SESSION_STATES,
   APPROVAL_ACTIONS,
   APPROVAL_STATES,
   AUDIT_EVENT_TYPES,
+  BRIEF_STATUSES,
+  CODING_AGENT_PROVIDERS,
+  DECISION_RISKS,
+  DISCOVERY_STATUSES,
   EXECUTION_MODES,
   JOB_KINDS,
   LOG_STREAMS,
+  MEMORY_SCOPES,
+  RISK_LEVELS,
+  REVIEW_VERDICTS,
   RUN_STATUSES,
+  SCOPE_KINDS,
   STOP_REASONS,
   TASK_PRIORITIES,
   TASK_STATUSES,
+  USAGE_SOURCES,
+  USAGE_SNAPSHOT_PHASES,
   USER_ROLES,
   WORKER_STATUSES,
+  WORKTREE_STATUSES,
 } from '@mac/protocol';
 
 /**
@@ -106,6 +120,23 @@ export const settings = pgTable('settings', {
   budgetStopPct: integer('budget_stop_pct').notNull().default(100),
   heartbeatIntervalSeconds: integer('heartbeat_interval_seconds').notNull().default(10),
   heartbeatGraceSeconds: integer('heartbeat_grace_seconds').notNull().default(20),
+
+  // --- Sprint 2 ---
+  /**
+   * Soft threshold on usage that is NOT exact money. It warns; it stops
+   * execution only when `softUsageStopsExecution` is set, and the UI always
+   * shows that this is an uncertain signal (Sprint 2 §17).
+   */
+  softUsageThresholdPct: integer('soft_usage_threshold_pct').notNull().default(80),
+  softUsageStopsExecution: boolean('soft_usage_stops_execution').notNull().default(false),
+  codingAgentEnabled: boolean('coding_agent_enabled').notNull().default(true),
+  maxAgentMinutes: integer('max_agent_minutes').notNull().default(60),
+  maxQuestionsPerRun: integer('max_questions_per_run').notNull().default(20),
+  /** At or above this, Mac answers outright; below it he records an assumption. */
+  answerConfidenceThreshold: numeric('answer_confidence_threshold', { precision: 4, scale: 3 })
+    .notNull()
+    .default('0.800'),
+
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
 });
@@ -236,9 +267,22 @@ export const runs = pgTable(
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+
+    // --- Sprint 2 ---
+    /** Which approved repository this run works in. Null for non-repository jobs. */
+    repositoryId: uuid('repository_id'),
+    handoffBriefId: uuid('handoff_brief_id'),
+    /**
+     * What the human actually authorised. In the 60–79% band this is narrower
+     * than the brief describes, and that difference is the entire point of the
+     * band — so it is recorded rather than implied.
+     */
+    scopeKind: enumText('scope_kind', SCOPE_KINDS).notNull().default('full'),
+    approvedScope: text('approved_scope'),
   },
   (t) => ({
     taskIdx: index('runs_task_id_idx').on(t.taskId),
+    repositoryIdx: index('runs_repository_id_idx').on(t.repositoryId),
     statusIdx: index('runs_status_idx').on(t.status),
     workerIdx: index('runs_worker_id_idx').on(t.workerId),
     // Supports the dispatch query, which is the hottest path in the system.
@@ -305,7 +349,15 @@ export const runUsage = pgTable(
     quantity: numeric('quantity', { precision: 18, scale: 4 }),
     unit: text('unit'),
     costCents: integer('cost_cents'),
+    /**
+     * Sprint 1's boolean, kept and maintained in step with `source` so no
+     * existing query silently changed meaning when the four-valued model
+     * replaced it.
+     */
     isExact: boolean('is_exact').notNull().default(false),
+    /** Sprint 2: exact | observed | estimated | unavailable. */
+    source: enumText('source', USAGE_SOURCES).notNull().default('estimated'),
+    model: text('model'),
     metadata: jsonb('metadata').notNull().default(sql`'{}'::jsonb`),
     recordedAt: timestamp('recorded_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -352,6 +404,386 @@ export const auditEvents = pgTable(
   }),
 );
 
+// ===========================================================================
+// Sprint 2 — repositories, briefs, discovery, coding sessions, review, usage
+// ===========================================================================
+
+/**
+ * An approved repository Mac may work in.
+ *
+ * `isApproved` is the gate. The dispatch statement joins against it, so a run
+ * against an unapproved repository is unselectable rather than merely rejected
+ * — the same shape as the Sprint 1 approval guardrail, for the same reason.
+ */
+export const repositories = pgTable(
+  'repositories',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    remoteUrl: text('remote_url').notNull(),
+    /** Where the clone lives on the worker VM. Admin-configured, never run-supplied. */
+    localPath: text('local_path').notNull(),
+    defaultBranch: text('default_branch').notNull().default('main'),
+    remoteName: text('remote_name').notNull().default('origin'),
+    isApproved: boolean('is_approved').notNull().default(false),
+    approvedBy: uuid('approved_by').references(() => users.id, { onDelete: 'set null' }),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    lastFetchedAt: timestamp('last_fetched_at', { withTimezone: true }),
+    lastKnownDefaultSha: text('last_known_default_sha'),
+    /**
+     * argv ARRAYS, not command strings. Admin-only, audited on change, executed
+     * with shell:false. This is the only project-specific command in the system
+     * and it cannot express a pipeline, a redirect or a metacharacter.
+     */
+    testCommand: jsonb('test_command').notNull().default(sql`'[]'::jsonb`),
+    buildCommand: jsonb('build_command').notNull().default(sql`'[]'::jsonb`),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    projectIdx: index('repositories_project_id_idx').on(t.projectId),
+    projectNameIdx: uniqueIndex('repositories_project_name_key').on(t.projectId, t.name),
+  }),
+);
+
+export const handoffBriefs = pgTable(
+  'handoff_briefs',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull().default(1),
+    status: text('status').notNull().default('draft'),
+    content: jsonb('content').notNull(),
+    confidence: numeric('confidence', { precision: 4, scale: 3 }).notNull().default('0'),
+    /** Provenance only. Never the specification handed to a coding agent. */
+    sourceConversation: text('source_conversation').notNull().default(''),
+    contextSummary: text('context_summary'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    taskIdx: index('handoff_briefs_task_id_idx').on(t.taskId),
+    taskVersionIdx: uniqueIndex('handoff_briefs_task_version_key').on(t.taskId, t.version),
+  }),
+);
+
+export const discoverySessions = pgTable(
+  'discovery_sessions',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('open'),
+    messages: jsonb('messages').notNull().default(sql`'[]'::jsonb`),
+    contextSummary: text('context_summary'),
+    contextSnapshot: jsonb('context_snapshot'),
+    contextInspectedAt: timestamp('context_inspected_at', { withTimezone: true }),
+    briefId: uuid('brief_id').references(() => handoffBriefs.id, { onDelete: 'set null' }),
+    /** The single next question. Spec §4: Mac asks one at a time. */
+    pendingQuestion: jsonb('pending_question'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    taskIdx: index('discovery_sessions_task_id_idx').on(t.taskId),
+    projectIdx: index('discovery_sessions_project_id_idx').on(t.projectId),
+  }),
+);
+
+export const worktrees = pgTable(
+  'worktrees',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    repositoryId: uuid('repository_id')
+      .notNull()
+      .references(() => repositories.id, { onDelete: 'cascade' }),
+    path: text('path').notNull(),
+    branch: text('branch').notNull(),
+    baseBranch: text('base_branch').notNull(),
+    baseSha: text('base_sha').notNull(),
+    headSha: text('head_sha'),
+    commitCount: integer('commit_count').notNull().default(0),
+    /** `preserved` is the safe default whenever a human might need to look. */
+    status: text('status').notNull().default('active'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    releasedAt: timestamp('released_at', { withTimezone: true }),
+    removedAt: timestamp('removed_at', { withTimezone: true }),
+  },
+  (t) => ({
+    runIdx: uniqueIndex('worktrees_run_id_key').on(t.runId),
+    repoIdx: index('worktrees_repository_id_idx').on(t.repositoryId),
+  }),
+);
+
+export const agentSessions = pgTable(
+  'agent_sessions',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull(),
+    providerSessionId: text('provider_session_id'),
+    providerVersion: text('provider_version'),
+    model: text('model'),
+    state: text('state').notNull().default('starting'),
+    currentActivity: text('current_activity'),
+    highestEventSeq: integer('highest_event_seq').notNull().default(-1),
+    error: text('error'),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp('ended_at', { withTimezone: true }),
+  },
+  (t) => ({
+    runIdx: uniqueIndex('agent_sessions_run_id_key').on(t.runId),
+  }),
+);
+
+/** Every question and every answer, with reasoning and sources (Sprint 2 §8). */
+export const agentQuestions = pgTable(
+  'agent_questions',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    agentSessionId: uuid('agent_session_id').references(() => agentSessions.id, { onDelete: 'set null' }),
+    /** The agent's own id for the question. Makes a retried upload idempotent. */
+    externalId: text('external_id').notNull(),
+    seq: integer('seq').notNull(),
+    question: text('question').notNull(),
+    context: text('context'),
+    answer: text('answer'),
+    decision: text('decision'),
+    confidence: numeric('confidence', { precision: 4, scale: 3 }),
+    reasoning: text('reasoning'),
+    sources: jsonb('sources').notNull().default(sql`'[]'::jsonb`),
+    risk: text('risk').notNull().default('low'),
+    requiredHuman: boolean('required_human').notNull().default(false),
+    affectedImplementation: boolean('affected_implementation').notNull().default(false),
+    askedAt: timestamp('asked_at', { withTimezone: true }).notNull().defaultNow(),
+    answeredAt: timestamp('answered_at', { withTimezone: true }),
+  },
+  (t) => ({
+    runIdx: index('agent_questions_run_id_idx').on(t.runId),
+    externalIdx: uniqueIndex('agent_questions_run_external_key').on(t.runId, t.externalId),
+  }),
+);
+
+export const runAssumptions = pgTable(
+  'run_assumptions',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    questionId: uuid('question_id').references(() => agentQuestions.id, { onDelete: 'set null' }),
+    statement: text('statement').notNull(),
+    confidence: numeric('confidence', { precision: 4, scale: 3 }).notNull(),
+    reversible: boolean('reversible').notNull().default(true),
+    /** Below the autonomy threshold → surfaced prominently in the report. */
+    flagged: boolean('flagged').notNull().default(false),
+    source: text('source'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runIdx: index('run_assumptions_run_id_idx').on(t.runId),
+  }),
+);
+
+export const runBlockers = pgTable(
+  'run_blockers',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    questionId: uuid('question_id').references(() => agentQuestions.id, { onDelete: 'set null' }),
+    description: text('description').notNull(),
+    reason: text('reason').notNull(),
+    risk: text('risk').notNull().default('high'),
+    resolved: boolean('resolved').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runIdx: index('run_blockers_run_id_idx').on(t.runId),
+  }),
+);
+
+/**
+ * Refused git operations.
+ *
+ * A table rather than a log line because this is a security event: it must be
+ * queryable and countable, and a row here blocks PR creation outright.
+ */
+export const gitViolations = pgTable(
+  'git_violations',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    code: text('code').notNull(),
+    argv: jsonb('argv').notNull().default(sql`'[]'::jsonb`),
+    message: text('message').notNull(),
+    /** 'mac' — Mac's own code was refused. 'agent' — the shim caught the agent. */
+    origin: text('origin').notNull(),
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runIdx: index('git_violations_run_id_idx').on(t.runId),
+  }),
+);
+
+export const runReviews = pgTable(
+  'run_reviews',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    verdict: text('verdict').notNull(),
+    riskLevel: text('risk_level').notNull(),
+    satisfiesBrief: boolean('satisfies_brief').notNull(),
+    acceptanceCriteriaMet: boolean('acceptance_criteria_met').notNull(),
+    unexpectedScope: boolean('unexpected_scope').notNull(),
+    humanAttentionRequired: boolean('human_attention_required').notNull(),
+    prRecommended: boolean('pr_recommended').notNull(),
+    prDeclineReason: text('pr_decline_reason'),
+    anomalies: jsonb('anomalies').notNull().default(sql`'[]'::jsonb`),
+    /** The facts the verdict was drawn from, so it can be re-examined later. */
+    evidence: jsonb('evidence').notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runIdx: uniqueIndex('run_reviews_run_id_key').on(t.runId),
+  }),
+);
+
+/**
+ * Note what this table does NOT have: no `merged_at`, no `merge_sha`, no
+ * `state`. Mac has no merge capability, so there is nowhere to record one.
+ */
+export const pullRequests = pgTable(
+  'pull_requests',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull().default('github'),
+    number: integer('number'),
+    url: text('url').notNull(),
+    title: text('title').notNull(),
+    body: text('body').notNull().default(''),
+    branch: text('branch').notNull(),
+    baseBranch: text('base_branch').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runIdx: uniqueIndex('pull_requests_run_id_key').on(t.runId),
+  }),
+);
+
+/**
+ * Provider usage readings.
+ *
+ * `source` is the load-bearing column: it says what KIND of number this is, and
+ * it sits next to the number so the two can never be separated in a query, a
+ * DTO or a report.
+ */
+export const usageSnapshots = pgTable(
+  'usage_snapshots',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull(),
+    phase: text('phase').notNull(),
+    source: text('source').notNull(),
+    inputTokens: bigint('input_tokens', { mode: 'number' }),
+    outputTokens: bigint('output_tokens', { mode: 'number' }),
+    cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
+    cacheCreationTokens: bigint('cache_creation_tokens', { mode: 'number' }),
+    costCents: integer('cost_cents'),
+    percentUsed: numeric('percent_used', { precision: 6, scale: 3 }),
+    state: text('state'),
+    reportingPeriod: text('reporting_period'),
+    note: text('note'),
+    raw: jsonb('raw').notNull().default(sql`'{}'::jsonb`),
+    capturedAt: timestamp('captured_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runIdx: index('usage_snapshots_run_id_idx').on(t.runId),
+    uniqueIdx: uniqueIndex('usage_snapshots_run_provider_phase_key').on(t.runId, t.provider, t.phase),
+  }),
+);
+
+export const runReports = pgTable(
+  'run_reports',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    generatedAt: timestamp('generated_at', { withTimezone: true }).notNull().defaultNow(),
+    content: jsonb('content').notNull(),
+    markdown: text('markdown').notNull(),
+  },
+  (t) => ({
+    runIdx: uniqueIndex('run_reports_run_id_key').on(t.runId),
+  }),
+);
+
+/**
+ * Memory (spec §9), three layers in one table.
+ *
+ * A CHECK constraint enforces the shape of each scope, which is what actually
+ * prevents task memory from contaminating unrelated tasks: a task-scoped row
+ * MUST carry a task_id, so it is unreachable from another task's query.
+ */
+export const memoryEntries = pgTable(
+  'memory_entries',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    scope: text('scope').notNull(),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'cascade' }),
+    key: text('key').notNull(),
+    value: text('value').notNull(),
+    confidence: numeric('confidence', { precision: 4, scale: 3 }).notNull().default('1'),
+    source: text('source'),
+    /** Assumptions are never promoted; only validated high-confidence facts. */
+    promoted: boolean('promoted').notNull().default(false),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    projectIdx: index('memory_entries_project_idx').on(t.projectId),
+    taskIdx: index('memory_entries_task_idx').on(t.taskId),
+    keyIdx: index('memory_entries_key_idx').on(t.key),
+  }),
+);
+
 export type UserRow = typeof users.$inferSelect;
 export type SessionRow = typeof sessions.$inferSelect;
 export type SettingsRow = typeof settings.$inferSelect;
@@ -364,7 +796,29 @@ export type RunLogRow = typeof runLogs.$inferSelect;
 export type AuditEventRow = typeof auditEvents.$inferSelect;
 export type EnrollmentTokenRow = typeof workerEnrollmentTokens.$inferSelect;
 
-/** Re-exported so the migration generator can emit the CHECK constraints. */
+export type RepositoryRow = typeof repositories.$inferSelect;
+export type HandoffBriefRow = typeof handoffBriefs.$inferSelect;
+export type DiscoverySessionRow = typeof discoverySessions.$inferSelect;
+export type WorktreeRow = typeof worktrees.$inferSelect;
+export type AgentSessionRow = typeof agentSessions.$inferSelect;
+export type AgentQuestionRow = typeof agentQuestions.$inferSelect;
+export type RunAssumptionRow = typeof runAssumptions.$inferSelect;
+export type RunBlockerRow = typeof runBlockers.$inferSelect;
+export type GitViolationRow = typeof gitViolations.$inferSelect;
+export type RunReviewRow = typeof runReviews.$inferSelect;
+export type PullRequestRow = typeof pullRequests.$inferSelect;
+export type UsageSnapshotRow = typeof usageSnapshots.$inferSelect;
+export type RunReportRow = typeof runReports.$inferSelect;
+export type MemoryEntryRow = typeof memoryEntries.$inferSelect;
+
+/**
+ * The authoritative list of enum CHECK constraints.
+ *
+ * The migrations are hand-written, so these lists are necessarily duplicated
+ * between here and `drizzle/*.sql`. The schema-parity integration test reads
+ * every CHECK constraint out of the live database and fails if any value in
+ * this table is missing from it — which is what makes the duplication safe.
+ */
 export const ENUM_CHECKS: Array<{ table: string; column: string; values: readonly string[] }> = [
   { table: 'users', column: 'role', values: USER_ROLES },
   { table: 'tasks', column: 'status', values: TASK_STATUSES },
@@ -374,9 +828,25 @@ export const ENUM_CHECKS: Array<{ table: string; column: string; values: readonl
   { table: 'runs', column: 'job_kind', values: JOB_KINDS },
   { table: 'runs', column: 'execution_mode', values: EXECUTION_MODES },
   { table: 'runs', column: 'stop_reason', values: STOP_REASONS },
+  { table: 'runs', column: 'scope_kind', values: SCOPE_KINDS },
   { table: 'workers', column: 'status', values: WORKER_STATUSES },
   { table: 'approvals', column: 'action', values: APPROVAL_ACTIONS },
   { table: 'run_logs', column: 'stream', values: LOG_STREAMS },
   { table: 'audit_events', column: 'actor_type', values: ACTOR_TYPES },
   { table: 'audit_events', column: 'event_type', values: AUDIT_EVENT_TYPES },
+  // --- Sprint 2 ---
+  { table: 'handoff_briefs', column: 'status', values: BRIEF_STATUSES },
+  { table: 'discovery_sessions', column: 'status', values: DISCOVERY_STATUSES },
+  { table: 'worktrees', column: 'status', values: WORKTREE_STATUSES },
+  { table: 'agent_sessions', column: 'provider', values: CODING_AGENT_PROVIDERS },
+  { table: 'agent_sessions', column: 'state', values: AGENT_SESSION_STATES },
+  { table: 'agent_questions', column: 'decision', values: AGENT_ANSWER_DECISIONS },
+  { table: 'agent_questions', column: 'risk', values: DECISION_RISKS },
+  { table: 'run_blockers', column: 'risk', values: DECISION_RISKS },
+  { table: 'run_reviews', column: 'verdict', values: REVIEW_VERDICTS },
+  { table: 'run_reviews', column: 'risk', values: RISK_LEVELS },
+  { table: 'usage_snapshots', column: 'phase', values: USAGE_SNAPSHOT_PHASES },
+  { table: 'usage_snapshots', column: 'source', values: USAGE_SOURCES },
+  { table: 'run_usage', column: 'source', values: USAGE_SOURCES },
+  { table: 'memory_entries', column: 'scope', values: MEMORY_SCOPES },
 ];

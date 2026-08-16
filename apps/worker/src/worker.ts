@@ -51,6 +51,12 @@ export interface RunWorkerOptions {
    * stopping the worker does not wait out a poll.
    */
   leaseWaitSeconds?: number;
+  /**
+   * Test seam for the coding job: injects a mock coding agent and a recording
+   * pull-request gateway so the whole autonomous loop can be exercised without
+   * a paid model or a GitHub account.
+   */
+  codingOverrides?: Record<string, unknown>;
 }
 
 const LOG_FLUSH_MS = 1000;
@@ -199,6 +205,10 @@ export async function startWorker(options: RunWorkerOptions): Promise<WorkerHand
       },
       signal: controller.signal,
       workspace: config.workspace,
+      // Supplied for the repository jobs; the Sprint 1 handlers ignore them.
+      assignment,
+      client,
+      ...(options.codingOverrides ? { codingOverrides: options.codingOverrides } : {}),
     };
 
     let outcome: RunOutcome = 'failed';

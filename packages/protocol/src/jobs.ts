@@ -53,6 +53,53 @@ export const jobParamSchemas = {
       message: z.string().min(1).max(500).optional(),
     })
     .strict(),
+
+  // --- Sprint 2 -------------------------------------------------------------
+  //
+  // Sprint 2 adds process execution to the worker. Read the two schemas below
+  // carefully, because they are where that could have gone wrong and did not:
+  //
+  //   * neither carries a command, a script, a path, an argument list or an
+  //     environment variable;
+  //   * both carry ONLY identifiers, which the control plane resolves against
+  //     its own database into a repository, a branch and a brief;
+  //   * the commands actually executed (git, the coding agent, the project's
+  //     test command) are fixed by worker code or by admin-configured argv on
+  //     the repository row — never by the run request.
+  //
+  // So adding Claude Code did not turn the worker into a remote shell: the
+  // protocol still has no field in which a shell command could be expressed.
+
+  /**
+   * Delegate implementation of an approved, briefed task to a coding agent
+   * inside an isolated worktree.
+   */
+  claude_code: z
+    .object({
+      /** Which repository to work in. Must be approved; re-checked at dispatch. */
+      repositoryId: z.string().uuid(),
+      /** The structured handoff brief the agent will be given. */
+      briefId: z.string().uuid(),
+      /** Which agent implementation to use. `mock` exists for tests and dry runs. */
+      provider: z.enum(['claude_code', 'mock']).default('claude_code'),
+      /** Wall-clock ceiling for the agent session. */
+      maxMinutes: z.number().int().min(1).max(720).default(60),
+      /** Open a PR when the run is eligible. Never implies a merge. */
+      openPullRequest: z.boolean().default(true),
+    })
+    .strict(),
+
+  /**
+   * Read-only inspection of an approved repository, used by discovery Phase A.
+   * Writes nothing and creates no branch.
+   */
+  repo_inspect: z
+    .object({
+      repositoryId: z.string().uuid(),
+      /** Compare against Mac's previous involvement, when there was one. */
+      sinceSha: z.string().max(64).nullable().default(null),
+    })
+    .strict(),
 } as const;
 
 export type JobKind = keyof typeof jobParamSchemas;
@@ -76,6 +123,19 @@ export const JOB_CATALOGUE: readonly JobDescriptor[] = [
   { kind: 'system_info', label: 'System info', description: 'Reports platform, architecture, CPU count, memory and Node version.', typicalDurationSeconds: 1 },
   { kind: 'workspace_check', label: 'Workspace check', description: "Verifies the worker's workspace directory exists and is writable.", typicalDurationSeconds: 1 },
   { kind: 'fail', label: 'Deliberate failure', description: 'Fails on purpose so the failure path can be exercised.', typicalDurationSeconds: 1 },
+  {
+    kind: 'claude_code',
+    label: 'Coding task (Claude Code)',
+    description:
+      'Creates an isolated worktree and task branch, delegates implementation to a coding agent, supervises it, runs tests, self-reviews and prepares a pull request. Never merges or pushes to the default branch.',
+    typicalDurationSeconds: 1800,
+  },
+  {
+    kind: 'repo_inspect',
+    label: 'Inspect repository',
+    description: 'Read-only inspection of an approved repository for discovery: README, manifests, tests, branches and recent history.',
+    typicalDurationSeconds: 30,
+  },
 ] as const;
 
 /**
@@ -89,9 +149,22 @@ export const jobSpecSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('system_info'), params: jobParamSchemas.system_info }),
   z.object({ kind: z.literal('workspace_check'), params: jobParamSchemas.workspace_check }),
   z.object({ kind: z.literal('fail'), params: jobParamSchemas.fail }),
+  z.object({ kind: z.literal('claude_code'), params: jobParamSchemas.claude_code }),
+  z.object({ kind: z.literal('repo_inspect'), params: jobParamSchemas.repo_inspect }),
 ]);
 
 export type JobSpec = z.infer<typeof jobSpecSchema>;
+
+/**
+ * Job kinds that operate on a repository and therefore require an approved one.
+ * Used by the dispatch guardrail, so approval cannot be forgotten at a call site.
+ */
+export const REPOSITORY_JOB_KINDS = ['claude_code', 'repo_inspect'] as const;
+export const requiresApprovedRepository = (kind: string): boolean =>
+  (REPOSITORY_JOB_KINDS as readonly string[]).includes(kind);
+
+/** Job kinds that create commits. These are the ones the git policy governs. */
+export const isCodingJobKind = (kind: string): boolean => kind === 'claude_code';
 
 export const isAllowedJobKind = (kind: unknown): kind is JobKind =>
   typeof kind === 'string' && Object.prototype.hasOwnProperty.call(jobParamSchemas, kind);

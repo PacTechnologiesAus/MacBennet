@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import type {
   ApprovalDto,
   CreateRunRequest,
@@ -8,9 +8,9 @@ import type {
   RunStatus,
   StopReason,
 } from '@mac/protocol';
-import { PRIORITY_RANK, isTerminalRunStatus } from '@mac/protocol';
+import { PRIORITY_RANK, isTerminalRunStatus, requiresApprovedRepository } from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
-import { approvals, projects, runs, tasks, users, workers } from '../db/schema.js';
+import { approvals, projects, repositories, runs, tasks, users, workers } from '../db/schema.js';
 import type { RunRow } from '../db/schema.js';
 import { AppError, GuardrailError } from '../http/errors.js';
 import { assertTransition, IMMEDIATELY_CANCELLABLE, REQUIRES_WORKER_CANCEL } from '../domain/run-lifecycle.js';
@@ -439,6 +439,9 @@ export async function leaseNextRun(
       .select({ run: runs })
       .from(runs)
       .innerJoin(tasks, eq(tasks.id, runs.taskId))
+      // LEFT join: most runs have no repository, and an inner join would make
+      // them all invisible to dispatch.
+      .leftJoin(repositories, eq(repositories.id, runs.repositoryId))
       .where(
         and(
           eq(runs.status, 'queued'),
@@ -447,6 +450,14 @@ export async function leaseNextRun(
           sql`${runs.cancelRequestedAt} IS NULL`,
           sql`(${runs.overnightDeadlineAt} IS NULL OR ${runs.overnightDeadlineAt} > ${now})`,
           inArray(runs.jobKind, capabilities),
+          /*
+           * Sprint 2's repository guardrail, in the same shape as Sprint 1's
+           * approval guardrail and for the same reason: a run against an
+           * unapproved repository is UNSELECTABLE, not merely rejected by
+           * application code. Withdrawing approval therefore stops future
+           * dispatch without any call site having to remember to check.
+           */
+          or(sql`${runs.repositoryId} IS NULL`, eq(repositories.isApproved, true)),
         ),
       )
       .orderBy(priorityCase, runs.createdAt)
@@ -455,6 +466,34 @@ export async function leaseNextRun(
 
     const candidate = candidates[0]?.run;
     if (!candidate) return null;
+
+    /*
+     * Repository approval, checked a third time against the row being
+     * dispatched — the SQL predicate above already excludes unapproved
+     * repositories, so in normal operation this always passes. It exists
+     * because the two must never be able to disagree, exactly as `checkDispatch`
+     * exists behind the approval predicate.
+     */
+    let coding: RunAssignment['coding'] = null;
+    if (requiresApprovedRepository(candidate.jobKind)) {
+      try {
+        const { buildCodingAssignment } = await import('./coding-runs.js');
+        coding = await buildCodingAssignment(tx, candidate);
+      } catch (err) {
+        // A repository that has become unapproved, disappeared, or lost its
+        // brief must not silently hand out a half-formed assignment.
+        await transition(tx, {
+          runId: candidate.id,
+          to: 'stopped_by_guardrail',
+          actor: SYSTEM_ACTOR,
+          eventType: 'run.stopped_by_guardrail',
+          patch: { stopReason: 'repository_not_approved', completedAt: new Date() },
+          metadata: { reason: (err as Error).message },
+        });
+        await appendSystemLog(tx, candidate.id, `Dispatch refused: ${(err as Error).message}`);
+        return null;
+      }
+    }
 
     // Validation point 3 of 3 on the server side (the worker checks again).
     const job = checkJobAllowed(candidate.jobKind, candidate.jobParams);
@@ -556,6 +595,7 @@ export async function leaseNextRun(
       deadlineAt: updated.overnightDeadlineAt?.toISOString() ?? null,
       leaseExpiresAt: leaseExpiresAt.toISOString(),
       attempt: updated.attempt,
+      coding,
     } satisfies RunAssignment;
   });
 }

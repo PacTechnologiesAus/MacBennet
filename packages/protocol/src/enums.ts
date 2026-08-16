@@ -98,6 +98,19 @@ export const STOP_REASONS = [
   'confidence_below_threshold',
   'unsupported_job_kind',
   'worker_error',
+  // --- Sprint 2 ---
+  /** A coding agent attempted an operation the git policy forbids. */
+  'prohibited_git_operation',
+  /** The coding agent itself failed — crashed, unauthenticated, or unavailable. */
+  'coding_agent_error',
+  /** Work stopped because a decision was too risky to make without a human. */
+  'blocked_unsafe_decision',
+  /** The repository is not approved, or approval was withdrawn. */
+  'repository_not_approved',
+  /** The session exceeded its configured wall-clock limit. */
+  'agent_time_limit',
+  /** Completed, but part of the work was left unimplemented and reported. */
+  'completed_with_blockers',
 ] as const;
 export const stopReasonSchema = z.enum(STOP_REASONS);
 export type StopReason = z.infer<typeof stopReasonSchema>;
@@ -106,6 +119,45 @@ export type StopReason = z.infer<typeof stopReasonSchema>;
 export const RUN_OUTCOMES = ['succeeded', 'failed', 'cancelled'] as const;
 export const runOutcomeSchema = z.enum(RUN_OUTCOMES);
 export type RunOutcome = z.infer<typeof runOutcomeSchema>;
+
+/**
+ * How risky a decision is, independent of how confident Mac is about it.
+ *
+ * This axis exists because confidence alone is the wrong control: a confident
+ * wrong answer to "should I drop this table" is worse than an unconfident one.
+ * `high` blocks regardless of confidence (Sprint 2 §9).
+ */
+export const DECISION_RISKS = ['low', 'medium', 'high'] as const;
+export const decisionRiskSchema = z.enum(DECISION_RISKS);
+export type DecisionRisk = z.infer<typeof decisionRiskSchema>;
+
+/** Outcome of the self-review phase (Sprint 2 §12). */
+export const REVIEW_VERDICTS = [
+  'satisfies_brief',
+  'partially_satisfies_brief',
+  'does_not_satisfy_brief',
+  'unreviewable',
+] as const;
+export const reviewVerdictSchema = z.enum(REVIEW_VERDICTS);
+export type ReviewVerdict = z.infer<typeof reviewVerdictSchema>;
+
+export const RISK_LEVELS = ['low', 'medium', 'high'] as const;
+export const riskLevelSchema = z.enum(RISK_LEVELS);
+export type RiskLevel = z.infer<typeof riskLevelSchema>;
+
+/** Lifecycle of an isolated worktree. `preserved` is the safe default. */
+export const WORKTREE_STATUSES = ['active', 'preserved', 'removed'] as const;
+export const worktreeStatusSchema = z.enum(WORKTREE_STATUSES);
+export type WorktreeStatus = z.infer<typeof worktreeStatusSchema>;
+
+/** Memory layers from spec §9. Task memory must not contaminate other tasks. */
+export const MEMORY_SCOPES = ['global', 'project', 'task'] as const;
+export const memoryScopeSchema = z.enum(MEMORY_SCOPES);
+export type MemoryScope = z.infer<typeof memoryScopeSchema>;
+
+export const DISCOVERY_STATUSES = ['open', 'brief_drafted', 'ready', 'closed'] as const;
+export const discoveryStatusSchema = z.enum(DISCOVERY_STATUSES);
+export type DiscoveryStatus = z.infer<typeof discoveryStatusSchema>;
 
 export const AUDIT_EVENT_TYPES = [
   'auth.login',
@@ -136,6 +188,54 @@ export const AUDIT_EVENT_TYPES = [
   'worker.unauthorized_run_access',
   'guardrail.blocked',
   'settings.updated',
+
+  // --- Sprint 2 -------------------------------------------------------------
+  // Sprint 2 §20 lists the events the trail must contain. Each one below maps
+  // to exactly one item in that list; nothing is emitted that a reviewer has no
+  // use for.
+  'repository.created',
+  'repository.updated',
+  'repository.approved',
+  'repository.approval_revoked',
+
+  'discovery.started',
+  'discovery.context_inspected',
+  'discovery.message_recorded',
+  'discovery.question_asked',
+  'discovery.question_answered',
+
+  'brief.created',
+  'brief.updated',
+  'brief.confidence_calculated',
+
+  'worktree.created',
+  'worktree.preserved',
+  'worktree.removed',
+  'git.operation_rejected',
+
+  'coding_session.started',
+  'coding_session.question',
+  'coding_session.answered',
+  'coding_session.assumption_recorded',
+  'coding_session.blocked',
+  'coding_session.activity',
+  'coding_session.completed',
+  'coding_session.failed',
+
+  'test.run',
+  'test.failed',
+
+  'run.self_review',
+  'run.review_completed',
+
+  'pull_request.created',
+  'pull_request.declined',
+
+  'usage.snapshot',
+  'report.generated',
+
+  'memory.recorded',
+  'memory.promoted',
 ] as const;
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);
 export type AuditEventType = z.infer<typeof auditEventTypeSchema>;

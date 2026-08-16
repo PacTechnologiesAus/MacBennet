@@ -360,7 +360,11 @@ describe('dispatch', () => {
       provider: 'test-provider',
       kind: 'tokens',
       costCents: 5000, // equals the default nightly budget
+      // Sprint 2: `source` is the authoritative column and only `exact` money
+      // is enforceable as a hard budget. A CHECK constraint keeps `is_exact` in
+      // step with it, so the two cannot disagree.
       isExact: true,
+      source: 'exact',
     });
 
     expect((await lease(worker.token)).json().assignment).toBeNull();
