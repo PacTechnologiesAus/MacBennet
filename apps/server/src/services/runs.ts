@@ -405,7 +405,7 @@ export async function rejectRun(runId: string, input: { notes: string }, actor: 
  * concurrent workers even though Sprint 1 runs one.
  */
 export async function leaseNextRun(
-  worker: { id: string; name: string; capabilities: string[] },
+  worker: { id: string; name: string; capabilities: string[]; sandboxReady?: boolean },
 ): Promise<RunAssignment | null> {
   const settings = await getSettings();
   const spend = await recordedSpendForWindow(toCutoffConfig(settings), new Date());
@@ -424,8 +424,35 @@ export async function leaseNextRun(
     return null;
   }
 
-  const capabilities = worker.capabilities.filter((c) => typeof c === 'string');
+  let capabilities = worker.capabilities.filter((c) => typeof c === 'string');
   if (capabilities.length === 0) return null;
+
+  /*
+   * Sprint 3's containment guardrail, in the same shape as Sprint 1's approval
+   * predicate and Sprint 2's repository predicate.
+   *
+   * A worker that has not attested a working sandbox does not merely get its
+   * coding runs rejected — `claude_code` is removed from the capability set the
+   * dispatch statement selects on, so a coding run is UNSELECTABLE by that
+   * worker. The run stays queued for a worker that can contain it, rather than
+   * failing, because a sandbox that comes back is a normal recovery.
+   */
+  if (settings.requireSandbox && worker.sandboxReady === false && capabilities.includes('claude_code')) {
+    capabilities = capabilities.filter((c) => c !== 'claude_code');
+    await db.transaction(async (tx) => {
+      await record(tx, {
+        actor: SYSTEM_ACTOR,
+        eventType: 'sandbox.refused',
+        context: { workerId: worker.id },
+        metadata: {
+          guardrail: 'sandbox',
+          workerName: worker.name,
+          reason: 'This worker has not attested a working execution sandbox, so coding work is withheld from it.',
+        },
+      });
+    });
+    if (capabilities.length === 0) return null;
+  }
 
   return db.transaction(async (tx) => {
     const now = new Date();

@@ -12,6 +12,7 @@ import { LogBuffer } from './log-buffer.js';
 import { getHandler, JobCancelledError, SUPPORTED_JOB_KINDS, type JobContext } from './jobs/index.js';
 import { readState, writeState, type WorkerState } from './state.js';
 import { createLogger, type Logger } from './logger.js';
+import { attestSandbox, resolveSandbox } from './sandbox/index.js';
 import type { WorkerConfig } from './config.js';
 
 /**
@@ -73,11 +74,36 @@ export async function startWorker(options: RunWorkerOptions): Promise<WorkerHand
     ...(options.retryBaseMs !== undefined ? { retryBaseMs: options.retryBaseMs } : {}),
   });
 
-  const state = await ensureRegistered(config, client, logger);
+  /*
+   * Containment is MEASURED before anything else happens.
+   *
+   * The worker does not attest a sandbox because its `.env` claims one; it
+   * attests because `probe()` ran and succeeded. The attestation is sent at
+   * registration and repeated on every heartbeat, so a sandbox that breaks at
+   * 02:00 stops coding work within one beat rather than persisting as a stale
+   * claim on a dashboard.
+   */
+  const sandbox = await resolveSandbox({
+    provider: config.sandbox.provider,
+    image: config.sandbox.image,
+  });
+  const attestation = attestSandbox(sandbox);
+
+  if (attestation.available) {
+    logger.info(`Execution sandbox: ${attestation.kind}${attestation.version ? ` (${attestation.version})` : ''}.`);
+  } else {
+    logger.warn(
+      `No execution sandbox is available (${attestation.kind}). ${attestation.detail ?? ''} ` +
+        'The control plane will withhold coding work from this worker while it requires containment.',
+    );
+  }
+
+  const state = await ensureRegistered(config, client, logger, attestation);
   client.setToken(state.workerToken);
   logger.info(`Registered as "${state.name}" (${state.workerId}).`);
 
   let running = true;
+  let rotating = false;
   let currentRunId: string | null = null;
   let completedRuns = 0;
   let heartbeatMs = config.heartbeatSeconds * 1000;
@@ -98,14 +124,51 @@ export async function startWorker(options: RunWorkerOptions): Promise<WorkerHand
           uptimeSeconds: Math.round(process.uptime()),
           freeMemoryBytes: os.freemem(),
         },
+        sandbox: attestation,
       });
       // The server owns the cadence, so it can be tuned centrally.
       heartbeatMs = response.control.heartbeatIntervalSeconds * 1000;
+      await maybeRotate(response.control.rotateTokenRequested);
     } catch (err) {
       // A missed heartbeat is expected during a network partition. The control
       // plane will mark this worker offline and a human will see it; the worker
       // keeps working and recovers on its own.
       logger.warn(`Heartbeat failed: ${(err as Error).message}`);
+    }
+  };
+
+  /**
+   * Replaces this worker's credential when the control plane asks.
+   *
+   * The request arrives on the control envelope, which is on every response, so
+   * no inbound connection to the VM is needed and nobody has to log into it —
+   * which was the whole requirement.
+   *
+   * Order matters and is the reason this is not three lines: the new token is
+   * PERSISTED BEFORE it is adopted. A crash between the two leaves the state
+   * file holding a token the server considers active and the client holding one
+   * inside its overlap window, and both work. Doing it the other way round
+   * leaves a rebooted VM with a credential nobody recorded.
+   */
+  const maybeRotate = async (requested: boolean): Promise<void> => {
+    if (!requested || rotating) return;
+    rotating = true;
+    try {
+      const response = await client.rotateToken({ reason: 'server_requested' });
+      const next: WorkerState = { ...state, workerToken: response.workerToken, rotatedAt: new Date().toISOString() };
+      await writeState(config.stateFile, next);
+      state.workerToken = response.workerToken;
+      client.setToken(response.workerToken);
+      logger.info(
+        `Worker credential rotated. The previous token remains valid for ${response.previousTokenValidForSeconds}s.`,
+      );
+    } catch (err) {
+      // The old credential still works — that is what the overlap window is
+      // for — so a failed rotation is retried on the next beat rather than
+      // bricking the worker.
+      logger.warn(`Credential rotation failed, keeping the current token: ${(err as Error).message}`);
+    } finally {
+      rotating = false;
     }
   };
 
@@ -208,6 +271,18 @@ export async function startWorker(options: RunWorkerOptions): Promise<WorkerHand
       // Supplied for the repository jobs; the Sprint 1 handlers ignore them.
       assignment,
       client,
+      sandboxOptions: {
+        provider: config.sandbox.provider,
+        image: config.sandbox.image,
+        toolingMounts: config.sandbox.toolingMounts,
+        nodePath: config.sandbox.nodePath,
+        gitPath: config.sandbox.gitPath,
+        ...(config.sandbox.uid !== undefined ? { uid: config.sandbox.uid } : {}),
+        ...(config.sandbox.gid !== undefined ? { gid: config.sandbox.gid } : {}),
+        // Named so the plan builder can REFUSE to mount it, rather than merely
+        // happening not to.
+        workerStateFile: config.stateFile,
+      },
       ...(options.codingOverrides ? { codingOverrides: options.codingOverrides } : {}),
     };
 
@@ -306,6 +381,7 @@ async function ensureRegistered(
   config: WorkerConfig,
   client: ControlPlaneClient,
   logger: Logger,
+  sandbox: import('@mac/protocol').SandboxAttestation,
 ): Promise<WorkerState> {
   const existing = await readState(config.stateFile);
   if (existing && existing.controlPlaneUrl === config.controlPlaneUrl) {
@@ -332,6 +408,7 @@ async function ensureRegistered(
     version: '0.1.0',
     platform: `${os.platform()}-${os.arch()}-node${process.versions.node}`,
     protocolVersion: PROTOCOL_VERSION,
+    sandbox,
   });
 
   const state: WorkerState = {

@@ -86,7 +86,20 @@ export interface RegisteredWorker {
 
 export async function registerTestWorker(
   app: FastifyInstance,
-  overrides: { name?: string; capabilities?: JobKind[] } = {},
+  overrides: {
+    name?: string;
+    capabilities?: JobKind[];
+    /**
+     * Containment this worker attests (Sprint 3 §3.4).
+     *
+     * Defaults to a WORKING sandbox, because that is what a correctly
+     * provisioned worker looks like and because coding work is withheld from
+     * one without it. A test that wants the withholding behaviour asks for
+     * `null` explicitly, which makes that intent visible at the call site
+     * rather than implied by an omission.
+     */
+    sandbox?: { kind: 'bubblewrap' | 'docker' | 'none'; available: boolean; detail?: string } | null;
+  } = {},
 ): Promise<RegisteredWorker> {
   // Enrollment tokens are minted through the service rather than the admin
   // route so that worker fixtures do not require an admin session.
@@ -103,6 +116,16 @@ export async function registerTestWorker(
       version: '0.1.0-test',
       platform: 'linux-x64-test',
       protocolVersion: PROTOCOL_VERSION,
+      ...(overrides.sandbox === null
+        ? {}
+        : {
+            sandbox: {
+              kind: overrides.sandbox?.kind ?? 'bubblewrap',
+              available: overrides.sandbox?.available ?? true,
+              version: 'test-sandbox',
+              detail: overrides.sandbox?.detail ?? null,
+            },
+          }),
     },
   });
   if (response.statusCode !== 201) throw new Error(`registerTestWorker failed: ${response.body}`);

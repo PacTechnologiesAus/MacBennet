@@ -111,6 +111,18 @@ export const STOP_REASONS = [
   'agent_time_limit',
   /** Completed, but part of the work was left unimplemented and reported. */
   'completed_with_blockers',
+  // --- Sprint 3 ---
+  /**
+   * No usable execution sandbox, so the coding session was never started.
+   *
+   * This is a refusal, not a failure: Sprint 3 §3.4 requires that a missing
+   * sandbox prevents execution rather than falling back to running unconfined.
+   */
+  'sandbox_unavailable',
+  /** A non-exact usage signal crossed its configured soft threshold. */
+  'usage_threshold_reached',
+  /** The night shift ended and this run was still holding the worker. */
+  'night_shift_ended',
 ] as const;
 export const stopReasonSchema = z.enum(STOP_REASONS);
 export type StopReason = z.infer<typeof stopReasonSchema>;
@@ -236,6 +248,72 @@ export const AUDIT_EVENT_TYPES = [
 
   'memory.recorded',
   'memory.promoted',
+
+  // --- Sprint 3 -------------------------------------------------------------
+  // Sprint 3 §22 lists the events the trail must contain. Each one below maps
+  // to exactly one item in that list.
+
+  // Sandbox
+  'sandbox.created',
+  'sandbox.refused',
+  'sandbox.attested',
+
+  // Worker credentials
+  'worker.token_rotation_requested',
+  'worker.token_rotated',
+  'worker.token_revoked',
+  /** A revoked or expired token was presented — a genuine security signal. */
+  'worker.token_rejected',
+
+  // monday.com
+  'monday.board_mapped',
+  'monday.board_approved',
+  'monday.board_approval_revoked',
+  'monday.read',
+  'monday.item_linked',
+  'monday.assigned',
+  'monday.status_changed',
+  'monday.update_posted',
+  'monday.blocker_posted',
+  'monday.pull_request_attached',
+  /** A write the column allowlist refused. Prohibited operations are audited. */
+  'monday.write_refused',
+  'monday.write_failed',
+
+  // Night shift
+  'night_shift.started',
+  'night_shift.ended',
+  'night_shift.task_selected',
+  'night_shift.task_skipped',
+  'night_shift.scheduling_decision',
+  'night_shift.task_switched',
+  'night_shift.blocker_recorded',
+  'night_shift.idle',
+  /**
+   * A run approved by pre-approved night-shift policy rather than by a person.
+   * Deliberately NOT `run.approved`: a machine approval must never be readable
+   * as a human one (Sprint 3 §7.2).
+   */
+  'run.auto_approved',
+
+  // Project night-shift approval
+  'project.night_shift_approved',
+  'project.night_shift_approval_revoked',
+
+  // Discovery investigation
+  'discovery.investigation_completed',
+  'discovery.escalated_to_human',
+
+  // Email
+  'report.email_attempted',
+  'report.email_delivered',
+  'report.email_failed',
+  'report.email_recipient_refused',
+
+  // Model-assisted work
+  'model.assisted_discovery',
+  'model.assisted_answer',
+  'model.output_rejected',
 ] as const;
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);
 export type AuditEventType = z.infer<typeof auditEventTypeSchema>;

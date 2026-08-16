@@ -11,6 +11,8 @@ import {
   progressRequestSchema,
   pullRequestReportRequestSchema,
   registerRequestSchema,
+  rotateTokenRequestSchema,
+  sandboxAttestationRequestSchema,
   submitReviewRequestSchema,
   usageSnapshotRequestSchema,
   worktreeReportRequestSchema,
@@ -19,7 +21,13 @@ import {
 } from '@mac/protocol';
 import { AppError } from '../errors.js';
 import { bearerToken, currentWorker, requireWorkerAuth } from '../worker-auth.js';
-import { buildControlEnvelope, recordHeartbeat, registerWorker } from '../../services/workers.js';
+import {
+  buildControlEnvelope,
+  recordHeartbeat,
+  recordSandboxAttestation,
+  registerWorker,
+} from '../../services/workers.js';
+import { rotateWorkerToken } from '../../services/worker-credentials.js';
 import { completeRun, leaseNextRun, recordProgress } from '../../services/runs.js';
 import { appendWorkerLogs } from '../../services/logs.js';
 import {
@@ -76,7 +84,7 @@ export async function workerRoutes(
         );
       }
 
-      const result = await registerWorker(token, body);
+      const result = await registerWorker(token, { ...body, sandbox: body.sandbox });
       const control = await buildControlEnvelope(result.workerId);
       return reply.status(201).send({ control, ...result });
     },
@@ -93,9 +101,46 @@ export async function workerRoutes(
       const workerStatus = await recordHeartbeat(worker, {
         status: body.status,
         currentRunId: body.currentRunId,
+        sandbox: body.sandbox,
       });
       const control = await buildControlEnvelope(worker.id);
       return reply.send({ control, workerStatus });
+    });
+
+    /**
+     * The worker replaces its own credential (Sprint 3 §4).
+     *
+     * Authenticated with the token being replaced, so possession of the current
+     * credential is what authorises its replacement — the same property that
+     * makes the two-stage enrollment safe. The new token is returned exactly
+     * once and exists in plaintext nowhere else.
+     *
+     * Rate-limited harder than the rest of the plane: repeated rotation is
+     * either a bug or someone probing, and neither should be cheap.
+     */
+    scope.post('/api/worker/rotate-token', {
+      config: { rateLimit: { max: 10, timeWindow: '5 minutes' } },
+      handler: async (request, reply) => {
+        const worker = currentWorker(request);
+        const body = rotateTokenRequestSchema.parse(request.body ?? {});
+        const result = await rotateWorkerToken(worker, body);
+        const control = await buildControlEnvelope(worker.id);
+        return reply.send({
+          control,
+          workerToken: result.token,
+          previousTokenValidForSeconds: result.previousTokenValidForSeconds,
+          issuedAt: result.issuedAt,
+        });
+      },
+    });
+
+    /** Out-of-band containment attestation. Normally rides the heartbeat. */
+    scope.post('/api/worker/sandbox-attestation', async (request, reply) => {
+      const worker = currentWorker(request);
+      const body = sandboxAttestationRequestSchema.parse(request.body);
+      const result = await recordSandboxAttestation(worker, body.sandbox);
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, accepted: true, codingWorkWithheld: result.codingWorkWithheld });
     });
 
     /**
@@ -114,7 +159,12 @@ export async function workerRoutes(
       const capabilities = Array.isArray(worker.capabilities) ? (worker.capabilities as string[]) : [];
 
       for (;;) {
-        const assignment = await leaseNextRun({ id: worker.id, name: worker.name, capabilities });
+        const assignment = await leaseNextRun({
+          id: worker.id,
+          name: worker.name,
+          capabilities,
+          sandboxReady: worker.sandboxReady,
+        });
         if (assignment) {
           const control = await buildControlEnvelope(worker.id);
           return reply.send({ control, assignment });

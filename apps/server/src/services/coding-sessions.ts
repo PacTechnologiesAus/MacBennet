@@ -8,6 +8,7 @@ import {
   type CodingAgentProvider,
   type DecisionRisk,
   type GitViolationDto,
+  type Groundedness,
   type RunAssumptionDto,
   type RunBlockerDto,
   type WorktreeReportRequest,
@@ -68,6 +69,10 @@ export const toQuestionDto = (row: AgentQuestionRow): AgentQuestionDto => ({
   affectedImplementation: row.affectedImplementation,
   askedAt: row.askedAt.toISOString(),
   answeredAt: row.answeredAt?.toISOString() ?? null,
+  evidence: Array.isArray(row.evidence) ? (row.evidence as AgentQuestionDto['evidence']) : [],
+  groundedness: row.groundedness as Groundedness,
+  modelAssisted: row.modelAssisted,
+  sourcesChecked: Array.isArray(row.sourcesChecked) ? (row.sourcesChecked as string[]) : [],
 });
 
 async function projectIdForRun(tx: DbHandle, runId: string): Promise<{ projectId: string | null; taskId: string | null }> {

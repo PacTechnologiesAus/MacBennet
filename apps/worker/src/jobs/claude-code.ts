@@ -16,6 +16,14 @@ import { ClaudeCodeAdapter } from '../coding/claude-code-adapter.js';
 import { MockCodingAgent } from '../coding/mock-agent.js';
 import { GhPullRequestGateway, type PullRequestGateway } from '../coding/pull-request.js';
 import { NOT_RUN, runProjectCommand, type CommandResult } from '../testing/test-runner.js';
+import {
+  buildSandboxPlan,
+  resolveSandbox,
+  SandboxPlanError,
+  SandboxUnavailable,
+  type ExecutionSandbox,
+  type SandboxSession,
+} from '../sandbox/index.js';
 import type { JobContext, JobResult } from './index.js';
 
 /**
@@ -24,17 +32,29 @@ import type { JobContext, JobResult } from './index.js';
  * The sequence, and why it is in this order:
  *
  *   1. worktree      isolate before anything can write
- *   2. shim          install the git guard BEFORE the agent starts
- *   3. session       delegate implementation, supervising every question
- *   4. commit        capture anything the agent left uncommitted
- *   5. test          run the project's own tests and read the result
- *   6. verify        confirm the default branch did not move
- *   7. review        submit facts; Mac returns the verdict
- *   8. push + PR     only if Mac decided one is warranted
- *   9. preserve      leave the worktree unless the work is finished and clean
+ *   2. sandbox       establish the OS boundary BEFORE anything runs inside it
+ *   3. shim          install the git guard BEFORE the agent starts
+ *   4. session       delegate implementation, supervising every question
+ *   5. commit        capture anything the agent left uncommitted
+ *   6. test          run the project's own tests and read the result
+ *   7. verify        confirm the default branch did not move
+ *   8. review        submit facts; Mac returns the verdict
+ *   9. push + PR     only if Mac decided one is warranted
+ *  10. preserve      leave the worktree unless the work is finished and clean
  *
- * Steps 2 and 6 are the two halves of the git safety argument: prevent the
+ * Steps 3 and 7 are the two halves of the git safety argument: prevent the
  * command, then verify the effect. Neither alone would be enough.
+ *
+ * Step 2 is Sprint 3's addition and it is FAIL-CLOSED: if the sandbox cannot be
+ * established, the run fails with `sandbox_unavailable` and the worktree is
+ * preserved. There is deliberately no path that falls back to running the agent
+ * unconfined — a boundary that silently turns itself off is worse than one that
+ * was never claimed.
+ *
+ * Note which steps run INSIDE the sandbox: the agent (step 4) and the project's
+ * own test and build command (step 6). Everything else is Mac's own code acting
+ * on his own intent, and the control-plane credential must never sit inside the
+ * boundary with something that executes agent-authored code.
  */
 
 export interface CodingJobDependencies {
@@ -44,6 +64,27 @@ export interface CodingJobDependencies {
   pullRequestGateway?: PullRequestGateway;
   /** Skips the real `gh`/`git push` when running against a local test remote. */
   skipPush?: boolean;
+  /**
+   * Test seam for the containment boundary.
+   *
+   * Supplying a sandbox here lets a test assert that the job builds a valid
+   * plan and routes the agent and the test command through the session, without
+   * needing a container image that happens to carry Node and git. The real
+   * providers are proven separately, against real filesystems, by the sandbox
+   * conformance suite.
+   */
+  sandbox?: ExecutionSandbox | null;
+  /** Overrides the worker's configured sandbox settings. Tests only. */
+  sandboxOptions?: {
+    provider?: 'auto' | 'bubblewrap' | 'docker' | 'none';
+    image?: string;
+    toolingMounts?: string[];
+    nodePath?: string;
+    gitPath?: string;
+    uid?: number;
+    gid?: number;
+    workerStateFile?: string;
+  };
 }
 
 export async function runCodingJob(
@@ -106,20 +147,92 @@ export async function runCodingJob(
   // The worktree is preserved unless this flips. Every failure path below
   // leaves it as it is, which is the point: do not destroy reviewable work.
   let removeWorktree = false;
+  let sandboxSession: SandboxSession | null = null;
 
   try {
-    // --- 2. The git shim, installed before the agent can run anything ------
+    // --- 2. The execution sandbox, established before anything runs --------
 
-    await ctx.progress('installing_git_guard', 8);
+    await ctx.progress('opening_sandbox', 7);
+    const sandboxOpts = deps.sandboxOptions ?? {};
+    const scratchDir = path.join(workspaceRoot, 'scratch', runId);
+    const shimHostDir = path.join(workspaceRoot, 'shims', runId);
+    await fsMkdir(scratchDir);
+
+    const resolution = deps.sandbox
+      ? { kind: deps.sandbox.kind, sandbox: deps.sandbox, available: true, version: null, detail: null }
+      : await resolveSandbox({
+          provider: sandboxOpts.provider ?? 'auto',
+          ...(sandboxOpts.image ? { image: sandboxOpts.image } : {}),
+        });
+
+    if (coding.sandbox.required && !resolution.available) {
+      throw new SandboxUnavailable(
+        resolution.kind,
+        `This run requires an OS-enforced sandbox and none is available on this worker. ${resolution.detail ?? ''}`.trim(),
+      );
+    }
+
+    if (resolution.sandbox) {
+      const plan = buildSandboxPlan({
+        worktreePath: setup.path,
+        repositoryGitDir: path.join(coding.localPath, '.git'),
+        repositoryPath: coding.localPath,
+        workspaceRoot,
+        shimDir: shimHostDir,
+        scratchDir,
+        ...(sandboxOpts.toolingMounts ? { toolingMounts: sandboxOpts.toolingMounts } : {}),
+        // The coding agent must reach its model API; the test command must not,
+        // unless the repository was explicitly configured to allow it.
+        network: 'egress',
+        kind: resolution.kind,
+        ...(sandboxOpts.image ? { image: sandboxOpts.image } : {}),
+        maxMinutes: coding.task.limits.maxMinutes,
+        ...(sandboxOpts.uid !== undefined && sandboxOpts.gid !== undefined
+          ? { user: { uid: sandboxOpts.uid, gid: sandboxOpts.gid } }
+          : {}),
+        ...(sandboxOpts.workerStateFile ? { workerStateFile: sandboxOpts.workerStateFile } : {}),
+      });
+
+      sandboxSession = await resolution.sandbox.open(plan);
+      ctx.log(
+        `Execution sandbox open (${resolution.kind}${resolution.version ? `, ${resolution.version}` : ''}). ` +
+          `The coding agent can reach the worktree, this repository's git metadata and its scratch space, ` +
+          'and nothing else on this machine.',
+        'system',
+      );
+    } else {
+      ctx.log(
+        'WARNING: no execution sandbox. This run was permitted to proceed unconfined because the control ' +
+          'plane did not require containment for it.',
+        'stderr',
+      );
+    }
+
+    // --- 3. The git shim, installed before the agent can run anything ------
+
+    await ctx.progress('installing_git_guard', 9);
     const realGit = await resolveRealGit();
     const shim = await buildGitShim({
-      directory: path.join(workspaceRoot, 'shims', runId),
+      directory: shimHostDir,
       realGitPath: realGit,
       policy: { defaultBranch: coding.defaultBranch, currentBranch: coding.branch, allowPush: false },
+      // Outside the shim directory, which the sandbox mounts read-only so the
+      // agent cannot rewrite the policy it is being judged by.
+      violationsFile: path.join(scratchDir, 'git-violations.jsonl'),
+      ...(sandboxSession
+        ? {
+            sandbox: {
+              binDir: sandboxSession.pathFor(shimHostDir),
+              scratchDir: sandboxSession.pathFor(scratchDir),
+              nodePath: sandboxOpts.nodePath ?? DEFAULT_SANDBOX_NODE,
+              realGitPath: sandboxOpts.gitPath ?? DEFAULT_SANDBOX_GIT,
+            },
+          }
+        : {}),
     });
     ctx.log(`Git guard installed at ${shim.binDir}; the coding agent cannot merge, push or force-push.`, 'system');
 
-    // --- 3. The coding session ---------------------------------------------
+    // --- 4. The coding session ---------------------------------------------
 
     const task: CodingTask = codingTaskSchema.parse({
       ...coding.task,
@@ -134,7 +247,13 @@ export async function runCodingJob(
       deps.agentFactory?.(coding) ??
       (coding.provider === 'mock'
         ? new MockCodingAgent()
-        : new ClaudeCodeAdapter({ shimBinDir: shim.binDir, idleTimeoutMs: task.limits.maxMinutes * 60_000 }));
+        : new ClaudeCodeAdapter({
+            shimBinDir: sandboxSession ? sandboxSession.pathFor(shim.binDir) : shim.binDir,
+            idleTimeoutMs: task.limits.maxMinutes * 60_000,
+            ...(sandboxSession
+              ? { spawner: sandboxSession.spawner as never, workdir: sandboxSession.pathFor(setup.path) }
+              : {}),
+          }));
 
     const availability = await agent.isAvailable();
     if (!availability.available) {
@@ -206,7 +325,7 @@ export async function runCodingJob(
     if (result.usage) await client.reportUsage(runId, { snapshot: result.usage }).catch(() => undefined);
 
     // Refusals the shim caught, uploaded as security events.
-    for (const violation of await readShimViolations(shim.violationsFile)) {
+    for (const violation of await readShimViolations(path.join(scratchDir, 'git-violations.jsonl'))) {
       await reportViolation({ ...violation, origin: 'agent' });
     }
 
@@ -225,14 +344,26 @@ export async function runCodingJob(
     let tests: CommandResult = NOT_RUN;
     let build: CommandResult = NOT_RUN;
 
+    /*
+     * The project's own commands run INSIDE the sandbox too.
+     *
+     * This is the non-obvious half of the boundary and arguably the more
+     * important one: `npm test` executes code the agent has just written.
+     * Sandboxing the agent but not its test run would leave the widest hole
+     * open while claiming it had been closed.
+     */
+    const sandboxedCwd = sandboxSession ? sandboxSession.pathFor(setup.path) : setup.path;
+    const commandOptions = {
+      cwd: sandboxedCwd,
+      signal: ctx.signal,
+      timeoutMs: Math.min(task.limits.maxMinutes, 30) * 60_000,
+      ...(sandboxSession ? { spawner: sandboxSession.spawner } : {}),
+    };
+
     if (task.testCommand.length) {
       await ctx.progress('testing', 70);
       ctx.log(`Running tests: ${task.testCommand.join(' ')}`, 'system');
-      tests = await runProjectCommand(task.testCommand, {
-        cwd: setup.path,
-        signal: ctx.signal,
-        timeoutMs: Math.min(task.limits.maxMinutes, 30) * 60_000,
-      });
+      tests = await runProjectCommand(task.testCommand, commandOptions);
       ctx.log(`Tests ${tests.passed ? 'passed' : `FAILED (exit ${tests.exitCode})`}.`, tests.passed ? 'system' : 'stderr');
     } else {
       ctx.log('No test command is configured for this repository; none was run.', 'system');
@@ -240,11 +371,7 @@ export async function runCodingJob(
 
     if (task.buildCommand.length) {
       await ctx.progress('building', 78);
-      build = await runProjectCommand(task.buildCommand, {
-        cwd: setup.path,
-        signal: ctx.signal,
-        timeoutMs: Math.min(task.limits.maxMinutes, 30) * 60_000,
-      });
+      build = await runProjectCommand(task.buildCommand, commandOptions);
     }
 
     // --- 6. Verify the default branch did not move -------------------------
@@ -362,13 +489,40 @@ export async function runCodingJob(
     // Every failure path preserves the worktree. Spec: do not destroy useful
     // work merely because something went wrong.
     await preserve(client, runId, worktrees, setup, 'preserved').catch(() => undefined);
+
+    if (err instanceof SandboxPlanError) {
+      // A plan the builder refused is a configuration problem, not a run
+      // failure — and it is reported as the refusal it is rather than as an
+      // opaque crash, because someone has to go and fix the configuration.
+      throw new SandboxUnavailable(
+        'none',
+        `Refusing to start a coding session: ${err.message} (${err.refusal}: ${err.offendingPath})`,
+      );
+    }
     throw err;
+  } finally {
+    await sandboxSession?.close().catch(() => undefined);
   }
 }
 
 export class CodingAgentUnavailable extends Error {
   override readonly name = 'CodingAgentUnavailable';
 }
+
+/**
+ * Where node and git live inside a container image.
+ *
+ * Overridable, because "which image" is an admin decision and images differ.
+ * Under bubblewrap these are never used — the host's own paths are visible
+ * inside the sandbox unchanged, which is one of the reasons it is preferred.
+ */
+const DEFAULT_SANDBOX_NODE = '/usr/local/bin/node';
+const DEFAULT_SANDBOX_GIT = '/usr/bin/git';
+
+const fsMkdir = async (dir: string): Promise<void> => {
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(dir, { recursive: true });
+};
 
 // ---------------------------------------------------------------------------
 // Helpers

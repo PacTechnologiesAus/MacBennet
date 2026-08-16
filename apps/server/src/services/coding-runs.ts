@@ -210,6 +210,17 @@ export async function buildCodingAssignment(tx: DbHandle, run: RunRow): Promise<
     },
     openPullRequest: params.openPullRequest !== false,
     pullRequestBase: repository.defaultBranch,
+    /*
+     * Sprint 3: the containment the control plane requires for this run.
+     *
+     * Built server-side like everything else in this block. `required` is not a
+     * hint — a worker that cannot satisfy it refuses the run and reports
+     * `sandbox_unavailable` rather than running the agent unconfined.
+     */
+    sandbox: {
+      required: settings.requireSandbox,
+      testNetwork: (repository.testNetwork as 'none' | 'egress') ?? 'none',
+    },
   };
 }
 

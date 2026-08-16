@@ -22,6 +22,10 @@ import type {
   PullRequestReportRequest,
   PullRequestReportResponse,
   ReviewVerdictResponse,
+  RotateTokenRequest,
+  RotateTokenResponse,
+  SandboxAttestationRequest,
+  SandboxAttestationResponse,
   SubmitReviewRequest,
   UsageSnapshotRequest,
   UsageSnapshotResponse,
@@ -239,6 +243,22 @@ export class ControlPlaneClient {
 
   reportPullRequest(runId: string, body: PullRequestReportRequest): Promise<PullRequestReportResponse> {
     return this.request<PullRequestReportResponse>(`/api/worker/runs/${runId}/pull-request`, body);
+  }
+
+  /**
+   * Replaces this worker's own credential.
+   *
+   * Not retried hard: the current token still works for the length of the
+   * overlap window, so a failed rotation is retried on the next heartbeat
+   * rather than hammered here. Hammering a credential endpoint is exactly the
+   * shape of traffic that should look suspicious.
+   */
+  rotateToken(body: RotateTokenRequest): Promise<RotateTokenResponse> {
+    return this.request<RotateTokenResponse>('/api/worker/rotate-token', body, { attempts: 2, timeoutMs: 15_000 });
+  }
+
+  reportSandboxAttestation(body: SandboxAttestationRequest): Promise<SandboxAttestationResponse> {
+    return this.request<SandboxAttestationResponse>('/api/worker/sandbox-attestation', body);
   }
 
   reportContextSnapshot(runId: string, body: ContextSnapshotRequest): Promise<ContextSnapshotResponse> {

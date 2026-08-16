@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { startWorker } from '@mac/worker';
 import { silentLogger } from '@mac/worker/logger';
+import { defaultSandboxConfig } from '@mac/worker/config';
 import { MockCodingAgent } from '@mac/worker/coding/mock-agent';
 import { RecordingPullRequestGateway } from '@mac/worker/coding/pull-request';
 import { buildApp } from '../../src/app.js';
@@ -114,6 +115,19 @@ beforeEach(async () => {
   await resetDatabase();
   admin = await createAndLogin(app, { email: 'admin@pac.test', role: 'admin' });
   operator = await createAndLogin(app, { email: 'operator@pac.test', role: 'operator' });
+
+  /*
+   * Sprint 3 withholds coding work from a worker that has not attested an
+   * OS-enforced sandbox, and it does so by DEFAULT. This test's coding agent is
+   * the in-process mock — it spawns nothing, so there is nothing here for a
+   * sandbox to contain — and requiring one would only prove that the guardrail
+   * blocks dispatch, which `sandbox.test.ts` proves directly and on purpose.
+   *
+   * Turning it off here is therefore explicit and narrow, not a convenience:
+   * the containment boundary itself is proven against a real provider by the
+   * sandbox conformance suite, and the withholding guardrail by its own test.
+   */
+  await asUser(app, admin).patch('/api/settings', { requireSandbox: false });
 });
 
 const CONVERSATION = [
@@ -142,6 +156,11 @@ async function startTestWorker(script: ConstructorParameters<typeof MockCodingAg
       workspace,
       heartbeatSeconds: 30,
       logLevel: 'silent',
+      // The mock coding agent runs in-process and spawns nothing, so there is
+      // nothing here for a sandbox to contain. Containment itself is proven
+      // against a real provider by the sandbox conformance suite, and the
+      // withholding guardrail by `sandbox.test.ts`.
+      sandbox: defaultSandboxConfig(),
     },
     logger: silentLogger,
     maxRuns: 1,

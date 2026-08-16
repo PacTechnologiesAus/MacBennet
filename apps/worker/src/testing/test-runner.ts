@@ -116,6 +116,19 @@ export interface RunCommandOptions {
   maxOutputChars?: number;
   env?: NodeJS.ProcessEnv;
   onOutput?: (chunk: string) => void;
+  /**
+   * Sprint 3: how the command is started.
+   *
+   * Defaults to `node:child_process.spawn`. A coding run supplies the sandbox
+   * session's spawner, because `npm test` executes code the agent has just
+   * written — sandboxing the agent but not its test run would leave the widest
+   * hole open while claiming it was closed.
+   */
+  spawner?: (
+    executable: string,
+    args: readonly string[],
+    options: import('node:child_process').SpawnOptions,
+  ) => import('node:child_process').ChildProcess;
 }
 
 export async function runProjectCommand(
@@ -138,8 +151,10 @@ export async function runProjectCommand(
   const startedAt = Date.now();
   const maxChars = options.maxOutputChars ?? 60_000;
 
+  const launch = options.spawner ?? ((exe, argvArgs, spawnOptions) => spawn(exe, [...argvArgs], spawnOptions));
+
   return new Promise<CommandResult>((resolve) => {
-    const child = spawn(executable!, args, {
+    const child = launch(executable!, args, {
       cwd: options.cwd,
       shell: false,
       windowsHide: true,

@@ -13,7 +13,7 @@ import {
 } from '../helpers/harness.js';
 import { makeApprovedRun, makeProject, makeRun, makeTask, registerTestWorker } from '../helpers/fixtures.js';
 import { db } from '../../src/db/client.js';
-import { runs, runUsage, workers } from '../../src/db/schema.js';
+import { runs, runUsage, workerTokens, workers } from '../../src/db/schema.js';
 import { queryAuditEvents } from '../../src/services/audit-query.js';
 import { createEnrollmentToken, markStaleWorkersOffline } from '../../src/services/workers.js';
 import { SYSTEM_ACTOR } from '../../src/services/audit.js';
@@ -73,9 +73,13 @@ describe('worker registration', () => {
 
   it('stores only a hash of the worker token', async () => {
     const worker = await registerTestWorker(app);
-    const [row] = await db.select().from(workers).where(eq(workers.id, worker.workerId)).limit(1);
+    // Sprint 3 moved the hash to `worker_tokens`, because rotation needs
+    // several tokens per worker to exist at once. The property under test is
+    // unchanged: no plaintext credential is stored anywhere.
+    const [row] = await db.select().from(workerTokens).where(eq(workerTokens.workerId, worker.workerId)).limit(1);
     expect(row!.tokenHash).not.toBe(worker.token);
     expect(row!.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(row!.status).toBe('active');
   });
 
   it('refuses to reuse an enrollment token', async () => {
@@ -231,14 +235,20 @@ describe('heartbeat', () => {
 
   it('does not write an audit event for ordinary heartbeats', async () => {
     const worker = await registerTestWorker(app);
+    const atRegistration = await queryAuditEvents({ workerId: worker.workerId, limit: 50, offset: 0 });
+
     for (let i = 0; i < 5; i += 1) {
       await asWorker(app, worker.token).post('/api/worker/heartbeat', { status: 'idle', currentRunId: null });
     }
+
     // Heartbeats at 10s intervals would otherwise produce ~8,600 rows a day and
-    // drown the trail a human is supposed to read.
+    // drown the trail a human is supposed to read. Compared against the state
+    // AFTER registration rather than against a fixed list, because registration
+    // legitimately emits more than one event — Sprint 3 added the containment
+    // attestation to it — and what is under test is that beating adds nothing.
     const events = await queryAuditEvents({ workerId: worker.workerId, limit: 50, offset: 0 });
     expect(events.filter((e) => e.eventType === 'worker.online')).toHaveLength(0);
-    expect(events.map((e) => e.eventType)).toEqual(['worker.registered']);
+    expect(events.map((e) => e.eventType)).toEqual(atRegistration.map((e) => e.eventType));
   });
 
   it('audits the recovery of a worker that had gone offline', async () => {

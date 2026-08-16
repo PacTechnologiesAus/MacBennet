@@ -45,6 +45,23 @@ export interface JobContext {
    */
   assignment?: RunAssignment;
   client?: ControlPlaneClient;
+  /**
+   * The worker's containment configuration (Sprint 3 §3).
+   *
+   * Threaded through the context rather than read from the environment inside
+   * the job, so a job never reaches around its caller for a security-relevant
+   * setting — and so a test can state exactly what containment it is exercising.
+   */
+  sandboxOptions?: {
+    provider?: 'auto' | 'bubblewrap' | 'docker' | 'none';
+    image?: string;
+    toolingMounts?: string[];
+    nodePath?: string;
+    gitPath?: string;
+    uid?: number;
+    gid?: number;
+    workerStateFile?: string;
+  };
   /** Test seams for the coding job: a mock agent, a recording PR gateway. */
   codingOverrides?: Record<string, unknown>;
 }
@@ -185,6 +202,8 @@ const handlers: Record<JobKind, JobHandler> = {
     const { runCodingJob } = await import('./claude-code.js');
     return runCodingJob(assignment, ctx, {
       client,
+      // Before the overrides, so a test that states its own containment wins.
+      ...(ctx.sandboxOptions ? { sandboxOptions: ctx.sandboxOptions } : {}),
       ...(ctx.codingOverrides as Record<string, never> | undefined),
     });
   },

@@ -19,19 +19,34 @@ import {
   AGENT_ANSWER_DECISIONS,
   AGENT_SESSION_STATES,
   APPROVAL_ACTIONS,
+  APPROVAL_SOURCES,
   APPROVAL_STATES,
   AUDIT_EVENT_TYPES,
   BRIEF_STATUSES,
   CODING_AGENT_PROVIDERS,
   DECISION_RISKS,
   DISCOVERY_STATUSES,
+  EMAIL_DELIVERY_KINDS,
+  EMAIL_DELIVERY_STATUSES,
   EXECUTION_MODES,
+  GROUNDEDNESS,
+  INVESTIGATION_SUBJECT_KINDS,
   JOB_KINDS,
   LOG_STREAMS,
+  MAIL_PROVIDERS,
   MEMORY_SCOPES,
+  MODEL_PROVIDERS,
+  MONDAY_WRITE_KINDS,
+  MONDAY_WRITE_STATUSES,
+  NIGHT_DECISION_KINDS,
+  NIGHT_SHIFT_STATUSES,
+  NIGHT_STOP_REASONS,
   RISK_LEVELS,
   REVIEW_VERDICTS,
+  RUN_SELECTION_SOURCES,
   RUN_STATUSES,
+  SANDBOX_KINDS,
+  SANDBOX_NETWORK_MODES,
   SCOPE_KINDS,
   STOP_REASONS,
   TASK_PRIORITIES,
@@ -42,6 +57,10 @@ import {
   WORKER_STATUSES,
   WORKTREE_STATUSES,
 } from '@mac/protocol';
+
+/** Token lifecycle. `superseded` is the bounded overlap window (Sprint 3 §4). */
+export const WORKER_TOKEN_STATUSES = ['active', 'superseded', 'revoked'] as const;
+export const WORKER_TOKEN_ISSUE_ROUTES = ['enrollment', 'rotation', 'admin_reset'] as const;
 
 /**
  * Enumerations are expressed as text columns with CHECK constraints rather than
@@ -137,6 +156,35 @@ export const settings = pgTable('settings', {
     .notNull()
     .default('0.800'),
 
+  // --- Sprint 3 ---
+  /**
+   * When true, a coding run is not dispatched to a worker that has not attested
+   * a working sandbox. Enforced as a predicate in the dispatch statement, so it
+   * is not something a call site can forget.
+   */
+  requireSandbox: boolean('require_sandbox').notNull().default(true),
+  workerTokenMaxAgeHours: integer('worker_token_max_age_hours').notNull().default(168),
+  /** How long a superseded token keeps working. Short on purpose. */
+  workerTokenOverlapSeconds: integer('worker_token_overlap_seconds').notNull().default(300),
+  nightShiftEnabled: boolean('night_shift_enabled').notNull().default(false),
+  nightShiftSafetyFactor: numeric('night_shift_safety_factor', { precision: 4, scale: 2 }).notNull().default('1.50'),
+  nightShiftWrapUpMinutes: integer('night_shift_wrap_up_minutes').notNull().default(10),
+  nightShiftMinStartMinutes: integer('night_shift_min_start_minutes').notNull().default(20),
+  nightShiftLargeTaskMinMinutes: integer('night_shift_large_task_min_minutes').notNull().default(90),
+  /**
+   * The ONLY place a morning-report recipient can be configured.
+   *
+   * There is no recipient parameter anywhere in the send path, so nothing from
+   * a task description, a brief, a monday item or a coding agent can introduce
+   * an address (Sprint 3 §9.3).
+   */
+  reportRecipients: jsonb('report_recipients').notNull().default(sql`'[]'::jsonb`),
+  allowedRecipientDomains: jsonb('allowed_recipient_domains').notNull().default(sql`'[]'::jsonb`),
+  mailProvider: enumText('mail_provider', MAIL_PROVIDERS).notNull().default('none'),
+  /** Off by default: determinism is the default posture for unattended work. */
+  modelAssistEnabled: boolean('model_assist_enabled').notNull().default(false),
+  modelProvider: enumText('model_provider', MODEL_PROVIDERS).notNull().default('none'),
+
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
 });
@@ -152,6 +200,17 @@ export const projects = pgTable(
     repoUrl: text('repo_url'),
     repoDefaultBranch: text('repo_default_branch').default('main'),
     isActive: boolean('is_active').notNull().default(true),
+    /**
+     * Sprint 3: the first of two gates on autonomous work selection.
+     *
+     * A project must be explicitly approved before Mac may take work from it
+     * overnight, and the monday board must be approved too. Revoking either
+     * stops future selection without any call site remembering to check — the
+     * same shape as `repositories.is_approved`.
+     */
+    nightShiftApproved: boolean('night_shift_approved').notNull().default(false),
+    nightShiftApprovedBy: uuid('night_shift_approved_by').references(() => users.id, { onDelete: 'set null' }),
+    nightShiftApprovedAt: timestamp('night_shift_approved_at', { withTimezone: true }),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -173,6 +232,8 @@ export const tasks = pgTable(
     status: enumText('status', TASK_STATUSES).notNull().default('draft'),
     priority: enumText('priority', TASK_PRIORITIES).notNull().default('normal'),
     confidence: numeric('confidence', { precision: 4, scale: 3 }),
+    /** The monday.com item this task mirrors, when it came from a board. */
+    mondayItemId: text('monday_item_id'),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -180,6 +241,7 @@ export const tasks = pgTable(
   (t) => ({
     projectIdx: index('tasks_project_id_idx').on(t.projectId),
     statusIdx: index('tasks_status_idx').on(t.status),
+    mondayItemIdx: index('tasks_monday_item_id_idx').on(t.mondayItemId),
   }),
 );
 
@@ -193,18 +255,75 @@ export const workers = pgTable(
     lastHeartbeatAt: timestamp('last_heartbeat_at', { withTimezone: true }),
     /** Set on dispatch, cleared on completion. Denormalised for the dashboard. */
     currentRunId: uuid('current_run_id'),
-    tokenHash: text('token_hash').notNull(),
-    /** First few characters of the token, for display only. Not a secret. */
+    /**
+     * Sprint 3 moved the hash itself to `worker_tokens`: rotation needs several
+     * tokens per worker to exist at once, and a single column cannot express
+     * that. This is the display prefix of the ACTIVE token, kept denormalised so
+     * the workers list needs no join.
+     */
     tokenPrefix: text('token_prefix').notNull(),
     version: text('version'),
     platform: text('platform'),
+
+    // --- Sprint 3: containment attestation ---
+    /**
+     * What containment this worker reports it can provide, re-attested on every
+     * heartbeat. A sandbox that stopped working between registration and 02:00
+     * must stop coding work, not persist as a stale claim on a dashboard.
+     */
+    sandboxKind: enumText('sandbox_kind', SANDBOX_KINDS),
+    sandboxReady: boolean('sandbox_ready').notNull().default(false),
+    sandboxDetail: text('sandbox_detail'),
+    sandboxVersion: text('sandbox_version'),
+
+    tokenIssuedAt: timestamp('token_issued_at', { withTimezone: true }),
+    /** Set by an admin or the age sweeper; delivered via the control envelope. */
+    rotationRequestedAt: timestamp('rotation_requested_at', { withTimezone: true }),
+    lastRotatedAt: timestamp('last_rotated_at', { withTimezone: true }),
+
     registeredAt: timestamp('registered_at', { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     nameIdx: uniqueIndex('workers_name_key').on(t.name),
-    tokenHashIdx: uniqueIndex('workers_token_hash_key').on(t.tokenHash),
+  }),
+);
+
+/**
+ * Worker credentials, one row per issued token (Sprint 3 §4).
+ *
+ * Sprint 1 stored a single hash on the worker and recorded rotation as debt;
+ * Sprint 2 deferred it again. This table is the repayment. The load-bearing
+ * detail is `status = 'superseded'` with an `expires_at`: a bounded overlap so
+ * an in-flight request signed with the old token does not fail mid-rotation,
+ * and a CHECK constraint that makes an unbounded overlap impossible to store.
+ */
+export const workerTokens = pgTable(
+  'worker_tokens',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    workerId: uuid('worker_id')
+      .notNull()
+      .references(() => workers.id, { onDelete: 'cascade' }),
+    tokenHash: text('token_hash').notNull(),
+    tokenPrefix: text('token_prefix').notNull(),
+    status: enumText('status', WORKER_TOKEN_STATUSES).notNull().default('active'),
+    issuedVia: enumText('issued_via', WORKER_TOKEN_ISSUE_ROUTES).notNull().default('enrollment'),
+    issuedAt: timestamp('issued_at', { withTimezone: true }).notNull().defaultNow(),
+    /** End of the overlap window. Null on an active token. */
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    supersededAt: timestamp('superseded_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedBy: uuid('revoked_by').references(() => users.id, { onDelete: 'set null' }),
+    revokedReason: text('revoked_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    tokenHashIdx: uniqueIndex('worker_tokens_token_hash_key').on(t.tokenHash),
+    workerIdx: index('worker_tokens_worker_id_idx').on(t.workerId),
+    statusIdx: index('worker_tokens_status_idx').on(t.status),
   }),
 );
 
@@ -279,9 +398,21 @@ export const runs = pgTable(
      */
     scopeKind: enumText('scope_kind', SCOPE_KINDS).notNull().default('full'),
     approvedScope: text('approved_scope'),
+
+    // --- Sprint 3 ---
+    /** Which autonomous shift produced this run, when one did. */
+    nightShiftId: uuid('night_shift_id'),
+    mondayItemId: text('monday_item_id'),
+    /**
+     * Who chose this work. Kept separate from `approvals.source` because they
+     * answer different questions — who picked it, and who authorised it — and a
+     * human can approve a run the scheduler proposed.
+     */
+    selectedBy: enumText('selected_by', RUN_SELECTION_SOURCES).notNull().default('human'),
   },
   (t) => ({
     taskIdx: index('runs_task_id_idx').on(t.taskId),
+    nightShiftIdx: index('runs_night_shift_id_idx').on(t.nightShiftId),
     repositoryIdx: index('runs_repository_id_idx').on(t.repositoryId),
     statusIdx: index('runs_status_idx').on(t.status),
     workerIdx: index('runs_worker_id_idx').on(t.workerId),
@@ -305,6 +436,18 @@ export const approvals = pgTable(
     confidenceAtDecision: numeric('confidence_at_decision', { precision: 4, scale: 3 }),
     thresholdAtDecision: numeric('threshold_at_decision', { precision: 4, scale: 3 }),
     thresholdOverridden: boolean('threshold_overridden').notNull().default(false),
+    /**
+     * Sprint 3: WHICH authority approved this.
+     *
+     * `night_shift_policy` means a human pre-approved the project, the board and
+     * the item, and the eligibility predicate then found it startable. That is a
+     * real authority with a real trail — and a DIFFERENT one from a person
+     * clicking approve, which is why it is not a null approver in the same
+     * field. A machine approval must never be readable as a human one.
+     */
+    source: enumText('source', APPROVAL_SOURCES).notNull().default('human'),
+    /** The project approval, board approval, item flag and eligibility verdict. */
+    policyBasis: jsonb('policy_basis'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -440,6 +583,12 @@ export const repositories = pgTable(
      */
     testCommand: jsonb('test_command').notNull().default(sql`'[]'::jsonb`),
     buildCommand: jsonb('build_command').notNull().default(sql`'[]'::jsonb`),
+    /**
+     * Sprint 3: `npm test` executes code the agent just wrote, so it runs inside
+     * the sandbox too. `none` by default, because a test suite that needs the
+     * internet is a test suite worth knowing about.
+     */
+    testNetwork: enumText('test_network', SANDBOX_NETWORK_MODES).notNull().default('none'),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -578,6 +727,20 @@ export const agentQuestions = pgTable(
     risk: text('risk').notNull().default('low'),
     requiredHuman: boolean('required_human').notNull().default(false),
     affectedImplementation: boolean('affected_implementation').notNull().default(false),
+
+    // --- Sprint 3: evidence-based answers (brief §14) ---
+    /** The material Mac read, with an excerpt of each. `sources` holds the labels. */
+    evidence: jsonb('evidence').notNull().default(sql`'[]'::jsonb`),
+    /**
+     * Established fact or assumption — DERIVED from the evidence by
+     * `deriveGroundedness`, never asserted by the answering code. That is what
+     * makes "no ungrounded high-confidence claims" a property rather than a hope.
+     */
+    groundedness: enumText('groundedness', GROUNDEDNESS).notNull().default('assumption'),
+    modelAssisted: boolean('model_assisted').notNull().default(false),
+    /** Which of the six investigation source classes were consulted. */
+    sourcesChecked: jsonb('sources_checked').notNull().default(sql`'[]'::jsonb`),
+
     askedAt: timestamp('asked_at', { withTimezone: true }).notNull().defaultNow(),
     answeredAt: timestamp('answered_at', { withTimezone: true }),
   },
@@ -784,6 +947,277 @@ export const memoryEntries = pgTable(
   }),
 );
 
+// ===========================================================================
+// Sprint 3 — monday.com, night shift, investigations, email
+// ===========================================================================
+
+/**
+ * A monday.com board Mac may read from and write to.
+ *
+ * `dueDateColumnId` and `priorityColumnId` are recorded even though Mac has no
+ * method that writes to them. That is the point: storing them is what lets the
+ * write guard RECOGNISE an attempt to change a commercial field and refuse it
+ * by name, rather than merely failing to find it on an allowlist.
+ */
+export const mondayBoards = pgTable(
+  'monday_boards',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    boardId: text('board_id').notNull(),
+    name: text('name').notNull(),
+    /** Optional workstream filter. Empty means the whole board. */
+    groupIds: jsonb('group_ids').notNull().default(sql`'[]'::jsonb`),
+
+    statusColumnId: text('status_column_id').notNull(),
+    assigneeColumnId: text('assignee_column_id'),
+    priorityColumnId: text('priority_column_id'),
+    dueDateColumnId: text('due_date_column_id'),
+    pullRequestColumnId: text('pull_request_column_id'),
+    dependencyColumnId: text('dependency_column_id'),
+    nightShiftFlagColumnId: text('night_shift_flag_column_id'),
+    itemTypeColumnId: text('item_type_column_id'),
+    sizeColumnId: text('size_column_id'),
+
+    /** Mac's vocabulary → this board's labels, so no call site guesses. */
+    statusLabels: jsonb('status_labels').notNull(),
+    startableStatuses: jsonb('startable_statuses').notNull().default(sql`'[]'::jsonb`),
+    completedStatuses: jsonb('completed_statuses').notNull().default(sql`'[]'::jsonb`),
+    allowedItemTypes: jsonb('allowed_item_types').notNull().default(sql`'[]'::jsonb`),
+
+    /** Off by default: Ready for Review is Mac's terminal state until opted in. */
+    mayComplete: boolean('may_complete').notNull().default(false),
+    nightShiftEligible: boolean('night_shift_eligible').notNull().default(false),
+    /** On by default: an item must be explicitly marked before Mac may take it. */
+    requireItemFlag: boolean('require_item_flag').notNull().default(true),
+    macUserId: text('mac_user_id'),
+
+    isApproved: boolean('is_approved').notNull().default(false),
+    approvedBy: uuid('approved_by').references(() => users.id, { onDelete: 'set null' }),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    boardIdx: uniqueIndex('monday_boards_board_id_key').on(t.boardId),
+    projectIdx: index('monday_boards_project_id_idx').on(t.projectId),
+  }),
+);
+
+/**
+ * A cache of what monday.com currently says.
+ *
+ * Never a source of truth for Mac's own lifecycle: a status change on a board
+ * does not start, approve or stop a run. When the board is unreachable this is
+ * what the scheduler reads, and the decision record says the data is stale.
+ */
+export const mondayItems = pgTable(
+  'monday_items',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    boardRowId: uuid('board_row_id')
+      .notNull()
+      .references(() => mondayBoards.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    itemId: text('item_id').notNull(),
+    groupId: text('group_id'),
+    name: text('name').notNull(),
+    url: text('url'),
+    status: text('status'),
+    priority: text('priority'),
+    assigneeIds: jsonb('assignee_ids').notNull().default(sql`'[]'::jsonb`),
+    dueDate: text('due_date'),
+    description: text('description'),
+    dependsOn: jsonb('depends_on').notNull().default(sql`'[]'::jsonb`),
+    nightShiftFlag: boolean('night_shift_flag').notNull().default(false),
+    itemType: text('item_type'),
+    sizeLabel: text('size_label'),
+    raw: jsonb('raw').notNull().default(sql`'{}'::jsonb`),
+    lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    itemIdx: uniqueIndex('monday_items_item_id_key').on(t.itemId),
+    boardIdx: index('monday_items_board_row_id_idx').on(t.boardRowId),
+    taskIdx: index('monday_items_task_id_idx').on(t.taskId),
+  }),
+);
+
+/**
+ * The monday.com write outbox.
+ *
+ * Written in the same transaction as the state change that justified it, for
+ * the same reason audit events are: a run must not fail because a third party
+ * is down, and monday.com must not be updated by a transaction that then rolls
+ * back. Exactly-once intent, at-least-once delivery — the correct trade for a
+ * status board, where a duplicated "In Progress" is harmless and a missed
+ * "Ready for Review" is not.
+ */
+export const mondayWrites = pgTable(
+  'monday_writes',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    boardRowId: uuid('board_row_id')
+      .notNull()
+      .references(() => mondayBoards.id, { onDelete: 'cascade' }),
+    mondayItemId: text('monday_item_id').notNull(),
+    runId: uuid('run_id').references(() => runs.id, { onDelete: 'set null' }),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    kind: enumText('kind', MONDAY_WRITE_KINDS).notNull(),
+    payload: jsonb('payload').notNull().default(sql`'{}'::jsonb`),
+    status: enumText('status', MONDAY_WRITE_STATUSES).notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    providerMessageId: text('provider_message_id'),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+  },
+  (t) => ({
+    statusIdx: index('monday_writes_status_idx').on(t.status, t.nextAttemptAt),
+    runIdx: index('monday_writes_run_id_idx').on(t.runId),
+  }),
+);
+
+/**
+ * One autonomous shift.
+ *
+ * `settingsSnapshot` matters more than it looks: reading a morning report next
+ * to the thresholds as they are NOW is misleading if somebody changed them at
+ * 06:00. The shift records the policy it actually ran under.
+ */
+export const nightShifts = pgTable(
+  'night_shifts',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    status: enumText('status', NIGHT_SHIFT_STATUSES).notNull().default('running'),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp('ended_at', { withTimezone: true }),
+    cutoffAt: timestamp('cutoff_at', { withTimezone: true }).notNull(),
+    stopReason: enumText('stop_reason', NIGHT_STOP_REASONS),
+    startedBy: uuid('started_by').references(() => users.id, { onDelete: 'set null' }),
+    settingsSnapshot: jsonb('settings_snapshot').notNull().default(sql`'{}'::jsonb`),
+    tasksAttempted: integer('tasks_attempted').notNull().default(0),
+    tasksCompleted: integer('tasks_completed').notNull().default(0),
+    tasksBlocked: integer('tasks_blocked').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    statusIdx: index('night_shifts_status_idx').on(t.status),
+  }),
+);
+
+/**
+ * Every scheduling decision, including the refusals.
+ *
+ * A scheduler whose refusals are invisible is one nobody can debug at 08:00,
+ * so `skip`, `idle` and `stop` are recorded exactly as `start` is, each with the
+ * rationale that produced it.
+ */
+export const nightDecisions = pgTable(
+  'night_decisions',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    nightShiftId: uuid('night_shift_id')
+      .notNull()
+      .references(() => nightShifts.id, { onDelete: 'cascade' }),
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+    sequence: integer('sequence').notNull(),
+    decision: enumText('decision', NIGHT_DECISION_KINDS).notNull(),
+    runId: uuid('run_id').references(() => runs.id, { onDelete: 'set null' }),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    mondayItemId: text('monday_item_id'),
+    rationale: jsonb('rationale').notNull().default(sql`'{}'::jsonb`),
+    eligibility: jsonb('eligibility'),
+    effort: jsonb('effort'),
+  },
+  (t) => ({
+    sequenceIdx: uniqueIndex('night_decisions_shift_sequence_key').on(t.nightShiftId, t.sequence),
+    runIdx: index('night_decisions_run_id_idx').on(t.runId),
+  }),
+);
+
+/**
+ * What Mac checked before asking a human.
+ *
+ * `checked` is the escalation receipt: every source class, whether it was
+ * consulted, whether it matched, and what came back. It turns "he asked me
+ * something he could have looked up" from an impression into a falsifiable
+ * claim.
+ */
+export const discoveryInvestigations = pgTable(
+  'discovery_investigations',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    discoverySessionId: uuid('discovery_session_id').references(() => discoverySessions.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id').references(() => runs.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    subjectKind: enumText('subject_kind', INVESTIGATION_SUBJECT_KINDS).notNull(),
+    subject: text('subject').notNull(),
+    resolved: boolean('resolved').notNull().default(false),
+    answer: text('answer'),
+    confidence: numeric('confidence', { precision: 4, scale: 3 }).notNull().default('0'),
+    checked: jsonb('checked').notNull().default(sql`'[]'::jsonb`),
+    evidence: jsonb('evidence').notNull().default(sql`'[]'::jsonb`),
+    escalatedToHuman: boolean('escalated_to_human').notNull().default(false),
+    modelAssisted: boolean('model_assisted').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    taskIdx: index('discovery_investigations_task_id_idx').on(t.taskId),
+    runIdx: index('discovery_investigations_run_id_idx').on(t.runId),
+  }),
+);
+
+/**
+ * The email outbox.
+ *
+ * `idempotencyKey` is UNIQUE, so a duplicate send is prevented by the database
+ * rather than by a caller remembering to check. A second attempt to create the
+ * same delivery finds this row; a row already `sent` is never sent again.
+ */
+export const emailDeliveries = pgTable(
+  'email_deliveries',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    kind: enumText('kind', EMAIL_DELIVERY_KINDS).notNull(),
+    nightShiftId: uuid('night_shift_id').references(() => nightShifts.id, { onDelete: 'set null' }),
+    runId: uuid('run_id').references(() => runs.id, { onDelete: 'set null' }),
+    idempotencyKey: text('idempotency_key').notNull(),
+    /** Resolved from settings at creation. Never supplied by a caller. */
+    recipients: jsonb('recipients').notNull().default(sql`'[]'::jsonb`),
+    subject: text('subject').notNull(),
+    bodyText: text('body_text').notNull(),
+    bodyHtml: text('body_html'),
+    content: jsonb('content').notNull().default(sql`'{}'::jsonb`),
+    status: enumText('status', EMAIL_DELIVERY_STATUSES).notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    provider: text('provider').notNull().default('none'),
+    providerMessageId: text('provider_message_id'),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+  },
+  (t) => ({
+    idempotencyIdx: uniqueIndex('email_deliveries_idempotency_key').on(t.idempotencyKey),
+    statusIdx: index('email_deliveries_status_idx').on(t.status, t.nextAttemptAt),
+  }),
+);
+
 export type UserRow = typeof users.$inferSelect;
 export type SessionRow = typeof sessions.$inferSelect;
 export type SettingsRow = typeof settings.$inferSelect;
@@ -810,6 +1244,15 @@ export type PullRequestRow = typeof pullRequests.$inferSelect;
 export type UsageSnapshotRow = typeof usageSnapshots.$inferSelect;
 export type RunReportRow = typeof runReports.$inferSelect;
 export type MemoryEntryRow = typeof memoryEntries.$inferSelect;
+
+export type WorkerTokenRow = typeof workerTokens.$inferSelect;
+export type MondayBoardRow = typeof mondayBoards.$inferSelect;
+export type MondayItemRow = typeof mondayItems.$inferSelect;
+export type MondayWriteRow = typeof mondayWrites.$inferSelect;
+export type NightShiftRow = typeof nightShifts.$inferSelect;
+export type NightDecisionRow = typeof nightDecisions.$inferSelect;
+export type DiscoveryInvestigationRow = typeof discoveryInvestigations.$inferSelect;
+export type EmailDeliveryRow = typeof emailDeliveries.$inferSelect;
 
 /**
  * The authoritative list of enum CHECK constraints.
@@ -849,4 +1292,22 @@ export const ENUM_CHECKS: Array<{ table: string; column: string; values: readonl
   { table: 'usage_snapshots', column: 'source', values: USAGE_SOURCES },
   { table: 'run_usage', column: 'source', values: USAGE_SOURCES },
   { table: 'memory_entries', column: 'scope', values: MEMORY_SCOPES },
+  // --- Sprint 3 ---
+  { table: 'worker_tokens', column: 'status', values: WORKER_TOKEN_STATUSES },
+  { table: 'worker_tokens', column: 'issued_via', values: WORKER_TOKEN_ISSUE_ROUTES },
+  { table: 'workers', column: 'sandbox_kind', values: SANDBOX_KINDS },
+  { table: 'monday_writes', column: 'kind', values: MONDAY_WRITE_KINDS },
+  { table: 'monday_writes', column: 'status', values: MONDAY_WRITE_STATUSES },
+  { table: 'night_shifts', column: 'status', values: NIGHT_SHIFT_STATUSES },
+  { table: 'night_shifts', column: 'stop_reason', values: NIGHT_STOP_REASONS },
+  { table: 'night_decisions', column: 'decision', values: NIGHT_DECISION_KINDS },
+  { table: 'runs', column: 'selected_by', values: RUN_SELECTION_SOURCES },
+  { table: 'approvals', column: 'source', values: APPROVAL_SOURCES },
+  { table: 'agent_questions', column: 'groundedness', values: GROUNDEDNESS },
+  { table: 'discovery_investigations', column: 'subject_kind', values: INVESTIGATION_SUBJECT_KINDS },
+  { table: 'email_deliveries', column: 'kind', values: EMAIL_DELIVERY_KINDS },
+  { table: 'email_deliveries', column: 'status', values: EMAIL_DELIVERY_STATUSES },
+  { table: 'repositories', column: 'test_network', values: SANDBOX_NETWORK_MODES },
+  { table: 'settings', column: 'mail_provider', values: MAIL_PROVIDERS },
+  { table: 'settings', column: 'model_provider', values: MODEL_PROVIDERS },
 ];

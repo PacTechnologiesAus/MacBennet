@@ -2,8 +2,15 @@ import type { FastifyInstance } from 'fastify';
 import {
   auditQuerySchema,
   createEnrollmentTokenRequestSchema,
+  revokeWorkerTokensRequestSchema,
   updateSettingsRequestSchema,
 } from '@mac/protocol';
+import {
+  listWorkerTokens,
+  requestRotation,
+  revokeWorkerTokens,
+} from '../../services/worker-credentials.js';
+import { getSecurityOverview } from '../../services/security.js';
 import { getSettings, toSettingsDto, updateSettings } from '../../services/settings.js';
 import { getBudgetStatus } from '../../services/budget.js';
 import { queryAuditEvents } from '../../services/audit-query.js';
@@ -55,6 +62,47 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const { enabled } = request.body as { enabled: boolean };
     return reply.send({ worker: await setWorkerEnabled(id, Boolean(enabled), currentActor(request)) });
   });
+
+  // --- Worker credentials (Sprint 3 §4) -------------------------------------
+
+  /**
+   * Asks a worker to replace its credential.
+   *
+   * This does NOT invalidate anything. The request rides the control envelope,
+   * so it reaches the worker on whichever call happens next and the worker
+   * rotates itself — which is what makes rotation possible without anyone
+   * logging into the VM. Revocation, below, is the immediate one.
+   */
+  app.post('/api/workers/:id/rotate', { preHandler: requireRole('admin') }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { reason } = (request.body ?? {}) as { reason?: string };
+    await requestRotation(id, currentActor(request), reason?.slice(0, 500) ?? 'Requested by an administrator.');
+    return reply.send({ worker: await getWorker(id), rotationRequested: true });
+  });
+
+  /**
+   * Kills every credential a worker holds, immediately and with no grace.
+   *
+   * The worker fails its next call and must re-enroll. That is the correct
+   * outcome when a credential is believed compromised, and it is why revocation
+   * offers no overlap window while rotation does.
+   */
+  app.post('/api/workers/:id/revoke-tokens', { preHandler: requireRole('admin') }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = revokeWorkerTokensRequestSchema.parse(request.body);
+    const result = await revokeWorkerTokens(id, body, currentActor(request));
+    return reply.send({ ...result, worker: await getWorker(id) });
+  });
+
+  app.get('/api/workers/:id/tokens', { preHandler: requireRole('admin') }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    return reply.send({ tokens: await listWorkerTokens(id) });
+  });
+
+  /** Everything the Security screen shows: credential state and containment. */
+  app.get('/api/security', { preHandler: requireRole('admin') }, async (_request, reply) =>
+    reply.send({ security: await getSecurityOverview() }),
+  );
 
   app.get('/api/worker-enrollment-tokens', { preHandler: requireRole('admin') }, async (_request, reply) =>
     reply.send({ tokens: await listEnrollmentTokens() }),

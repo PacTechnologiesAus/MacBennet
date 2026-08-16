@@ -44,7 +44,11 @@ export async function resetDatabase(): Promise<void> {
       repositories, worktrees, handoff_briefs, discovery_sessions,
       agent_sessions, agent_questions, run_assumptions, run_blockers,
       git_violations, run_reviews, pull_requests, usage_snapshots,
-      run_reports, memory_entries
+      run_reports, memory_entries,
+      -- Sprint 3. Most are reached by the CASCADE above; naming them keeps the
+      -- list a readable inventory of what a test can leave behind.
+      worker_tokens, monday_boards, monday_items, monday_writes,
+      night_shifts, night_decisions, discovery_investigations, email_deliveries
     RESTART IDENTITY CASCADE
   `);
   /*
@@ -71,6 +75,21 @@ export async function resetDatabase(): Promise<void> {
       budget_stop_pct = 100,
       heartbeat_interval_seconds = 10,
       heartbeat_grace_seconds = 20,
+      -- Sprint 3 defaults, restored explicitly so a test that changes one
+      -- cannot leak it into the next file.
+      require_sandbox = true,
+      worker_token_max_age_hours = 168,
+      worker_token_overlap_seconds = 300,
+      night_shift_enabled = false,
+      night_shift_safety_factor = 1.50,
+      night_shift_wrap_up_minutes = 10,
+      night_shift_min_start_minutes = 20,
+      night_shift_large_task_min_minutes = 90,
+      report_recipients = '[]'::jsonb,
+      allowed_recipient_domains = '[]'::jsonb,
+      mail_provider = 'none',
+      model_assist_enabled = false,
+      model_provider = 'none',
       updated_by = NULL
     WHERE id = 1
   `);

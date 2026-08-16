@@ -25,6 +25,21 @@ import {
   worktreeStatusSchema,
 } from './enums.js';
 import { agentAnswerDecisionSchema, agentSessionStateSchema, codingAgentProviderSchema } from './coding-agent.js';
+import { evidenceRefSchema, groundednessSchema, investigationResultSchema } from './evidence.js';
+import { sandboxKindSchema, sandboxNetworkModeSchema } from './sandbox.js';
+import { mondayStatusLabelsSchema, mondayWriteKindSchema, mondayWriteStatusSchema } from './monday.js';
+import {
+  approvalSourceSchema,
+  effortEstimateSchema,
+  eligibilityVerdictSchema,
+  nightDecisionKindSchema,
+  nightShiftStatusSchema,
+  nightStopReasonSchema,
+  runSelectionSourceSchema,
+  schedulingRationaleSchema,
+} from './night.js';
+import { emailAddressSchema, emailDeliveryKindSchema, emailDeliveryStatusSchema, mailProviderSchema } from './mail.js';
+import { modelProviderSchema } from './model.js';
 
 /**
  * Request and response contracts for the human-facing API.
@@ -230,6 +245,10 @@ export interface WorkerDto {
   registeredAt: string | null;
   /** Derived server-side from last heartbeat and the configured grace period. */
   isLive: boolean;
+  // --- Sprint 3: containment, re-attested on every heartbeat ---
+  sandboxKind: z.infer<typeof sandboxKindSchema> | null;
+  sandboxReady: boolean;
+  sandboxDetail: string | null;
 }
 
 export const createEnrollmentTokenRequestSchema = z.object({
@@ -309,6 +328,31 @@ export const updateSettingsRequestSchema = z
     maxQuestionsPerRun: z.number().int().min(0).max(200).optional(),
     /** Confidence at or above which Mac answers a question rather than assuming. */
     answerConfidenceThreshold: confidenceSchema.optional(),
+
+    // --- Sprint 3 ---
+    /** When true, a coding run is not dispatched to a worker without a sandbox. */
+    requireSandbox: z.boolean().optional(),
+    workerTokenMaxAgeHours: z.number().int().min(1).max(8760).optional(),
+    workerTokenOverlapSeconds: z.number().int().min(0).max(3600).optional(),
+    nightShiftEnabled: z.boolean().optional(),
+    /** Multiplier applied to an effort estimate before it is compared to the runway. */
+    nightShiftSafetyFactor: z.number().min(1).max(5).optional(),
+    /** Minutes reserved for committing, testing, reviewing and reporting. */
+    nightShiftWrapUpMinutes: z.number().int().min(0).max(240).optional(),
+    /** Below this much runway, nothing new starts at all. */
+    nightShiftMinStartMinutes: z.number().int().min(1).max(600).optional(),
+    /** A `large` task additionally needs at least this much runway. */
+    nightShiftLargeTaskMinMinutes: z.number().int().min(1).max(1440).optional(),
+    /**
+     * Where morning reports go. The ONLY place a recipient can be configured;
+     * nothing from a task, brief or agent can reach the send path.
+     */
+    reportRecipients: z.array(emailAddressSchema).max(20).optional(),
+    allowedRecipientDomains: z.array(z.string().min(1).max(200)).max(20).optional(),
+    mailProvider: mailProviderSchema.optional(),
+    /** Off by default: determinism is the default posture for unattended work. */
+    modelAssistEnabled: z.boolean().optional(),
+    modelProvider: modelProviderSchema.optional(),
   })
   .strict();
 export type UpdateSettingsRequest = z.infer<typeof updateSettingsRequestSchema>;
@@ -330,6 +374,20 @@ export interface SettingsDto {
   maxAgentMinutes: number;
   maxQuestionsPerRun: number;
   answerConfidenceThreshold: number;
+  // --- Sprint 3 ---
+  requireSandbox: boolean;
+  workerTokenMaxAgeHours: number;
+  workerTokenOverlapSeconds: number;
+  nightShiftEnabled: boolean;
+  nightShiftSafetyFactor: number;
+  nightShiftWrapUpMinutes: number;
+  nightShiftMinStartMinutes: number;
+  nightShiftLargeTaskMinMinutes: number;
+  reportRecipients: string[];
+  allowedRecipientDomains: string[];
+  mailProvider: z.infer<typeof mailProviderSchema>;
+  modelAssistEnabled: boolean;
+  modelProvider: z.infer<typeof modelProviderSchema>;
   updatedAt: string;
 }
 
@@ -581,6 +639,12 @@ export interface AgentQuestionDto {
   affectedImplementation: boolean;
   askedAt: string;
   answeredAt: string | null;
+  // --- Sprint 3: evidence-based answers ---
+  evidence: z.infer<typeof evidenceRefSchema>[];
+  /** Derived from the evidence, never asserted by the answering code. */
+  groundedness: z.infer<typeof groundednessSchema>;
+  modelAssisted: boolean;
+  sourcesChecked: string[];
 }
 
 export interface RunAssumptionDto {
@@ -754,6 +818,297 @@ export interface MemoryEntryDto {
   /** True once promoted from task memory into project memory after validation. */
   promoted: boolean;
   createdAt: string;
+}
+
+// ===========================================================================
+// Sprint 3 — sandbox, credentials, monday.com, night shift, email
+// ===========================================================================
+
+// --- Security: worker credentials and sandbox ------------------------------
+
+export interface WorkerTokenDto {
+  id: string;
+  workerId: string;
+  /** Display only. The token itself exists in plaintext exactly once, at issue. */
+  tokenPrefix: string;
+  status: 'active' | 'superseded' | 'revoked';
+  issuedVia: 'enrollment' | 'rotation' | 'admin_reset';
+  issuedAt: string;
+  /** Set on a superseded token: the end of its overlap window. */
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  revokedReason: string | null;
+  ageHours: number;
+}
+
+export interface WorkerSecurityDto {
+  workerId: string;
+  workerName: string;
+  isLive: boolean;
+  sandboxKind: z.infer<typeof sandboxKindSchema> | null;
+  sandboxReady: boolean;
+  sandboxDetail: string | null;
+  /** True when the control plane is currently withholding coding work. */
+  codingWorkWithheld: boolean;
+  activeToken: WorkerTokenDto | null;
+  tokens: WorkerTokenDto[];
+  rotationRequestedAt: string | null;
+  lastRotatedAt: string | null;
+}
+
+export interface SecurityOverviewDto {
+  requireSandbox: boolean;
+  workerTokenMaxAgeHours: number;
+  workerTokenOverlapSeconds: number;
+  workers: WorkerSecurityDto[];
+}
+
+export const revokeWorkerTokensRequestSchema = z.object({
+  reason: z.string().min(1).max(500),
+});
+export type RevokeWorkerTokensRequest = z.infer<typeof revokeWorkerTokensRequestSchema>;
+
+// --- monday.com ------------------------------------------------------------
+
+/**
+ * Board mapping.
+ *
+ * `dueDateColumnId` and `priorityColumnId` are recorded even though Mac may
+ * never write to them. That is the point: storing them is what lets the write
+ * guard RECOGNISE an attempt to touch a commercial field and refuse it by name,
+ * rather than merely failing to find it on an allowlist.
+ */
+export const createMondayBoardRequestSchema = z.object({
+  projectId: z.string().uuid(),
+  boardId: z.string().min(1).max(60),
+  name: z.string().min(1).max(300),
+  groupIds: z.array(z.string().max(120)).max(50).default([]),
+  statusColumnId: z.string().min(1).max(120),
+  assigneeColumnId: z.string().max(120).nullable().default(null),
+  priorityColumnId: z.string().max(120).nullable().default(null),
+  dueDateColumnId: z.string().max(120).nullable().default(null),
+  pullRequestColumnId: z.string().max(120).nullable().default(null),
+  dependencyColumnId: z.string().max(120).nullable().default(null),
+  nightShiftFlagColumnId: z.string().max(120).nullable().default(null),
+  itemTypeColumnId: z.string().max(120).nullable().default(null),
+  sizeColumnId: z.string().max(120).nullable().default(null),
+  statusLabels: mondayStatusLabelsSchema,
+  /** Statuses Mac may pick work up from. Anything else is not startable. */
+  startableStatuses: z.array(z.string().min(1).max(200)).min(1).max(20),
+  /** Statuses that mean a dependency is finished. */
+  completedStatuses: z.array(z.string().min(1).max(200)).max(20).default([]),
+  allowedItemTypes: z.array(z.string().min(1).max(120)).max(40).default([]),
+  /** Off by default: Ready for Review is Mac's terminal state unless opted in. */
+  mayComplete: z.boolean().default(false),
+  nightShiftEligible: z.boolean().default(false),
+  /** On by default: an item must be explicitly marked before Mac may take it. */
+  requireItemFlag: z.boolean().default(true),
+  /** Mac's own monday user id, so he can assign work to himself. */
+  macUserId: z.string().max(60).nullable().default(null),
+});
+export type CreateMondayBoardRequest = z.infer<typeof createMondayBoardRequestSchema>;
+
+export const updateMondayBoardRequestSchema = createMondayBoardRequestSchema
+  .omit({ projectId: true, boardId: true })
+  .partial()
+  .strict();
+export type UpdateMondayBoardRequest = z.infer<typeof updateMondayBoardRequestSchema>;
+
+export const approveMondayBoardRequestSchema = z.object({
+  approved: z.boolean(),
+  notes: z.string().max(1000).optional(),
+});
+export type ApproveMondayBoardRequest = z.infer<typeof approveMondayBoardRequestSchema>;
+
+export interface MondayBoardDto {
+  id: string;
+  projectId: string;
+  projectName: string;
+  boardId: string;
+  name: string;
+  groupIds: string[];
+  statusColumnId: string;
+  assigneeColumnId: string | null;
+  priorityColumnId: string | null;
+  dueDateColumnId: string | null;
+  pullRequestColumnId: string | null;
+  dependencyColumnId: string | null;
+  nightShiftFlagColumnId: string | null;
+  itemTypeColumnId: string | null;
+  sizeColumnId: string | null;
+  statusLabels: z.infer<typeof mondayStatusLabelsSchema>;
+  startableStatuses: string[];
+  completedStatuses: string[];
+  allowedItemTypes: string[];
+  mayComplete: boolean;
+  nightShiftEligible: boolean;
+  requireItemFlag: boolean;
+  macUserId: string | null;
+  isApproved: boolean;
+  approvedAt: string | null;
+  lastSyncedAt: string | null;
+  itemCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MondayItemDto {
+  id: string;
+  boardRowId: string;
+  projectId: string;
+  taskId: string | null;
+  itemId: string;
+  name: string;
+  url: string | null;
+  status: string | null;
+  priority: string | null;
+  assigneeIds: string[];
+  dueDate: string | null;
+  description: string | null;
+  dependsOn: string[];
+  nightShiftFlag: boolean;
+  itemType: string | null;
+  sizeLabel: string | null;
+  lastSyncedAt: string;
+}
+
+export interface MondayWriteDto {
+  id: string;
+  itemId: string;
+  runId: string | null;
+  kind: z.infer<typeof mondayWriteKindSchema>;
+  status: z.infer<typeof mondayWriteStatusSchema>;
+  attempts: number;
+  providerMessageId: string | null;
+  lastError: string | null;
+  createdAt: string;
+  deliveredAt: string | null;
+}
+
+// --- Night shift -----------------------------------------------------------
+
+export const startNightShiftRequestSchema = z.object({
+  /** Overrides the configured cutoff for this shift only. */
+  cutoffAt: z.string().optional(),
+  notes: z.string().max(1000).optional(),
+});
+export type StartNightShiftRequest = z.infer<typeof startNightShiftRequestSchema>;
+
+export const stopNightShiftRequestSchema = z.object({
+  reason: z.string().max(500).optional(),
+});
+export type StopNightShiftRequest = z.infer<typeof stopNightShiftRequestSchema>;
+
+export interface NightDecisionDto {
+  id: string;
+  nightShiftId: string;
+  at: string;
+  sequence: number;
+  decision: z.infer<typeof nightDecisionKindSchema>;
+  runId: string | null;
+  taskId: string | null;
+  taskTitle: string | null;
+  mondayItemId: string | null;
+  rationale: z.infer<typeof schedulingRationaleSchema>;
+  eligibility: z.infer<typeof eligibilityVerdictSchema> | null;
+  effort: z.infer<typeof effortEstimateSchema> | null;
+}
+
+export interface NightShiftDto {
+  id: string;
+  status: z.infer<typeof nightShiftStatusSchema>;
+  startedAt: string;
+  endedAt: string | null;
+  cutoffAt: string;
+  stopReason: z.infer<typeof nightStopReasonSchema> | null;
+  tasksAttempted: number;
+  tasksCompleted: number;
+  tasksBlocked: number;
+  minutesRemaining: number;
+}
+
+/**
+ * A candidate for the Night Queue screen.
+ *
+ * Carries the FULL eligibility verdict, not just a boolean, because the screen
+ * has to answer "why is this eligible?" as readily as "why was this skipped?".
+ */
+export interface NightCandidateDto {
+  taskId: string | null;
+  taskTitle: string;
+  projectId: string;
+  projectName: string;
+  mondayItemId: string | null;
+  mondayItemUrl: string | null;
+  priority: string | null;
+  priorityRank: number;
+  confidence: number | null;
+  eligibility: z.infer<typeof eligibilityVerdictSchema>;
+  effort: z.infer<typeof effortEstimateSchema> | null;
+  /** Null when the task is eligible and would be startable now. */
+  skipReason: string | null;
+}
+
+export interface NightShiftDashboardDto {
+  shift: NightShiftDto | null;
+  macState: 'day_mode' | 'idle' | 'working' | 'blocked' | 'stopped';
+  activeRun: RunDto | null;
+  activeProjectName: string | null;
+  queue: NightCandidateDto[];
+  blocked: Array<{ runId: string; taskTitle: string; projectName: string; blocker: string; at: string }>;
+  completedTonight: Array<{ runId: string; taskTitle: string; projectName: string; pullRequestUrl: string | null }>;
+  minutesUntilCutoff: number;
+  budget: BudgetStatusDto;
+  workers: WorkerDto[];
+  sandboxReadyWorkers: number;
+  recentDecisions: NightDecisionDto[];
+}
+
+export const approveProjectNightShiftRequestSchema = z.object({
+  approved: z.boolean(),
+  notes: z.string().max(1000).optional(),
+});
+export type ApproveProjectNightShiftRequest = z.infer<typeof approveProjectNightShiftRequestSchema>;
+
+// --- Email deliveries ------------------------------------------------------
+
+export interface EmailDeliveryDto {
+  id: string;
+  kind: z.infer<typeof emailDeliveryKindSchema>;
+  nightShiftId: string | null;
+  runId: string | null;
+  recipients: string[];
+  subject: string;
+  status: z.infer<typeof emailDeliveryStatusSchema>;
+  attempts: number;
+  provider: string;
+  providerMessageId: string | null;
+  lastError: string | null;
+  nextAttemptAt: string | null;
+  createdAt: string;
+  sentAt: string | null;
+}
+
+// --- Investigations --------------------------------------------------------
+
+export interface InvestigationDto {
+  id: string;
+  taskId: string;
+  runId: string | null;
+  discoverySessionId: string | null;
+  result: z.infer<typeof investigationResultSchema>;
+  createdAt: string;
+}
+
+// --- Sprint 3 additions to existing DTOs -----------------------------------
+
+export interface RunProvenanceDto {
+  selectedBy: z.infer<typeof runSelectionSourceSchema>;
+  approvalSource: z.infer<typeof approvalSourceSchema> | null;
+  nightShiftId: string | null;
+  mondayItemId: string | null;
+  testNetwork: z.infer<typeof sandboxNetworkModeSchema> | null;
 }
 
 // --- Dashboard -------------------------------------------------------------

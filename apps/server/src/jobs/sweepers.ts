@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 import { markStaleWorkersOffline } from '../services/workers.js';
 import { stopRunsPastOvernightCutoff } from '../services/runs.js';
+import { requestRotationForAgedTokens } from '../services/worker-credentials.js';
 
 /**
  * Two periodic tasks, run in-process with setInterval.
@@ -14,12 +15,15 @@ import { stopRunsPastOvernightCutoff } from '../services/runs.js';
 
 const HEARTBEAT_SWEEP_MS = 15_000;
 const CUTOFF_SWEEP_MS = 30_000;
+/** Credential age is a slow-moving property; checking it often would be noise. */
+const CREDENTIAL_SWEEP_MS = 5 * 60_000;
 
 export interface Sweepers {
   stop: () => void;
   /** Exposed so tests can drive a sweep deterministically instead of waiting. */
   sweepWorkers: () => Promise<string[]>;
   sweepCutoffs: () => Promise<string[]>;
+  sweepCredentials: () => Promise<string[]>;
 }
 
 export function startSweepers(logger: FastifyBaseLogger): Sweepers {
@@ -41,19 +45,37 @@ export function startSweepers(logger: FastifyBaseLogger): Sweepers {
     void fn().catch((err: Error) => logger.error({ err: err.message }, `${name} sweep failed`));
   };
 
+  /**
+   * Flags workers whose credential has aged past the configured maximum.
+   *
+   * It only REQUESTS rotation; the worker performs it. A VM that is offline at
+   * the moment its token ages out therefore is not locked out — it rotates when
+   * it comes back, which is the difference between a rotation policy and an
+   * outage.
+   */
+  const sweepCredentials = async (): Promise<string[]> => {
+    const flagged = await requestRotationForAgedTokens();
+    if (flagged.length) logger.info({ workerIds: flagged }, 'worker credentials flagged for rotation');
+    return flagged;
+  };
+
   const workerTimer = setInterval(guarded(sweepWorkers, 'heartbeat'), HEARTBEAT_SWEEP_MS);
   const cutoffTimer = setInterval(guarded(sweepCutoffs, 'cutoff'), CUTOFF_SWEEP_MS);
+  const credentialTimer = setInterval(guarded(sweepCredentials, 'credential'), CREDENTIAL_SWEEP_MS);
 
   // Do not hold the process open purely for a sweep.
   workerTimer.unref();
   cutoffTimer.unref();
+  credentialTimer.unref();
 
   return {
     stop: () => {
       clearInterval(workerTimer);
       clearInterval(cutoffTimer);
+      clearInterval(credentialTimer);
     },
     sweepWorkers,
     sweepCutoffs,
+    sweepCredentials,
   };
 }

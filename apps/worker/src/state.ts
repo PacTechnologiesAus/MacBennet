@@ -17,6 +17,8 @@ const stateSchema = z.object({
   name: z.string(),
   controlPlaneUrl: z.string(),
   registeredAt: z.string(),
+  /** When this credential was last replaced. Sprint 3; absent on older files. */
+  rotatedAt: z.string().optional(),
 });
 
 export type WorkerState = z.infer<typeof stateSchema>;
@@ -34,12 +36,24 @@ export async function readState(file: string): Promise<WorkerState | null> {
   }
 }
 
+/**
+ * Writes the state file atomically.
+ *
+ * Sprint 3 made this matter: a credential rotation persists the new token
+ * before adopting it, and a process killed part-way through a plain `writeFile`
+ * would leave a truncated file — which `readState` treats as absent, which
+ * means re-enrollment, which means a human on the VM. Write-then-rename makes
+ * the file either wholly old or wholly new.
+ */
 export async function writeState(file: string, state: WorkerState): Promise<void> {
   const resolved = path.resolve(file);
+  const temporary = `${resolved}.tmp`;
   await fs.mkdir(path.dirname(resolved), { recursive: true });
-  await fs.writeFile(resolved, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 });
+  await fs.writeFile(temporary, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 });
   // mkdir/writeFile mode is affected by umask, so set it explicitly. chmod is a
   // no-op on Windows, which is why local development is not the security case.
+  await fs.chmod(temporary, 0o600).catch(() => undefined);
+  await fs.rename(temporary, resolved);
   await fs.chmod(resolved, 0o600).catch(() => undefined);
 }
 

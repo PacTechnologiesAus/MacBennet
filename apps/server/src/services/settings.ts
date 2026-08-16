@@ -1,5 +1,11 @@
 import { eq } from 'drizzle-orm';
-import type { SettingsDto, UpdateSettingsRequest } from '@mac/protocol';
+import type {
+  MailProviderName,
+  ModelProviderName,
+  SettingsDto,
+  UpdateSettingsRequest,
+} from '@mac/protocol';
+import { emailAddressSchema } from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
 import { settings } from '../db/schema.js';
 import { AppError } from '../http/errors.js';
@@ -31,6 +37,20 @@ export interface Settings {
   maxAgentMinutes: number;
   maxQuestionsPerRun: number;
   answerConfidenceThreshold: number;
+  // --- Sprint 3 ---
+  requireSandbox: boolean;
+  workerTokenMaxAgeHours: number;
+  workerTokenOverlapSeconds: number;
+  nightShiftEnabled: boolean;
+  nightShiftSafetyFactor: number;
+  nightShiftWrapUpMinutes: number;
+  nightShiftMinStartMinutes: number;
+  nightShiftLargeTaskMinMinutes: number;
+  reportRecipients: string[];
+  allowedRecipientDomains: string[];
+  mailProvider: MailProviderName;
+  modelAssistEnabled: boolean;
+  modelProvider: ModelProviderName;
   updatedAt: Date;
 }
 
@@ -59,9 +79,25 @@ export async function getSettings(handle: DbHandle = db): Promise<Settings> {
     maxAgentMinutes: row.maxAgentMinutes,
     maxQuestionsPerRun: row.maxQuestionsPerRun,
     answerConfidenceThreshold: Number(row.answerConfidenceThreshold),
+    requireSandbox: row.requireSandbox,
+    workerTokenMaxAgeHours: row.workerTokenMaxAgeHours,
+    workerTokenOverlapSeconds: row.workerTokenOverlapSeconds,
+    nightShiftEnabled: row.nightShiftEnabled,
+    nightShiftSafetyFactor: Number(row.nightShiftSafetyFactor),
+    nightShiftWrapUpMinutes: row.nightShiftWrapUpMinutes,
+    nightShiftMinStartMinutes: row.nightShiftMinStartMinutes,
+    nightShiftLargeTaskMinMinutes: row.nightShiftLargeTaskMinMinutes,
+    reportRecipients: asStringArray(row.reportRecipients),
+    allowedRecipientDomains: asStringArray(row.allowedRecipientDomains),
+    mailProvider: row.mailProvider as MailProviderName,
+    modelAssistEnabled: row.modelAssistEnabled,
+    modelProvider: row.modelProvider as ModelProviderName,
     updatedAt: row.updatedAt,
   };
 }
+
+const asStringArray = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
 
 export const toCutoffConfig = (s: Settings): CutoffConfig => ({
   timezone: s.timezone,
@@ -90,6 +126,19 @@ export const toSettingsDto = (s: Settings): SettingsDto => ({
   maxAgentMinutes: s.maxAgentMinutes,
   maxQuestionsPerRun: s.maxQuestionsPerRun,
   answerConfidenceThreshold: s.answerConfidenceThreshold,
+  requireSandbox: s.requireSandbox,
+  workerTokenMaxAgeHours: s.workerTokenMaxAgeHours,
+  workerTokenOverlapSeconds: s.workerTokenOverlapSeconds,
+  nightShiftEnabled: s.nightShiftEnabled,
+  nightShiftSafetyFactor: s.nightShiftSafetyFactor,
+  nightShiftWrapUpMinutes: s.nightShiftWrapUpMinutes,
+  nightShiftMinStartMinutes: s.nightShiftMinStartMinutes,
+  nightShiftLargeTaskMinMinutes: s.nightShiftLargeTaskMinMinutes,
+  reportRecipients: s.reportRecipients,
+  allowedRecipientDomains: s.allowedRecipientDomains,
+  mailProvider: s.mailProvider,
+  modelAssistEnabled: s.modelAssistEnabled,
+  modelProvider: s.modelProvider,
   updatedAt: s.updatedAt.toISOString(),
 });
 
@@ -129,6 +178,35 @@ export async function updateSettings(
       );
     }
 
+    /*
+     * Recipients must sit inside the domain allowlist.
+     *
+     * Checked here, at the only place a recipient can be configured, so the
+     * send path never has to decide whether an address is acceptable — by the
+     * time it reads settings, every address there has already been vetted.
+     */
+    const recipients = patch.reportRecipients ?? before.reportRecipients;
+    const domains = (patch.allowedRecipientDomains ?? before.allowedRecipientDomains).map((d) =>
+      d.trim().toLowerCase(),
+    );
+    if (domains.length > 0) {
+      const outside = recipients.filter((address) => {
+        const domain = address.split('@')[1]?.toLowerCase() ?? '';
+        return !domains.includes(domain);
+      });
+      if (outside.length > 0) {
+        throw AppError.badRequest(
+          'RECIPIENT_DOMAIN_NOT_ALLOWED',
+          `These report recipients are outside the allowed domains (${domains.join(', ')}): ${outside.join(', ')}.`,
+        );
+      }
+    }
+    for (const address of patch.reportRecipients ?? []) {
+      if (!emailAddressSchema.safeParse(address).success) {
+        throw AppError.badRequest('INVALID_RECIPIENT', `"${address}" is not an email address.`);
+      }
+    }
+
     const warn = patch.budgetWarningPct ?? before.budgetWarningPct;
     const stop = patch.budgetStopPct ?? before.budgetStopPct;
     if (warn > stop) {
@@ -165,6 +243,30 @@ export async function updateSettings(
         ...(patch.answerConfidenceThreshold !== undefined && {
           answerConfidenceThreshold: patch.answerConfidenceThreshold.toFixed(3),
         }),
+        // --- Sprint 3 ---
+        ...(patch.requireSandbox !== undefined && { requireSandbox: patch.requireSandbox }),
+        ...(patch.workerTokenMaxAgeHours !== undefined && { workerTokenMaxAgeHours: patch.workerTokenMaxAgeHours }),
+        ...(patch.workerTokenOverlapSeconds !== undefined && {
+          workerTokenOverlapSeconds: patch.workerTokenOverlapSeconds,
+        }),
+        ...(patch.nightShiftEnabled !== undefined && { nightShiftEnabled: patch.nightShiftEnabled }),
+        ...(patch.nightShiftSafetyFactor !== undefined && {
+          nightShiftSafetyFactor: patch.nightShiftSafetyFactor.toFixed(2),
+        }),
+        ...(patch.nightShiftWrapUpMinutes !== undefined && { nightShiftWrapUpMinutes: patch.nightShiftWrapUpMinutes }),
+        ...(patch.nightShiftMinStartMinutes !== undefined && {
+          nightShiftMinStartMinutes: patch.nightShiftMinStartMinutes,
+        }),
+        ...(patch.nightShiftLargeTaskMinMinutes !== undefined && {
+          nightShiftLargeTaskMinMinutes: patch.nightShiftLargeTaskMinMinutes,
+        }),
+        ...(patch.reportRecipients !== undefined && { reportRecipients: patch.reportRecipients }),
+        ...(patch.allowedRecipientDomains !== undefined && {
+          allowedRecipientDomains: patch.allowedRecipientDomains.map((d) => d.trim().toLowerCase()),
+        }),
+        ...(patch.mailProvider !== undefined && { mailProvider: patch.mailProvider }),
+        ...(patch.modelAssistEnabled !== undefined && { modelAssistEnabled: patch.modelAssistEnabled }),
+        ...(patch.modelProvider !== undefined && { modelProvider: patch.modelProvider }),
         updatedAt: new Date(),
         updatedBy: actor.id,
       })
@@ -178,9 +280,13 @@ export async function updateSettings(
     const beforeFields: Record<string, unknown> = { ...before };
     const afterFields: Record<string, unknown> = { ...after };
     for (const key of Object.keys(patch)) {
-      if (beforeFields[key] !== afterFields[key]) {
-        changes[key] = { from: beforeFields[key], to: afterFields[key] };
-      }
+      // Arrays compare by reference, so a list-valued setting would otherwise
+      // report a change on every write whether or not anything moved.
+      const differs =
+        Array.isArray(beforeFields[key]) || Array.isArray(afterFields[key])
+          ? JSON.stringify(beforeFields[key]) !== JSON.stringify(afterFields[key])
+          : beforeFields[key] !== afterFields[key];
+      if (differs) changes[key] = { from: beforeFields[key], to: afterFields[key] };
     }
 
     await record(tx, { actor, eventType: 'settings.updated', metadata: { changes } });

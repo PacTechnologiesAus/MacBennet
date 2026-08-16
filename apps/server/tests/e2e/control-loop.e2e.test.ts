@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { startWorker, type WorkerHandle } from '@mac/worker';
-import type { WorkerConfig } from '@mac/worker/config';
+import { defaultSandboxConfig, type WorkerConfig } from '@mac/worker/config';
 import { silentLogger } from '@mac/worker/logger';
 import {
   asUser,
@@ -78,6 +78,7 @@ async function launchWorker(overrides: Partial<WorkerConfig> & { maxRuns?: numbe
     workspace: path.join(stateDir, 'workspace'),
     heartbeatSeconds: 1,
     logLevel: 'silent',
+    sandbox: defaultSandboxConfig(),
   };
 
   const handle = await startWorker({
@@ -293,6 +294,7 @@ describe('Sprint 1 control loop, end to end', () => {
       workspace: path.join(stateDir, 'workspace'),
       heartbeatSeconds: 1,
       logLevel: 'silent',
+      sandbox: defaultSandboxConfig(),
     };
 
     const initial = await startWorker({ config, logger: silentLogger, leaseWaitSeconds: 1, retryBaseMs: 50 });

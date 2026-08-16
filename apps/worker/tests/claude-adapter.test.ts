@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { codingTaskSchema, handoffBriefContentSchema, type AgentAnswer, type AgentEvent, type CodingTask } from '@mac/protocol';
+import { codingTaskSchema, handoffBriefContentSchema, type AgentAnswerDraft, type AgentEvent, type CodingTask } from '@mac/protocol';
 import {
   ClaudeCodeAdapter,
   buildInitialPrompt,
@@ -50,7 +50,7 @@ const task = (): CodingTask =>
 async function run(
   scenario: string,
   options: {
-    answer?: (question: { questionId: string; question: string }) => AgentAnswer;
+    answer?: (question: { questionId: string; question: string }) => AgentAnswerDraft;
     cancelAfterMs?: number;
   } = {},
 ) {

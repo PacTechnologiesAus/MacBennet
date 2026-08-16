@@ -3,18 +3,21 @@ import type {
   ControlEnvelope,
   EnrollmentTokenDto,
   JobKind,
+  SandboxAttestation,
+  SandboxKind,
   StopReason,
   WorkerDto,
   WorkerStatus,
 } from '@mac/protocol';
-import { PROTOCOL_VERSION, WORKER_TOKEN_PREFIX, ENROLLMENT_TOKEN_PREFIX } from '@mac/protocol';
+import { PROTOCOL_VERSION, ENROLLMENT_TOKEN_PREFIX } from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
 import { runs, workerEnrollmentTokens, workers } from '../db/schema.js';
 import type { WorkerRow } from '../db/schema.js';
 import { AppError } from '../http/errors.js';
-import { generateToken, hashToken, tokenDisplayPrefix } from '../lib/crypto.js';
+import { generateToken, hashToken } from '../lib/crypto.js';
 import { record, SYSTEM_ACTOR, type Actor } from './audit.js';
 import { getSettings } from './settings.js';
+import { issueWorkerToken, resolvePresentedToken } from './worker-credentials.js';
 
 /**
  * Worker identity and liveness.
@@ -37,6 +40,9 @@ export const toWorkerDto = (row: WorkerRow, isLive: boolean): WorkerDto => ({
   tokenPrefix: row.tokenPrefix,
   registeredAt: row.registeredAt?.toISOString() ?? null,
   isLive,
+  sandboxKind: (row.sandboxKind as SandboxKind | null) ?? null,
+  sandboxReady: row.sandboxReady,
+  sandboxDetail: row.sandboxDetail,
 });
 
 /** A worker is live if its last heartbeat is within interval + grace. */
@@ -104,7 +110,13 @@ export interface RegistrationResult {
 
 export async function registerWorker(
   enrollmentToken: string,
-  input: { name: string; capabilities: JobKind[]; version: string; platform: string },
+  input: {
+    name: string;
+    capabilities: JobKind[];
+    version: string;
+    platform: string;
+    sandbox?: SandboxAttestation | undefined;
+  },
 ): Promise<RegistrationResult> {
   const tokenHash = hashToken(enrollmentToken);
 
@@ -123,11 +135,11 @@ export async function registerWorker(
     if (enrollment.usedAt) throw invalid;
     if (enrollment.expiresAt.getTime() <= Date.now()) throw invalid;
 
-    const workerToken = generateToken(WORKER_TOKEN_PREFIX);
     const name = input.name.trim();
+    const sandboxPatch = sandboxColumns(input.sandbox);
 
-    // Re-registration under an existing name rotates that worker's token
-    // rather than failing, so rebuilding a VM does not require manual cleanup.
+    // Re-registration under an existing name re-credentials that worker rather
+    // than failing, so rebuilding a VM does not require manual cleanup.
     const [existing] = await tx.select().from(workers).where(eq(workers.name, name)).limit(1);
 
     let workerRow: WorkerRow | undefined;
@@ -141,12 +153,11 @@ export async function registerWorker(
           capabilities: input.capabilities,
           version: input.version,
           platform: input.platform,
-          tokenHash: hashToken(workerToken),
-          tokenPrefix: tokenDisplayPrefix(workerToken),
           status: 'registered',
           currentRunId: null,
           registeredAt: new Date(),
           updatedAt: new Date(),
+          ...sandboxPatch,
         })
         .where(eq(workers.id, existing.id))
         .returning();
@@ -158,13 +169,26 @@ export async function registerWorker(
           capabilities: input.capabilities,
           version: input.version,
           platform: input.platform,
-          tokenHash: hashToken(workerToken),
-          tokenPrefix: tokenDisplayPrefix(workerToken),
+          // Replaced immediately below by `issueWorkerToken`; a placeholder
+          // rather than a nullable column so the display prefix is never null.
+          tokenPrefix: '(pending)',
           status: 'registered',
+          ...sandboxPatch,
         })
         .returning();
     }
     if (!workerRow) throw new AppError(500, 'WORKER_REGISTER_FAILED', 'Could not register worker.');
+
+    /*
+     * Enrollment issues with NO overlap: whatever this worker previously held is
+     * revoked outright. A re-enrolling worker is either new or being rebuilt,
+     * and in both cases the old credential should stop working immediately.
+     */
+    const issued = await issueWorkerToken(tx, {
+      workerId: workerRow.id,
+      issuedVia: 'enrollment',
+      overlapSeconds: 0,
+    });
 
     await tx
       .update(workerEnrollmentTokens)
@@ -182,21 +206,110 @@ export async function registerWorker(
         platform: input.platform,
         reRegistration: Boolean(existing),
         enrollmentLabel: enrollment.label,
+        sandboxKind: input.sandbox?.kind ?? null,
+        sandboxReady: input.sandbox?.available ?? false,
       },
     });
 
-    return { workerId: workerRow.id, workerToken };
+    if (input.sandbox) {
+      await record(tx, {
+        actor: { type: 'worker', id: workerRow.id, label: workerRow.name },
+        eventType: 'sandbox.attested',
+        context: { workerId: workerRow.id },
+        metadata: {
+          kind: input.sandbox.kind,
+          available: input.sandbox.available,
+          version: input.sandbox.version,
+          detail: input.sandbox.detail,
+          at: 'registration',
+        },
+      });
+    }
+
+    return { workerId: workerRow.id, workerToken: issued.token };
   });
+}
+
+/**
+ * Maps an attestation onto worker columns.
+ *
+ * A worker that reports nothing is treated as having NO sandbox, not as
+ * unchanged. An older worker that does not know how to attest must not inherit
+ * a `sandbox_ready` flag from a previous, better-informed run.
+ */
+function sandboxColumns(attestation: SandboxAttestation | undefined) {
+  return {
+    sandboxKind: (attestation?.kind ?? 'none') as SandboxKind,
+    sandboxReady: Boolean(attestation?.available),
+    sandboxDetail: attestation?.detail ?? null,
+    sandboxVersion: attestation?.version ?? null,
+  };
+}
+
+/**
+ * Records a worker's containment capability.
+ *
+ * Re-attested on every heartbeat rather than trusted from registration: a
+ * sandbox that stopped working at 02:00 must stop coding work, not persist as a
+ * stale claim on a dashboard. Only CHANGES are audited — attesting the same
+ * state every ten seconds would produce the audit volume the trail exists to
+ * avoid.
+ */
+export async function recordSandboxAttestation(
+  worker: WorkerRow,
+  attestation: SandboxAttestation,
+  handle?: DbHandle,
+): Promise<{ codingWorkWithheld: boolean }> {
+  const settings = await getSettings();
+  const changed =
+    worker.sandboxKind !== attestation.kind ||
+    worker.sandboxReady !== attestation.available ||
+    worker.sandboxDetail !== (attestation.detail ?? null);
+
+  const run = async (tx: DbHandle) => {
+    await tx
+      .update(workers)
+      .set({ ...sandboxColumns(attestation), updatedAt: new Date() })
+      .where(eq(workers.id, worker.id));
+
+    if (changed) {
+      await record(tx, {
+        actor: { type: 'worker', id: worker.id, label: worker.name },
+        eventType: 'sandbox.attested',
+        context: { workerId: worker.id },
+        metadata: {
+          kind: attestation.kind,
+          available: attestation.available,
+          version: attestation.version,
+          detail: attestation.detail,
+          previousKind: worker.sandboxKind,
+          previousReady: worker.sandboxReady,
+        },
+      });
+    }
+  };
+
+  if (handle) await run(handle);
+  else await db.transaction(run);
+
+  return { codingWorkWithheld: settings.requireSandbox && !attestation.available };
 }
 
 // ---------------------------------------------------------------------------
 // Authentication
 // ---------------------------------------------------------------------------
 
+/**
+ * Authenticates an operating worker.
+ *
+ * Sprint 3 moved the acceptance rule into `worker-credentials.ts` so that
+ * "which tokens are valid" is defined exactly once, next to the code that
+ * issues and revokes them. A revoked token presented here is audited there
+ * before this returns null.
+ */
 export async function resolveWorkerToken(token: string): Promise<WorkerRow | null> {
-  const [row] = await db.select().from(workers).where(eq(workers.tokenHash, hashToken(token))).limit(1);
-  if (!row || row.status === 'disabled') return null;
-  return row;
+  const resolved = await resolvePresentedToken(token);
+  return resolved?.worker ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,10 +318,14 @@ export async function resolveWorkerToken(token: string): Promise<WorkerRow | nul
 
 export async function recordHeartbeat(
   worker: WorkerRow,
-  input: { status: 'idle' | 'busy'; currentRunId: string | null },
+  input: { status: 'idle' | 'busy'; currentRunId: string | null; sandbox?: SandboxAttestation | undefined },
 ): Promise<WorkerStatus> {
   const now = new Date();
   const wasOffline = worker.status === 'offline';
+
+  if (input.sandbox) {
+    await recordSandboxAttestation(worker, input.sandbox).catch(() => undefined);
+  }
 
   // A worker that believes it is busy is trusted only insofar as the run agrees
   // it is assigned; otherwise the control plane's view wins.
@@ -308,6 +425,18 @@ export async function buildControlEnvelope(
     )
     .limit(1);
 
+  /*
+   * Sprint 3: rotation rides the envelope for exactly the reason cancellation
+   * does. The envelope is on EVERY worker-facing response, so the request
+   * reaches the worker on whichever call happens next — which is what makes
+   * rotating a credential possible without anyone logging into the VM.
+   */
+  const [workerRow] = await handle
+    .select({ rotationRequestedAt: workers.rotationRequestedAt })
+    .from(workers)
+    .where(eq(workers.id, workerId))
+    .limit(1);
+
   return {
     protocolVersion: PROTOCOL_VERSION,
     serverTime: new Date().toISOString(),
@@ -315,6 +444,7 @@ export async function buildControlEnvelope(
     cancelRequested: Boolean(pending),
     cancelRunId: pending?.id ?? null,
     cancelReason: (pending?.stopReason as StopReason | null) ?? null,
+    rotateTokenRequested: Boolean(workerRow?.rotationRequestedAt),
   };
 }
 

@@ -42,6 +42,36 @@ export interface BuildShimParams {
   /** Absolute path of the real git binary. */
   realGitPath: string;
   policy: GitPolicyContext;
+  /**
+   * Where refusals are appended.
+   *
+   * Sprint 3 moved this out of the shim directory. Inside a sandbox the shim is
+   * mounted READ-ONLY — so the agent cannot rewrite the policy it is being
+   * judged by — which means the guard cannot write its evidence there either.
+   * The violations file therefore lives in the run's writable scratch space.
+   *
+   * Defaults to the shim directory, preserving the unsandboxed behaviour.
+   */
+  violationsFile?: string;
+  /**
+   * How the shim's own files will be addressed by the process that runs them.
+   *
+   * Under bubblewrap the sandbox path IS the host path, so this is unnecessary.
+   * Under a container it is not: the shim is mounted somewhere else entirely,
+   * and the launcher scripts have to name the paths the sandboxed process will
+   * actually see. The FILES are written to host paths; the SCRIPTS reference
+   * sandbox paths.
+   */
+  sandbox?: {
+    /** The shim directory as seen inside the sandbox. */
+    binDir: string;
+    /** The scratch directory as seen inside the sandbox. */
+    scratchDir: string;
+    /** Node executable inside the sandbox. */
+    nodePath: string;
+    /** The real git binary inside the sandbox. */
+    realGitPath: string;
+  };
 }
 
 /**
@@ -60,16 +90,35 @@ export async function buildGitShim(params: BuildShimParams): Promise<ShimSetup> 
   const binDir = path.resolve(params.directory);
   await fs.mkdir(binDir, { recursive: true });
 
-  const violationsFile = path.join(binDir, 'git-violations.jsonl');
+  const violationsFile = params.violationsFile
+    ? path.resolve(params.violationsFile)
+    : path.join(binDir, 'git-violations.jsonl');
   const policyFile = path.join(binDir, 'git-policy.json');
   const guardScript = path.join(binDir, 'git-guard.mjs');
+
+  /*
+   * Two views of the same files.
+   *
+   * `*Host` is where this process writes them; the unsuffixed names are how the
+   * PROCESS INSIDE THE SANDBOX will address them. They are identical without a
+   * sandbox and under bubblewrap, and differ under a container — which is
+   * exactly the case where getting it wrong produces a shim that silently is
+   * not on the agent's PATH.
+   */
+  const view = params.sandbox;
+  const guardScriptInSandbox = view ? `${view.binDir}/git-guard.mjs` : guardScript;
+  const policyFileInSandbox = view ? `${view.binDir}/git-policy.json` : policyFile;
+  const policyModuleInSandbox = view ? `${view.binDir}/git-policy.mjs` : path.join(binDir, 'git-policy.mjs');
+  const violationsFileInSandbox = view
+    ? `${view.scratchDir}/${path.basename(violationsFile)}`
+    : violationsFile;
 
   const policy: ShimPolicyFile = {
     ...params.policy,
     // The agent may NEVER push. Whatever the caller passed, this is forced.
     allowPush: false,
-    realGitPath: params.realGitPath,
-    violationsFile,
+    realGitPath: view ? view.realGitPath : params.realGitPath,
+    violationsFile: violationsFileInSandbox,
   };
 
   await fs.writeFile(policyFile, JSON.stringify(policy, null, 2), 'utf8');
@@ -80,9 +129,11 @@ export async function buildGitShim(params: BuildShimParams): Promise<ShimSetup> 
   const policyModulePath = path.join(binDir, 'git-policy.mjs');
   await fs.writeFile(policyModulePath, await emitPolicyModule(), 'utf8');
 
-  await fs.writeFile(guardScript, guardSource(policyModulePath), 'utf8');
+  await fs.writeFile(guardScript, guardSource(policyModuleInSandbox), 'utf8');
 
-  const nodeExecutable = process.execPath;
+  await fs.mkdir(path.dirname(violationsFile), { recursive: true }).catch(() => undefined);
+
+  const nodeExecutable = view ? view.nodePath : process.execPath;
 
   /*
    * Two launchers, because the agent's shell differs by platform:
@@ -97,14 +148,14 @@ export async function buildGitShim(params: BuildShimParams): Promise<ShimSetup> 
     '#!/bin/sh',
     '# Mac Bennett git shim. Enforces the hard Git safety rules on any process',
     '# that inherits this directory on its PATH. See apps/worker/src/git/shim.ts.',
-    `exec ${quoteForSh(nodeExecutable)} ${quoteForSh(guardScript)} ${quoteForSh(policyFile)} "$@"`,
+    `exec ${quoteForSh(nodeExecutable)} ${quoteForSh(guardScriptInSandbox)} ${quoteForSh(policyFileInSandbox)} "$@"`,
     '',
   ].join('\n');
 
   const cmdScript = [
     '@echo off',
     'REM Mac Bennett git shim. Enforces the hard Git safety rules.',
-    `"${nodeExecutable}" "${guardScript}" "${policyFile}" %*`,
+    `"${nodeExecutable}" "${guardScriptInSandbox}" "${policyFileInSandbox}" %*`,
     'exit /b %ERRORLEVEL%',
     '',
   ].join('\r\n');

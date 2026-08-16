@@ -3,6 +3,7 @@ import { jobKindSchema } from './jobs.js';
 import { logStreamSchema, runOutcomeSchema, stopReasonSchema, workerStatusSchema } from './enums.js';
 import { agentAnswerSchema, agentEventSchema, codingTaskSchema } from './coding-agent.js';
 import { usageSnapshotSchema } from './usage.js';
+import { sandboxAttestationSchema, sandboxNetworkModeSchema } from './sandbox.js';
 
 /**
  * The worker wire protocol.
@@ -33,6 +34,15 @@ export const controlEnvelopeSchema = z.object({
   cancelRunId: z.string().uuid().nullable(),
   /** Machine-readable reason, so the worker can report it back accurately. */
   cancelReason: stopReasonSchema.nullable(),
+  /**
+   * Sprint 3: the control plane is asking this worker to rotate its credential.
+   *
+   * It rides the envelope for exactly the reason cancellation does — the
+   * envelope is on EVERY worker-facing response, so the request reaches the
+   * worker on whichever call happens next. That is what makes rotation possible
+   * without anyone touching the VM, which was the requirement.
+   */
+  rotateTokenRequested: z.boolean().default(false),
 });
 export type ControlEnvelope = z.infer<typeof controlEnvelopeSchema>;
 
@@ -47,6 +57,14 @@ export const registerRequestSchema = z.object({
   version: z.string().min(1).max(50),
   platform: z.string().min(1).max(200),
   protocolVersion: z.number().int(),
+  /**
+   * Sprint 3: what containment this worker can actually provide.
+   *
+   * Reported rather than assumed, and re-reported on every heartbeat, because
+   * a sandbox that stopped working between registration and 02:00 must stop
+   * coding work rather than silently become a claim on a dashboard.
+   */
+  sandbox: sandboxAttestationSchema.optional(),
 });
 export type RegisterRequest = z.infer<typeof registerRequestSchema>;
 
@@ -70,6 +88,8 @@ export const heartbeatRequestSchema = z.object({
     })
     .strict()
     .optional(),
+  /** Re-attested every beat, so a sandbox that broke is noticed within seconds. */
+  sandbox: sandboxAttestationSchema.optional(),
 });
 export type HeartbeatRequest = z.infer<typeof heartbeatRequestSchema>;
 
@@ -112,6 +132,20 @@ export const codingAssignmentSchema = z.object({
   openPullRequest: z.boolean(),
   /** Base for the PR. Always the default branch — and Mac may never merge it. */
   pullRequestBase: z.string(),
+  /**
+   * Sprint 3: the containment the control plane requires for this run.
+   *
+   * Built server-side like everything else in this block. A worker that cannot
+   * satisfy it refuses the run rather than running the agent unconfined —
+   * `required: true` means exactly that, and it is the default.
+   */
+  sandbox: z
+    .object({
+      required: z.boolean().default(true),
+      /** Network posture for the project's own test/build command. */
+      testNetwork: sandboxNetworkModeSchema.default('none'),
+    })
+    .default({}),
 });
 export type CodingAssignment = z.infer<typeof codingAssignmentSchema>;
 
@@ -397,6 +431,47 @@ export type ContextSnapshotRequest = z.infer<typeof contextSnapshotRequestSchema
 
 export const contextSnapshotResponseSchema = withControl({ accepted: z.literal(true) });
 export type ContextSnapshotResponse = z.infer<typeof contextSnapshotResponseSchema>;
+
+// --- Sprint 3: credential rotation and sandbox attestation ------------------
+
+/**
+ * The worker rotates its own credential.
+ *
+ * Authenticated with the token being replaced, so possession of the current
+ * credential is what authorises its replacement — the same property that makes
+ * the two-stage enrollment safe. The new token is returned exactly once, like
+ * the one registration issues, and exists in plaintext nowhere else.
+ */
+export const rotateTokenRequestSchema = z.object({
+  /** Why the worker is rotating. Recorded on the audit event. */
+  reason: z.enum(['server_requested', 'scheduled', 'worker_initiated']).default('worker_initiated'),
+});
+export type RotateTokenRequest = z.infer<typeof rotateTokenRequestSchema>;
+
+export const rotateTokenResponseSchema = withControl({
+  workerToken: z.string().min(1),
+  /**
+   * How long the previous token keeps working.
+   *
+   * It exists so an in-flight request signed with the old token does not fail
+   * mid-rotation, and it is deliberately short. A long overlap would turn a
+   * rotation into "two valid credentials", which is the thing rotation is
+   * supposed to end.
+   */
+  previousTokenValidForSeconds: z.number().int().min(0),
+  issuedAt: z.string(),
+});
+export type RotateTokenResponse = z.infer<typeof rotateTokenResponseSchema>;
+
+export const sandboxAttestationRequestSchema = z.object({ sandbox: sandboxAttestationSchema });
+export type SandboxAttestationRequest = z.infer<typeof sandboxAttestationRequestSchema>;
+
+export const sandboxAttestationResponseSchema = withControl({
+  accepted: z.literal(true),
+  /** True when the control plane will withhold coding work from this worker. */
+  codingWorkWithheld: z.boolean(),
+});
+export type SandboxAttestationResponse = z.infer<typeof sandboxAttestationResponseSchema>;
 
 /** Header the worker uses for both enrollment and operation. */
 export const WORKER_AUTH_HEADER = 'authorization';

@@ -64,6 +64,23 @@ export interface ClaudeCodeAdapterOptions {
   /** Milliseconds of silence after which a session is considered stalled. */
   idleTimeoutMs?: number;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Sprint 3: how the agent process is started.
+   *
+   * Defaults to `node:child_process.spawn`. When a sandbox is open, the session
+   * supplies a spawner that wraps the same argv in `bwrap` or `docker run`, so
+   * the agent runs inside the containment boundary without this adapter knowing
+   * anything about it. The seam is one function because that is all it needs to
+   * be — the argv, the stdin protocol and the stream parsing are unchanged.
+   */
+  spawner?: (executable: string, args: readonly string[], options: import('node:child_process').SpawnOptions) => ChildProcessWithoutNullStreams;
+  /**
+   * The agent's working directory, when it differs from the host worktree path.
+   *
+   * Under a container the worktree is mounted somewhere else, and `cwd` has to
+   * be the path the sandboxed process will see.
+   */
+  workdir?: string;
 }
 
 interface PendingSession {
@@ -276,9 +293,10 @@ export class ClaudeCodeAdapter implements CodingAgent {
     ];
 
     const executable = await this.resolveExecutable();
+    const launch = this.options.spawner ?? ((exe, args, options) => spawn(exe, [...args], options) as ChildProcessWithoutNullStreams);
 
-    const child = spawn(executable, this.argvFor(argv), {
-      cwd: task.worktreePath,
+    const child = launch(executable, this.argvFor(argv), {
+      cwd: this.options.workdir ?? task.worktreePath,
       shell: false,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],

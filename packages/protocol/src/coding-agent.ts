@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { handoffBriefContentSchema } from './brief.js';
 import { usageSnapshotSchema } from './usage.js';
+import { evidenceRefSchema, groundednessSchema } from './evidence.js';
 
 /**
  * The coding-agent abstraction (Sprint 2 §4).
@@ -179,8 +180,47 @@ export const agentAnswerSchema = z.object({
   requiredHuman: z.boolean().default(false),
   /** True when the answer is a recorded low-confidence assumption. */
   isAssumption: z.boolean().default(false),
+
+  // --- Sprint 3 (§14 of the brief): evidence-based answers ------------------
+
+  /**
+   * The specific things Mac read, with enough of each to judge it.
+   *
+   * `sources` above is a list of labels; this is the material. Both are kept
+   * because the labels are what a reviewer skims and the excerpts are what they
+   * open when a label looks wrong.
+   */
+  evidence: z.array(evidenceRefSchema).max(40).default([]),
+  /**
+   * Whether this is something Mac ESTABLISHED or something he ASSUMED.
+   *
+   * Derived from the evidence by `deriveGroundedness`, never supplied by the
+   * answering code — which is what makes "no ungrounded high-confidence claims"
+   * a property rather than an aspiration.
+   */
+  groundedness: groundednessSchema.default('assumption'),
+  /** Short prose version of the reasoning, for the report. */
+  reasoningSummary: z.string().max(1000).default(''),
+  /** True when a model contributed to the wording. Always visible to a reviewer. */
+  modelAssisted: z.boolean().default(false),
+  /** Which of the six source classes were consulted before answering. */
+  sourcesChecked: z.array(z.string().max(60)).max(12).default([]),
 });
 export type AgentAnswer = z.infer<typeof agentAnswerSchema>;
+
+/**
+ * An answer before the schema fills in its defaults.
+ *
+ * Sprint 3 added evidence, groundedness and the checked-source list to an
+ * answer. Those are properties of SUPERVISION — Mac reading his sources — and a
+ * caller supplying an answer directly (a mock agent, a test fixture, a future
+ * adapter) has no business inventing them. Typing the callback with the input
+ * type lets those callers omit what they do not know, while the parse that
+ * follows normalises every answer into the same shape.
+ *
+ * Same idiom as `AgentEventDraft`, for the same reason.
+ */
+export type AgentAnswerDraft = z.input<typeof agentAnswerSchema>;
 
 // ---------------------------------------------------------------------------
 // The interface itself
@@ -210,7 +250,7 @@ export interface CodingAgentContext {
    * Called when the agent asks a question. The returned answer is delivered
    * back into the live session. Mac — not the worker — decides what it says.
    */
-  onQuestion: (question: { questionId: string; question: string; context?: string }) => Promise<AgentAnswer>;
+  onQuestion: (question: { questionId: string; question: string; context?: string }) => Promise<AgentAnswerDraft>;
   /** Aborted when the control plane requests a stop. */
   signal: AbortSignal;
 }
