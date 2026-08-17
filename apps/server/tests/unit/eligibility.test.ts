@@ -37,6 +37,7 @@ const base = (): EligibilityInput => ({
     hasApprovedLimitedScope: false,
     repositoryApproved: true,
     hasActiveRun: false,
+    attemptedThisShift: false,
     blockedEarlierTonight: false,
   },
   policy: { minExecutionConfidence: 0.6, defaultConfidenceThreshold: 0.8 },
@@ -214,6 +215,18 @@ describe("Mac's own state", () => {
   it('rejects a task that already has a run in flight', () => {
     const input = base();
     input.mac.hasActiveRun = true;
+    expect(failing(input)).toContain('no_active_run');
+  });
+
+  it('rejects a task Mac already worked on tonight, even though nothing is in flight', () => {
+    const input = base();
+    input.mac.attemptedThisShift = true;
+    /*
+     * The dangerous case. A completed run leaves nothing in flight, and if the
+     * monday.com write has not landed — a failed write, a board that is down —
+     * the item is still sitting in a startable status. Without this check Mac
+     * would do the same work twice and open two pull requests for it.
+     */
     expect(failing(input)).toContain('no_active_run');
   });
 

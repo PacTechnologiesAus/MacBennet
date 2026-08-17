@@ -73,7 +73,7 @@ export const ELIGIBILITY_LABELS: Record<EligibilityCode, string> = {
   confidence_above_floor: 'Understanding confidence above the execution floor',
   confidence_permits_autonomy: 'Confidence permits unsupervised selection',
   repository_approved: 'Repository approved',
-  no_active_run: 'No run already in flight for this task',
+  no_active_run: 'Not already in flight or attempted tonight',
   not_previously_blocked: 'Not blocked earlier tonight',
   task_type_allowed: 'Task type is within the configured allowlist',
 };

@@ -42,7 +42,7 @@ import { record, SYSTEM_ACTOR, type Actor } from './audit.js';
 import { isWorkerLive } from './workers.js';
 import { transition } from './runs.js';
 import { appendSystemLog } from './logs.js';
-import { nightEligibleBoards } from './monday/boards.js';
+import { nightEligibleBoards, readableBoards } from './monday/boards.js';
 import { syncAllApprovedBoards } from './monday/sync.js';
 import { queueAssignToMac, queueBlocker, queueStatus, queueUpdate } from './monday/outbox.js';
 import { deliverOvernightReport } from './overnight-report.js';
@@ -222,7 +222,10 @@ export async function collectCandidates(
   nightShiftId: string | null,
   handle: DbHandle = db,
 ): Promise<CandidateContext[]> {
-  const boards = await nightEligibleBoards(handle);
+  // Everything Mac may READ. Whether he may take work from it is the
+  // eligibility predicate's job, and collecting an ineligible item is what lets
+  // the Night Queue explain the refusal instead of showing an empty list.
+  const boards = await readableBoards(handle);
   if (boards.length === 0) return [];
 
   const boardIds = boards.map((b) => b.board.id);
@@ -269,6 +272,24 @@ export async function collectCandidates(
         .where(and(inArray(runs.taskId, taskIds), inArray(runs.status, [...ACTIVE_RUN_STATUSES])))
     : [];
   const activeTaskIds = new Set(activeRuns.map((r) => r.taskId));
+
+  /*
+   * Tasks Mac has already run during THIS shift, whatever the outcome.
+   *
+   * The dangerous case is the finished one. A completed run leaves no active
+   * run, and if monday.com has not been updated yet — a failed write, a board
+   * that is down — the item is still sitting in a startable status. Without
+   * this, Mac would do the same piece of work twice and open two pull requests
+   * for it.
+   */
+  const attemptedThisShift = new Set<string>();
+  if (nightShiftId && taskIds.length) {
+    const rows = await handle
+      .select({ taskId: runs.taskId })
+      .from(runs)
+      .where(and(inArray(runs.taskId, taskIds), eq(runs.nightShiftId, nightShiftId)));
+    for (const row of rows) attemptedThisShift.add(row.taskId);
+  }
 
   /*
    * Tasks for which a HUMAN already approved a narrower scope.
@@ -352,6 +373,7 @@ export async function collectCandidates(
         hasApprovedLimitedScope: Boolean(item.taskId && scopeApproved.has(item.taskId)),
         repositoryApproved: approvedRepoProjects.has(project.id),
         hasActiveRun: Boolean(item.taskId && activeTaskIds.has(item.taskId)),
+        attemptedThisShift: Boolean(item.taskId && attemptedThisShift.has(item.taskId)),
         blockedEarlierTonight: Boolean(item.taskId && blockedTaskIds.has(item.taskId)),
       },
       policy: {
@@ -751,10 +773,28 @@ async function loadCurrentWork(shiftId: string): Promise<NightState['current']> 
   // A run that has already been reported on is not "current" any more.
   if (row.run.completedAt && row.run.summary === null && status === 'cancelled') return null;
 
+  /*
+   * A run that finished but left an unresolved blocker is a BLOCKED task, not a
+   * clean completion.
+   *
+   * Sprint 2's design is that a blocked subtask does not stop the run: the
+   * independent work carries on and the blocked portion is left unimplemented.
+   * That is right for the run, and wrong for the board — marking the item Ready
+   * for Review would tell a human the work is finished when part of it was
+   * deliberately not attempted.
+   *
+   * So the lifecycle status stays `completed` (it did complete, and the stop
+   * reason says `completed_with_blockers`), while the SCHEDULER treats the task
+   * as blocked: it posts the blocker, does not set Ready for Review, and moves
+   * on to other work.
+   */
+  const terminal = ['completed', 'failed', 'stopped_by_guardrail', 'cancelled'].includes(status);
+  const unresolvedBlockers = terminal || status === 'blocked' ? await countUnresolvedBlockers(row.run.id) : 0;
+
   const mapped: NonNullable<NightState['current']>['status'] =
     status === 'running' || status === 'self_review'
       ? (status as 'running' | 'self_review')
-      : status === 'blocked'
+      : status === 'blocked' || unresolvedBlockers > 0
         ? 'blocked'
         : status === 'completed'
           ? 'completed'
@@ -792,6 +832,14 @@ async function loadCurrentWork(shiftId: string): Promise<NightState['current']> 
     status: mapped,
     productive: row.run.updatedAt.getTime() > Date.now() - 10 * 60_000,
   };
+}
+
+async function countUnresolvedBlockers(runId: string): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(runBlockers)
+    .where(and(eq(runBlockers.runId, runId), eq(runBlockers.resolved, false)));
+  return row?.count ?? 0;
 }
 
 async function lastWorkedProject(shiftId: string): Promise<string | null> {

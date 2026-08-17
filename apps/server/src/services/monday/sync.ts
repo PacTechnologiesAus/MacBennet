@@ -204,8 +204,10 @@ function mapPriority(label: string | null): 'low' | 'normal' | 'high' | 'urgent'
 
 /** Syncs every board Mac is allowed to read. Used by the night tick. */
 export async function syncAllApprovedBoards(actor: Actor = SYSTEM_ACTOR): Promise<SyncResult[]> {
-  const { nightEligibleBoards } = await import('./boards.js');
-  const boards = await nightEligibleBoards();
+  // Every board Mac may read, not only the ones he may work from: a project
+  // awaiting night-shift approval should still show a populated queue.
+  const { readableBoards } = await import('./boards.js');
+  const boards = await readableBoards();
   const results: SyncResult[] = [];
   for (const { board } of boards) {
     results.push(await syncBoard(board.id, actor).catch((err: Error) => ({

@@ -62,6 +62,16 @@ export interface EligibilityInput {
     hasApprovedLimitedScope: boolean;
     repositoryApproved: boolean;
     hasActiveRun: boolean;
+    /**
+     * Mac already ran this task during THIS shift, whatever the outcome.
+     *
+     * Separate from `hasActiveRun` because the dangerous case is the finished
+     * one: a completed run leaves no active run, and if monday.com has not yet
+     * been updated — a failed write, a board that is down — the item is still
+     * sitting in a startable status. Without this, Mac would cheerfully do the
+     * same piece of work twice.
+     */
+    attemptedThisShift: boolean;
     blockedEarlierTonight: boolean;
   };
   policy: {
@@ -253,8 +263,12 @@ export function evaluateEligibility(input: EligibilityInput): EligibilityVerdict
   checks.push(
     check(
       'no_active_run',
-      !mac.hasActiveRun,
-      mac.hasActiveRun ? 'A run for this task is already in flight.' : 'No run in flight.',
+      !mac.hasActiveRun && !mac.attemptedThisShift,
+      mac.hasActiveRun
+        ? 'A run for this task is already in flight.'
+        : mac.attemptedThisShift
+          ? 'Mac already worked on this task tonight.'
+          : 'No run in flight, and not attempted tonight.',
     ),
   );
 

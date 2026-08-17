@@ -334,9 +334,33 @@ export async function listMondayItems(filter: { projectId?: string; boardRowId?:
 }
 
 /**
+ * Boards Mac may READ.
+ *
+ * Board approval is the read gate and nothing else: `nightShiftEligible` and
+ * the project's own night-shift approval decide whether he may take WORK from
+ * what he reads, and those are evaluated by the eligibility predicate.
+ *
+ * The distinction matters for a practical reason. If an unapproved project's
+ * items were never collected, the Night Queue would show an empty list and an
+ * engineer configuring the integration would have nothing to look at — the
+ * commonest configuration mistake would be the one with no feedback. Collecting
+ * them and letting the predicate explain the refusal is strictly better, and
+ * costs nothing: an item that fails a check is never started.
+ */
+export async function readableBoards(handle: DbHandle = db): Promise<Array<{ board: MondayBoardRow; projectName: string }>> {
+  return handle
+    .select({ board: mondayBoards, projectName: projects.name })
+    .from(mondayBoards)
+    .innerJoin(projects, eq(projects.id, mondayBoards.projectId))
+    .where(and(eq(mondayBoards.isApproved, true), eq(projects.isActive, true)));
+}
+
+/**
  * Boards Mac may take autonomous work from RIGHT NOW.
  *
  * Both gates in one predicate, so no caller can accidentally check only one.
+ * Used where the question really is "may he work here?" rather than "may he
+ * look?" — chiefly the dashboard's own counters.
  */
 export async function nightEligibleBoards(handle: DbHandle = db): Promise<Array<{ board: MondayBoardRow; projectName: string }>> {
   const rows = await handle
