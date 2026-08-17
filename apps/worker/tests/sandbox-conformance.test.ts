@@ -364,3 +364,96 @@ describeIfSandbox('network posture', () => {
 
 /** Host paths inside a shell command; the sandbox path is what should not exist. */
 const posix = (p: string): string => p.replace(/\\/g, '/');
+
+describeIfSandbox('the agent’s own credential, and nobody else’s', () => {
+  /*
+   * Commissioning defect #3, proven at the boundary rather than in the wiring.
+   *
+   * The sandbox environment is built from empty, which is right — but it meant
+   * a real coding agent inside it had no way to hold its own provider
+   * credential, and so no authenticated agent had ever run behind this
+   * boundary. The plan had `extraEnv` and `credentialMounts`; nothing supplied
+   * them. These tests assert the two halves that matter: what an administrator
+   * deliberately grants ARRIVES, and everything else is still absent.
+   */
+
+  it('delivers a forwarded variable to the process inside', async () => {
+    const session = await sandbox!.open(plan({ extraEnv: { ANTHROPIC_API_KEY: 'sk-ant-conformance-probe' } }));
+    try {
+      const result = await inSandbox(session, 'printenv ANTHROPIC_API_KEY');
+      expect(result.stdout.trim()).toBe('sk-ant-conformance-probe');
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  }, 180_000);
+
+  it('delivers a mounted credential file, readable, at the path the plan recorded', async () => {
+    const credential = path.join(root, 'agent-credential.json');
+    await fs.writeFile(credential, '{"agent":"CREDENTIAL-CONTENT-FOR-THE-AGENT"}\n', 'utf8');
+
+    const built = plan({ credentialMounts: [credential] });
+    const mount = built.mounts.find((m) => m.purpose === 'credential');
+    expect(mount, 'the plan did not record a credential mount').toBeDefined();
+    expect(mount!.mode).toBe('ro');
+
+    const session = await sandbox!.open(built);
+    try {
+      const result = await inSandbox(session, `cat ${posix(mount!.sandboxPath)}`);
+      expect(result.stdout).toContain('CREDENTIAL-CONTENT-FOR-THE-AGENT');
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  }, 180_000);
+
+  it('mounts that credential READ-ONLY, so the agent cannot rewrite or destroy it', async () => {
+    const credential = path.join(root, 'agent-credential-ro.json');
+    await fs.writeFile(credential, 'ORIGINAL\n', 'utf8');
+
+    const built = plan({ credentialMounts: [credential] });
+    const mount = built.mounts.find((m) => m.purpose === 'credential')!;
+
+    const session = await sandbox!.open(built);
+    try {
+      const result = await inSandbox(session, `echo TAMPERED > ${posix(mount.sandboxPath)} 2>&1; echo "exit=$?"`);
+      expect(result.stdout).not.toContain('exit=0');
+      expect(await fs.readFile(credential, 'utf8')).toBe('ORIGINAL\n');
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  }, 180_000);
+
+  it('grants the agent’s credential WITHOUT granting the worker’s or the control plane’s', async () => {
+    // The whole point of the allowance. An agent that holds its own API key
+    // must still be unable to reach the worker token, the monday.com token or
+    // the mailbox secret — the first from the filesystem, the rest from an
+    // environment that was never copied.
+    const credential = path.join(root, 'agent-credential-scoped.json');
+    await fs.writeFile(credential, 'AGENT-ONLY\n', 'utf8');
+
+    const built = plan({
+      credentialMounts: [credential],
+      extraEnv: { ANTHROPIC_API_KEY: 'sk-ant-conformance-probe' },
+    });
+
+    const session = await sandbox!.open(built);
+    try {
+      const env = await inSandbox(session, 'printenv');
+      for (const forbidden of ['MONDAY_API_TOKEN', 'MAC_MAIL_', 'MAC_ENROLLMENT_TOKEN', 'DATABASE_URL', 'GITHUB_TOKEN']) {
+        expect(env.stdout, `${forbidden} reached the sandbox`).not.toContain(forbidden);
+      }
+
+      const workerToken = await inSandbox(
+        session,
+        `cat ${posix(path.join(workspace, 'worker-state.json'))} 2>&1; echo "exit=$?"`,
+      );
+      expect(workerToken.stdout).not.toContain('mac_wk_LEAKED');
+
+      // And the thing it WAS granted is still there, so this is not passing by
+      // the credential simply having failed to mount.
+      const granted = await inSandbox(session, 'printenv ANTHROPIC_API_KEY');
+      expect(granted.stdout.trim()).toBe('sk-ant-conformance-probe');
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  }, 180_000);
+});

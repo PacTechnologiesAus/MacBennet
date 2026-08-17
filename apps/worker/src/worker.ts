@@ -275,6 +275,8 @@ export async function startWorker(options: RunWorkerOptions): Promise<WorkerHand
         provider: config.sandbox.provider,
         image: config.sandbox.image,
         toolingMounts: config.sandbox.toolingMounts,
+        credentialMounts: config.sandbox.credentialMounts,
+        agentEnv: config.sandbox.agentEnv,
         nodePath: config.sandbox.nodePath,
         gitPath: config.sandbox.gitPath,
         ...(config.sandbox.uid !== undefined ? { uid: config.sandbox.uid } : {}),

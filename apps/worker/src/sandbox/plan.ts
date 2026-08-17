@@ -212,6 +212,23 @@ function assertPathAcceptable(
           'Sandbox mounts are an allowlist, not a filter.',
       );
     }
+  } else if (!fs.existsSync(resolved)) {
+    /*
+     * Operator mounts must exist. Project mounts are created by Mac moments
+     * earlier and always do.
+     *
+     * Docker turns `-v /typo:/mac/credentials/0:ro` into an empty directory and
+     * mounts that, so a mistyped credential path produces an agent that cannot
+     * log in and a plan that looks perfectly correct — diagnosed at 02:00, from
+     * inside a container, by whoever is on call. A typo in configuration should
+     * fail where the configuration is read.
+     */
+    throw new SandboxPlanError(
+      'path_does_not_exist',
+      resolved,
+      `Refusing to mount "${resolved}": nothing exists at that path. Check the tooling or credential ` +
+        'path in the worker configuration — a mount that is silently empty is worse than one that fails.',
+    );
   }
 
   return resolved;

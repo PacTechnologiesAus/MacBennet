@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -131,8 +132,16 @@ describe('the plan refuses anything outside the assigned project', () => {
      * directory, and those refusals still apply to them, which is the property
      * worth pinning down.
      */
+    // Real, because an operator mount must now exist: a mistyped tooling or
+    // credential path used to become an empty docker volume and an agent that
+    // could not authenticate. The property under test here is the ROOTS rule,
+    // and it is unchanged.
     const toolchain = path.join(root, 'opt-toolchain');
+    fsSync.mkdirSync(toolchain, { recursive: true });
     expect(() => buildSandboxPlan({ ...base(), toolingMounts: [toolchain] })).not.toThrow();
+    expect(() => buildSandboxPlan({ ...base(), toolingMounts: [path.join(root, 'opt-typo')] })).toThrow(
+      SandboxPlanError,
+    );
     expect(() => buildSandboxPlan({ ...base(), toolingMounts: [path.join(home, '.aws')] })).toThrow(SandboxPlanError);
     expect(() => buildSandboxPlan({ ...base(), toolingMounts: [home] })).toThrow(SandboxPlanError);
   });

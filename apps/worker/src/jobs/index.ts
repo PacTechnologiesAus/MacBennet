@@ -56,6 +56,8 @@ export interface JobContext {
     provider?: 'auto' | 'bubblewrap' | 'docker' | 'none';
     image?: string;
     toolingMounts?: string[];
+    credentialMounts?: string[];
+    agentEnv?: Record<string, string>;
     nodePath?: string;
     gitPath?: string;
     uid?: number;

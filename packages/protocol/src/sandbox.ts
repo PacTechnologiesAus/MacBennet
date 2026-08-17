@@ -147,6 +147,13 @@ export const SANDBOX_PLAN_REFUSALS = [
   'workdir_not_writable',
   'no_worktree_mount',
   'relative_path',
+  /**
+   * An operator mount — tooling, or the agent's own credential — names a path
+   * that is not there. Docker would turn it into an empty directory and mount
+   * that, so the run would proceed with an agent that cannot authenticate and a
+   * plan that looked correct.
+   */
+  'path_does_not_exist',
 ] as const;
 export const sandboxPlanRefusalSchema = z.enum(SANDBOX_PLAN_REFUSALS);
 export type SandboxPlanRefusal = z.infer<typeof sandboxPlanRefusalSchema>;

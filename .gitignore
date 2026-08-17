@@ -8,3 +8,7 @@ coverage/
 .DS_Store
 .mac-worker-state.json
 workspace/
+
+# Commissioning: machine-local TLS-inspection roots. Never committed.
+scripts/commissioning/ca/*
+!scripts/commissioning/ca/.gitkeep

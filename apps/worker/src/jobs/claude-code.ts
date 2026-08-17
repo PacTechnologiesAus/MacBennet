@@ -79,6 +79,8 @@ export interface CodingJobDependencies {
     provider?: 'auto' | 'bubblewrap' | 'docker' | 'none';
     image?: string;
     toolingMounts?: string[];
+    credentialMounts?: string[];
+    agentEnv?: Record<string, string>;
     nodePath?: string;
     gitPath?: string;
     uid?: number;
@@ -194,6 +196,15 @@ export async function runCodingJob(
         shimDir: shimHostDir,
         scratchDir,
         ...(sandboxOpts.toolingMounts ? { toolingMounts: sandboxOpts.toolingMounts } : {}),
+        // The agent's OWN provider credential, and nothing else. Both are
+        // read-only, both are recorded in the plan, and both are refused by the
+        // plan builder if they name the worker's or the control plane's secrets.
+        // Without these the sandbox environment is empty and no real coding
+        // agent can authenticate inside it.
+        ...(sandboxOpts.credentialMounts?.length ? { credentialMounts: sandboxOpts.credentialMounts } : {}),
+        ...(sandboxOpts.agentEnv && Object.keys(sandboxOpts.agentEnv).length
+          ? { extraEnv: sandboxOpts.agentEnv }
+          : {}),
         // The coding agent must reach its model API; the test command must not,
         // unless the repository was explicitly configured to allow it.
         network: 'egress',
