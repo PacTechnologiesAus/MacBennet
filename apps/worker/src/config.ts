@@ -70,6 +70,18 @@ const envSchema = z.object({
    * deliberately, and visibly.
    */
   MAC_SANDBOX_CREDENTIALS: z.string().optional(),
+  /**
+   * DEVELOPMENT ONLY: let an agent run commands with no sandbox containing it.
+   *
+   * Off by default, and the run log says so when it is on. A host that cannot
+   * run a sandbox would otherwise have an agent that can edit files and never
+   * verify them, which is worse than useless — it produces confident diffs
+   * nobody executed. On a real VM, install a sandbox instead of setting this.
+   */
+  MAC_ALLOW_UNCONTAINED_AGENT_COMMANDS: z
+    .string()
+    .optional()
+    .transform((v) => v === 'true'),
   /** Where node and git live inside the image. Unused by bubblewrap. */
   MAC_SANDBOX_NODE_PATH: z.string().default('/usr/local/bin/node'),
   MAC_SANDBOX_GIT_PATH: z.string().default('/usr/bin/git'),
@@ -169,6 +181,8 @@ export interface WorkerConfig {
     credentialMounts: string[];
     /** Values, already resolved and already refused-checked. Never process.env. */
     agentEnv: Record<string, string>;
+    /** Development only: let an UNCONTAINED agent run commands. */
+    allowUncontainedCommands: boolean;
     nodePath: string;
     gitPath: string;
     uid: number | undefined;
@@ -191,6 +205,7 @@ export function defaultSandboxConfig(overrides: Partial<WorkerConfig['sandbox']>
     toolingMounts: [],
     credentialMounts: [],
     agentEnv: {},
+    allowUncontainedCommands: false,
     nodePath: '/usr/local/bin/node',
     gitPath: '/usr/bin/git',
     uid: undefined,
@@ -260,6 +275,7 @@ export function loadConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig 
       toolingMounts: splitPaths(env.MAC_SANDBOX_TOOLING),
       credentialMounts: splitPaths(env.MAC_SANDBOX_CREDENTIALS),
       agentEnv: resolveSandboxAgentEnv((env.MAC_SANDBOX_AGENT_ENV ?? '').split(',')),
+      allowUncontainedCommands: env.MAC_ALLOW_UNCONTAINED_AGENT_COMMANDS,
       nodePath: env.MAC_SANDBOX_NODE_PATH,
       gitPath: env.MAC_SANDBOX_GIT_PATH,
       uid: env.MAC_SANDBOX_UID,

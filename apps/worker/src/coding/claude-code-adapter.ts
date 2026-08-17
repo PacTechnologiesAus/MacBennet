@@ -81,6 +81,45 @@ export interface ClaudeCodeAdapterOptions {
    * be the path the sandboxed process will see.
    */
   workdir?: string;
+  /**
+   * Whether the agent is running inside an OS-enforced sandbox.
+   *
+   * This decides the CLI's own permission mode, and Sprint 3.1 commissioning is
+   * the reason it exists.
+   *
+   * `--permission-mode acceptEdits` permits file edits and NOTHING ELSE. In a
+   * non-interactive `-p` session the agent therefore cannot run the project's
+   * tests, cannot run `git add` or `git commit`, and cannot clear the prompt
+   * that says so. The first real coding run against a real repository stopped
+   * and reported exactly that:
+   *
+   *   "`npm test`, `node --test test/`, `git add -A` and `git commit` all come
+   *    back 'This command requires approval' … the tests have not been run, and
+   *    nothing is committed."
+   *
+   * Which makes steps 4 to 7 of the discipline the brief demands — run the
+   * tests, read the output, debug, iterate, self-review — impossible. It had
+   * been latent since Sprint 2, hidden because the opt-in real-Claude test asks
+   * for a file to be CREATED, which an edit can do, and never asserted a commit.
+   *
+   * The fix is not to loosen a boundary; it is to let the boundary do its job.
+   * Inside a sandbox the containment is the mount namespace, which is stronger
+   * than a prompt nobody is present to answer, so the CLI's own prompting is
+   * redundant and is turned off. OUTSIDE a sandbox it is not redundant, and it
+   * stays on — an uncontained agent keeps only the edit permission it had.
+   *
+   * That makes the sandbox load-bearing rather than decorative: containment is
+   * now what buys the agent the ability to work.
+   */
+  contained?: boolean;
+  /**
+   * Development-only escape hatch: full permissions with no containment.
+   *
+   * Exists because a host that cannot run a sandbox — a Windows development
+   * machine — would otherwise have an agent that can edit and never verify.
+   * Off by default, and the caller is expected to say so in the run log.
+   */
+  allowUncontainedCommands?: boolean;
 }
 
 interface PendingSession {
@@ -104,6 +143,19 @@ export class ClaudeCodeAdapter implements CodingAgent {
 
   private get command(): string {
     return this.options.command ?? 'claude';
+  }
+
+  /**
+   * The CLI permission mode this run gets.
+   *
+   * `bypassPermissions` only when something is actually containing the process.
+   * Anything else keeps the agent to edits, which is survivable — Mac commits
+   * what the agent left behind and runs the tests himself — but means the agent
+   * cannot iterate, and the brief it is given says so rather than asking for
+   * discipline it has no way to practise.
+   */
+  permissionMode(): 'acceptEdits' | 'bypassPermissions' {
+    return this.options.contained || this.options.allowUncontainedCommands ? 'bypassPermissions' : 'acceptEdits';
   }
 
   /** Prepends the test script, when one is configured. */
@@ -274,16 +326,19 @@ export class ClaudeCodeAdapter implements CodingAgent {
      * Fixed argv. The brief is NOT an argument — it goes in on stdin, so no
      * brief content can ever be read as a flag, however it is worded.
      *
-     * `--permission-mode acceptEdits` plus `--disallowedTools` are defence in
-     * depth only. The control on git is the shim on PATH, which binds whatever
-     * the CLI's own permission model does.
+     * The permission mode follows the containment this run actually has; see
+     * `contained` on the options for why. `--disallowedTools` is defence in
+     * depth either way, and the control on git is the shim on PATH, which binds
+     * whatever the CLI's own permission model does.
      */
+    const permissionMode = this.permissionMode();
+
     const argv = [
       '-p',
       '--output-format', 'stream-json',
       '--input-format', 'stream-json',
       '--verbose',
-      '--permission-mode', 'acceptEdits',
+      '--permission-mode', permissionMode,
       // Mac pushes; the agent never does. Also blocks the obvious routes to a
       // network write even if the shim were somehow bypassed.
       '--disallowedTools', 'WebFetch',
@@ -397,7 +452,7 @@ export class ClaudeCodeAdapter implements CodingAgent {
 
       // Kick the session off with the structured brief. Not the raw human
       // conversation — spec §12 is explicit about that.
-      this.sendUserMessage(child, buildInitialPrompt(task));
+      this.sendUserMessage(child, buildInitialPrompt(task, { canRunCommands: permissionMode === 'bypassPermissions' }));
     });
 
     // The handle exposes the provider session id lazily, because `system/init`
@@ -740,7 +795,11 @@ export function formatAnswerForAgent(answer: string, decision: string): string {
  * prompt enforces them (it does not, and cannot), but because an agent told
  * what it may not do wastes less time attempting it.
  */
-export function buildInitialPrompt(task: CodingTask): string {
+export function buildInitialPrompt(
+  task: CodingTask,
+  capabilities: { canRunCommands?: boolean } = {},
+): string {
+  const canRunCommands = capabilities.canRunCommands !== false;
   const lines: string[] = [];
 
   lines.push(
@@ -756,17 +815,47 @@ export function buildInitialPrompt(task: CodingTask): string {
     '- Do not push at all. Mac pushes the branch himself after reviewing your work.',
     '- If you need a decision Mac has not covered, ask a direct question and wait. Mac will answer.',
     '',
-    '## Engineering discipline expected',
-    '',
-    '1. Understand the brief and inspect the relevant code before changing anything.',
-    '2. Plan the change.',
-    '3. Implement a small slice.',
-    '4. Run the tests and read the output.',
-    '5. Debug and iterate until they pass.',
-    '6. Self-review your own diff before declaring completion.',
-    '7. Run the full test suite once more at the end.',
-    '',
   );
+
+  /*
+   * Tell the agent the truth about what it can do.
+   *
+   * Commissioning found the opposite: an agent asked to "run the tests and
+   * iterate until they pass" in a session whose permission mode refused every
+   * command. It spent its budget rediscovering that, then reported itself
+   * blocked on something no human could unblock. Asking for discipline the
+   * session cannot practise produces a false blocker, not caution.
+   */
+  if (canRunCommands) {
+    lines.push(
+      '## Engineering discipline expected',
+      '',
+      '1. Understand the brief and inspect the relevant code before changing anything.',
+      '2. Plan the change.',
+      '3. Implement a small slice.',
+      '4. Run the tests and read the output.',
+      '5. Debug and iterate until they pass.',
+      '6. Self-review your own diff before declaring completion.',
+      '7. Run the full test suite once more at the end.',
+      '',
+    );
+  } else {
+    lines.push(
+      '## What this session can and cannot do',
+      '',
+      'This session is EDIT-ONLY: it can read and write files, and it cannot run commands.',
+      'Do not attempt to run tests, builds, `git add` or `git commit` — they will be refused, and',
+      'being refused is not a blocker worth reporting. Mac commits what you leave behind and runs',
+      'the test suite himself afterwards.',
+      '',
+      '1. Understand the brief and inspect the relevant code before changing anything.',
+      '2. Plan the change.',
+      '3. Make the change carefully, in small pieces you can re-read.',
+      '4. Self-review your own diff by reading it, and say plainly that you could not execute it.',
+      '5. Write the tests the brief asks for even though you cannot run them.',
+      '',
+    );
+  }
 
   if (task.testCommand.length) {
     lines.push(`Tests for this repository are run with: \`${task.testCommand.join(' ')}\``, '');

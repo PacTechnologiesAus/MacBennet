@@ -81,6 +81,7 @@ export interface CodingJobDependencies {
     toolingMounts?: string[];
     credentialMounts?: string[];
     agentEnv?: Record<string, string>;
+    allowUncontainedCommands?: boolean;
     nodePath?: string;
     gitPath?: string;
     uid?: number;
@@ -289,6 +290,18 @@ export async function runCodingJob(
         : new ClaudeCodeAdapter({
             shimBinDir: sandboxSession ? sandboxSession.pathFor(shim.binDir) : shim.binDir,
             idleTimeoutMs: task.limits.maxMinutes * 60_000,
+            /*
+             * Containment is what buys the agent the ability to run commands.
+             *
+             * Inside a sandbox the mount namespace is the boundary, so the
+             * CLI's own permission prompt — which nobody is present to answer
+             * in a `-p` session — is redundant and is turned off. Outside one
+             * it is not redundant and stays on, which leaves an agent that can
+             * edit but cannot test. See `contained` on the adapter's options
+             * for what commissioning found.
+             */
+            contained: sandboxSession !== null,
+            ...(sandboxOpts.allowUncontainedCommands ? { allowUncontainedCommands: true } : {}),
             ...(sandboxSession
               ? { spawner: sandboxSession.spawner as never, workdir: sandboxSession.pathFor(setup.path) }
               : {}),
@@ -297,6 +310,33 @@ export async function runCodingJob(
     const availability = await agent.isAvailable();
     if (!availability.available) {
       throw new CodingAgentUnavailable(availability.reason ?? 'The coding agent is not available on this worker.');
+    }
+
+    /*
+     * Say plainly what this session can do.
+     *
+     * A reviewer reading the log at 08:00 needs to know whether the agent ran
+     * the tests or merely wrote them. Commissioning's first real run produced a
+     * confident diff nobody had executed, and the log did not say so.
+     */
+    if (sandboxSession) {
+      ctx.log(
+        'The coding agent runs contained, so it may run the project’s commands. The sandbox is the boundary.',
+        'system',
+      );
+    } else if (sandboxOpts.allowUncontainedCommands) {
+      ctx.log(
+        'DEVELOPMENT SETTING: the coding agent may run commands with NO sandbox containing it. ' +
+          'It can reach anything this worker can. Do not use this on a shared or production machine.',
+        'stderr',
+      );
+    } else {
+      ctx.log(
+        'The coding agent is EDIT-ONLY: with no sandbox it may not run commands, so it cannot run the ' +
+          'tests or commit. Mac commits what it leaves and runs the tests himself. Install a sandbox to ' +
+          'let the agent verify its own work.',
+        'system',
+      );
     }
 
     // Usage before. It may well be `unavailable`; that is reported honestly

@@ -58,6 +58,7 @@ export interface JobContext {
     toolingMounts?: string[];
     credentialMounts?: string[];
     agentEnv?: Record<string, string>;
+    allowUncontainedCommands?: boolean;
     nodePath?: string;
     gitPath?: string;
     uid?: number;
