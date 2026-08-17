@@ -27,6 +27,20 @@ import type {
   UpdateSettingsRequest,
   UpdateTaskRequest,
   WorkerDto,
+  // --- Sprint 3 ---
+  CreateMondayBoardRequest,
+  EmailDeliveryDto,
+  InvestigationDto,
+  MondayBoardDto,
+  MondayItemDto,
+  MondayWriteDto,
+  NightCandidateDto,
+  NightDecisionDto,
+  NightShiftDashboardDto,
+  NightShiftDto,
+  SecurityOverviewDto,
+  UpdateMondayBoardRequest,
+  WorkerTokenDto,
 } from '@mac/protocol';
 
 /**
@@ -169,5 +183,55 @@ export const api = {
     if (params.projectId) query.set('projectId', params.projectId);
     query.set('limit', String(params.limit ?? 100));
     return get<{ events: AuditEventDto[] }>(`/api/audit?${query.toString()}`);
+  },
+
+  // --- Night shift (Sprint 3) ----------------------------------------------
+  nightShift: () => get<{ dashboard: NightShiftDashboardDto }>('/api/night-shift'),
+  nightQueue: () => get<{ queue: NightCandidateDto[] }>('/api/night-shift/queue'),
+  nightDecisions: (shiftId: string) =>
+    get<{ decisions: NightDecisionDto[] }>(`/api/night-shift/${shiftId}/decisions`),
+  startNightShift: (body: { cutoffAt?: string; notes?: string } = {}) =>
+    post<{ shift: NightShiftDto }>('/api/night-shift/start', body),
+  stopNightShift: (reason?: string) =>
+    post<{ shift: NightShiftDto | null }>('/api/night-shift/stop', { reason }),
+  tickNightShift: () => post<{ result: unknown }>('/api/night-shift/tick'),
+
+  // --- monday.com (Sprint 3) -----------------------------------------------
+  listMondayBoards: () => get<{ boards: MondayBoardDto[] }>('/api/monday/boards'),
+  createMondayBoard: (body: CreateMondayBoardRequest) =>
+    post<{ board: MondayBoardDto }>('/api/monday/boards', body),
+  updateMondayBoard: (id: string, body: UpdateMondayBoardRequest) =>
+    patch<{ board: MondayBoardDto }>(`/api/monday/boards/${id}`, body),
+  approveMondayBoard: (id: string, approved: boolean, notes?: string) =>
+    post<{ board: MondayBoardDto }>(`/api/monday/boards/${id}/approve`, { approved, notes }),
+  syncMondayBoard: (id: string) => post<{ result: unknown }>(`/api/monday/boards/${id}/sync`),
+  listMondayItems: (projectId?: string) =>
+    get<{ items: MondayItemDto[] }>(`/api/monday/items${projectId ? `?projectId=${projectId}` : ''}`),
+  listMondayWrites: (runId?: string) =>
+    get<{ writes: MondayWriteDto[] }>(`/api/monday/writes${runId ? `?runId=${runId}` : ''}`),
+  approveProjectNightShift: (projectId: string, approved: boolean) =>
+    post<{ result: { projectId: string; approved: boolean } }>(
+      `/api/projects/${projectId}/night-shift-approval`,
+      { approved },
+    ),
+
+  // --- Security (Sprint 3) --------------------------------------------------
+  security: () => get<{ security: SecurityOverviewDto }>('/api/security'),
+  rotateWorkerToken: (workerId: string, reason?: string) =>
+    post<{ rotationRequested: boolean }>(`/api/workers/${workerId}/rotate`, { reason }),
+  revokeWorkerTokens: (workerId: string, reason: string) =>
+    post<{ revoked: number }>(`/api/workers/${workerId}/revoke-tokens`, { reason }),
+  listWorkerTokens: (workerId: string) => get<{ tokens: WorkerTokenDto[] }>(`/api/workers/${workerId}/tokens`),
+
+  // --- Report delivery (Sprint 3) -------------------------------------------
+  listDeliveries: () => get<{ deliveries: EmailDeliveryDto[] }>('/api/reports/deliveries'),
+  retryDelivery: (id: string) => post<{ delivery: EmailDeliveryDto }>(`/api/reports/deliveries/${id}/retry`),
+
+  // --- Investigations (Sprint 3) --------------------------------------------
+  listInvestigations: (params: { taskId?: string; runId?: string }) => {
+    const query = new URLSearchParams();
+    if (params.taskId) query.set('taskId', params.taskId);
+    if (params.runId) query.set('runId', params.runId);
+    return get<{ investigations: InvestigationDto[] }>(`/api/investigations?${query.toString()}`);
   },
 };

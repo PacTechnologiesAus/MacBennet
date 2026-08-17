@@ -14,6 +14,8 @@ export const toProjectDto = (row: ProjectRow): ProjectDto => ({
   repoUrl: row.repoUrl,
   repoDefaultBranch: row.repoDefaultBranch,
   isActive: row.isActive,
+  nightShiftApproved: row.nightShiftApproved,
+  nightShiftApprovedAt: row.nightShiftApprovedAt?.toISOString() ?? null,
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
 });

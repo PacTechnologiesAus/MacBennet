@@ -233,6 +233,26 @@ describe('heartbeat', () => {
     expect(events[0]!.metadata.hadRunInFlight).toBe(true);
   });
 
+  it('marks a silent worker offline exactly once, however often the sweeper runs', async () => {
+    const worker = await registerTestWorker(app);
+    await db.execute(sql`UPDATE workers SET last_heartbeat_at = now() - interval '1 hour'`);
+
+    expect(await markStaleWorkersOffline()).toEqual([worker.workerId]);
+
+    /*
+     * The sweeper runs every fifteen seconds forever. A version of this query
+     * whose OR escaped its AND chain re-marked and re-audited the same dead VM
+     * on every tick — about 5,700 rows a day for one worker, which is exactly
+     * the audit flooding the decision not to audit heartbeats set out to avoid.
+     */
+    for (let i = 0; i < 4; i += 1) {
+      expect(await markStaleWorkersOffline()).toEqual([]);
+    }
+
+    const events = await queryAuditEvents({ workerId: worker.workerId, eventType: 'worker.offline', limit: 20, offset: 0 });
+    expect(events).toHaveLength(1);
+  });
+
   it('does not write an audit event for ordinary heartbeats', async () => {
     const worker = await registerTestWorker(app);
     const atRegistration = await queryAuditEvents({ workerId: worker.workerId, limit: 50, offset: 0 });

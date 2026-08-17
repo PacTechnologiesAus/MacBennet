@@ -28,6 +28,7 @@ import {
   stopNightShift,
 } from '../../services/night-shift.js';
 import { buildNightShiftDashboard } from '../../services/night-dashboard.js';
+import { listInvestigations } from '../../services/investigation.js';
 
 /**
  * monday.com mapping and the night shift (Sprint 3 §13).
@@ -144,4 +145,15 @@ export async function nightShiftRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/night-shift/tick', { preHandler: requireRole('admin') }, async (_request, reply) =>
     reply.send({ result: await nightShiftTick() }),
   );
+
+  /**
+   * What Mac checked before asking a human (Sprint 3 §6).
+   *
+   * The escalation receipt, exposed so a reviewer can confirm that a question
+   * Mac asked was genuinely one he could not answer from his own sources.
+   */
+  app.get('/api/investigations', { preHandler: requireAuth }, async (request, reply) => {
+    const query = request.query as { taskId?: string; runId?: string };
+    return reply.send({ investigations: await listInvestigations(query) });
+  });
 }

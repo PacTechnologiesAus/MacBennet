@@ -364,6 +364,19 @@ export async function markStaleWorkersOffline(now = new Date()): Promise<string[
   const settings = await getSettings();
   const cutoff = new Date(now.getTime() - (settings.heartbeatIntervalSeconds + settings.heartbeatGraceSeconds) * 1000);
 
+  /*
+   * The parentheses around the OR are load-bearing.
+   *
+   * Without them, `A AND B AND (C AND D) OR E` binds as
+   * `(A AND B AND C AND D) OR E` — so ANY worker with an old heartbeat matched,
+   * including ones already marked offline. The sweeper then re-marked and
+   * re-audited the same worker every fifteen seconds: about 5,700 rows a day
+   * for one dead VM, which is precisely the audit flooding Sprint 1 set out to
+   * avoid when it decided not to audit heartbeats.
+   *
+   * Found by watching the development log, not by a test — so there is now a
+   * test for it as well.
+   */
   const stale = await db
     .select()
     .from(workers)
@@ -371,8 +384,8 @@ export async function markStaleWorkersOffline(now = new Date()): Promise<string[
       and(
         sql`${workers.status} <> 'offline'`,
         sql`${workers.status} <> 'disabled'`,
-        sql`(${workers.lastHeartbeatAt} IS NULL AND ${workers.registeredAt} < ${cutoff})
-            OR ${workers.lastHeartbeatAt} < ${cutoff}`,
+        sql`((${workers.lastHeartbeatAt} IS NULL AND ${workers.registeredAt} < ${cutoff})
+             OR ${workers.lastHeartbeatAt} < ${cutoff})`,
       ),
     );
 

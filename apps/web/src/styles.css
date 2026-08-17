@@ -321,3 +321,38 @@ td.danger, span.danger, dd.danger { color: var(--danger); }
 
 details summary { cursor: pointer; color: var(--text-dim); }
 details[open] summary { margin-bottom: 8px; }
+
+/* --- Sprint 3: night shift, monday.com, security --------------------------- */
+
+/*
+ * A row of small facts, wrapping rather than scrolling. The night-shift header
+ * carries eight of these and they have to stay legible on a laptop at 08:00.
+ */
+.stat-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+.stat-row .stat { flex: 1 1 140px; }
+.stat-label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; }
+.stat-value { font-size: 17px; font-weight: 600; margin-top: 4px; }
+
+/*
+ * One candidate in the night queue. The border is what separates thirteen
+ * eligibility checks from the next candidate's thirteen when both are expanded.
+ */
+.queue-row { border-top: 1px solid var(--border); padding: 10px 0; }
+.queue-row:first-of-type { border-top: none; }
+
+table.compact { font-size: 12.5px; }
+table.compact td { padding: 4px 8px; vertical-align: top; }
+
+.danger-text { color: var(--danger); }
+
+details > summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 8px 0;
+  user-select: none;
+}
+details[open] > summary { margin-bottom: 4px; }
+
+/* A checkbox and its wording on one line, so a boolean does not look like a field. */
+label.inline { display: inline-flex; align-items: center; gap: 8px; font-weight: 400; }

@@ -1,8 +1,99 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { MorningReportDto } from '@mac/protocol';
-import { api } from '../api.js';
-import { Badge } from '../components/ui.js';
+import type { EmailDeliveryDto, MorningReportDto } from '@mac/protocol';
+import { api, ApiError } from '../api.js';
+import { Alert, Badge, Time, humanise } from '../components/ui.js';
+
+/**
+ * Delivery state (Sprint 3 §9).
+ *
+ * A report that was generated and never sent is worse than no report at all,
+ * because it looks like nothing happened overnight. This panel exists so that
+ * failure is visible rather than silent, and so a dead delivery can be retried
+ * after the configuration is fixed.
+ */
+function DeliveryPanel({
+  deliveries,
+  onRetry,
+  onError,
+}: {
+  deliveries: EmailDeliveryDto[];
+  onRetry: () => void;
+  onError: (message: string) => void;
+}) {
+  const failed = deliveries.filter((d) => d.status === 'dead' || d.status === 'failed');
+
+  const retry = async (id: string) => {
+    try {
+      await api.retryDelivery(id);
+      onError('');
+      onRetry();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : String(err));
+    }
+  };
+
+  return (
+    <div className="card" style={failed.length ? { borderColor: 'var(--warn)' } : undefined}>
+      <h2>Morning email</h2>
+      {failed.length > 0 && (
+        <p className="hint">
+          {failed.length} report(s) did not reach anybody. Fix the recipients in Settings, then retry — the
+          addresses are re-resolved when you do.
+        </p>
+      )}
+      <table>
+        <thead>
+          <tr>
+            <th>Subject</th>
+            <th>To</th>
+            <th>Status</th>
+            <th>Attempts</th>
+            <th>Provider id</th>
+            <th>Sent</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {deliveries.map((delivery) => (
+            <tr key={delivery.id}>
+              <td>{delivery.subject}</td>
+              <td className="dim">{delivery.recipients.join(', ') || '—'}</td>
+              <td>
+                <Badge
+                  tone={
+                    delivery.status === 'sent'
+                      ? 'ok'
+                      : delivery.status === 'dead'
+                        ? 'danger'
+                        : delivery.status === 'failed'
+                          ? 'warn'
+                          : 'idle'
+                  }
+                >
+                  {humanise(delivery.status)}
+                </Badge>
+                {delivery.lastError && <div className="hint">{delivery.lastError}</div>}
+              </td>
+              <td>{delivery.attempts}</td>
+              <td className="mono dim">{delivery.providerMessageId ?? '—'}</td>
+              <td>
+                <Time value={delivery.sentAt} />
+              </td>
+              <td>
+                {delivery.status !== 'sent' && (
+                  <button className="small" onClick={() => void retry(delivery.id)}>
+                    Retry
+                  </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 /**
  * The morning's reading (spec §28).
@@ -13,14 +104,21 @@ import { Badge } from '../components/ui.js';
  */
 export function Reports() {
   const [reports, setReports] = useState<MorningReportDto[]>([]);
+  const [deliveries, setDeliveries] = useState<EmailDeliveryDto[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState('');
 
-  useEffect(() => {
+  const load = () => {
+    void api.listReports().then((r) => setReports(r.reports));
     void api
-      .listReports()
-      .then((r) => setReports(r.reports))
+      .listDeliveries()
+      .then((r) => setDeliveries(r.deliveries))
+      // Delivery state is admin-visible; a viewer simply does not see the panel.
+      .catch(() => setDeliveries([]))
       .finally(() => setLoaded(true));
-  }, []);
+  };
+
+  useEffect(load, []);
 
   const needingAttention = reports.filter((r) => r.decisionsNeeded.length > 0 || r.risk === 'high');
 
@@ -29,9 +127,15 @@ export function Reports() {
       <div className="page-header">
         <div>
           <h1>Reports</h1>
-          <p className="dim">What Mac did, and what needs you.</p>
+          <p className="dim">What Mac did, what needs you, and whether the morning email actually arrived.</p>
         </div>
       </div>
+
+      <Alert kind="error">{error}</Alert>
+
+      {deliveries.length > 0 && (
+        <DeliveryPanel deliveries={deliveries} onRetry={load} onError={setError} />
+      )}
 
       {!loaded && <p className="dim">Loading…</p>}
       {loaded && reports.length === 0 && (

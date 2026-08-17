@@ -106,6 +106,14 @@ export interface ProjectDto {
   repoUrl: string | null;
   repoDefaultBranch: string | null;
   isActive: boolean;
+  /**
+   * Sprint 3: the first of the two gates on autonomous work selection.
+   *
+   * A project must be explicitly approved before Mac may take work from it
+   * overnight, and the monday board must be approved too.
+   */
+  nightShiftApproved: boolean;
+  nightShiftApprovedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -11,6 +11,13 @@ import { formatMoney } from './Dashboard.js';
  * admin-only: changing the confidence floor or the overnight cutoff changes
  * what the system will do without a human present.
  */
+/** Comma- or newline-separated text into a trimmed list. */
+const splitList = (value: string): string[] =>
+  value
+    .split(/[,\n]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
 export function Settings({ user }: { user: CurrentUser }) {
   const [settings, setSettings] = useState<SettingsDto | null>(null);
   const [budget, setBudget] = useState<BudgetStatusDto | null>(null);
@@ -31,6 +38,18 @@ export function Settings({ user }: { user: CurrentUser }) {
     budgetStopPct: '',
     heartbeatIntervalSeconds: '',
     heartbeatGraceSeconds: '',
+    // --- Sprint 3 ---
+    requireSandbox: true,
+    workerTokenMaxAgeHours: '',
+    nightShiftSafetyFactor: '',
+    nightShiftWrapUpMinutes: '',
+    nightShiftMinStartMinutes: '',
+    nightShiftLargeTaskMinMinutes: '',
+    reportRecipients: '',
+    allowedRecipientDomains: '',
+    mailProvider: 'none',
+    modelAssistEnabled: false,
+    modelProvider: 'none',
   });
 
   const load = () => {
@@ -49,6 +68,17 @@ export function Settings({ user }: { user: CurrentUser }) {
           budgetStopPct: String(r.settings.budgetStopPct),
           heartbeatIntervalSeconds: String(r.settings.heartbeatIntervalSeconds),
           heartbeatGraceSeconds: String(r.settings.heartbeatGraceSeconds),
+          requireSandbox: r.settings.requireSandbox,
+          workerTokenMaxAgeHours: String(r.settings.workerTokenMaxAgeHours),
+          nightShiftSafetyFactor: String(r.settings.nightShiftSafetyFactor),
+          nightShiftWrapUpMinutes: String(r.settings.nightShiftWrapUpMinutes),
+          nightShiftMinStartMinutes: String(r.settings.nightShiftMinStartMinutes),
+          nightShiftLargeTaskMinMinutes: String(r.settings.nightShiftLargeTaskMinMinutes),
+          reportRecipients: r.settings.reportRecipients.join(', '),
+          allowedRecipientDomains: r.settings.allowedRecipientDomains.join(', '),
+          mailProvider: r.settings.mailProvider,
+          modelAssistEnabled: r.settings.modelAssistEnabled,
+          modelProvider: r.settings.modelProvider,
         });
       })
       .catch((err: Error) => setError(err.message));
@@ -76,6 +106,18 @@ export function Settings({ user }: { user: CurrentUser }) {
         budgetStopPct: Number(form.budgetStopPct),
         heartbeatIntervalSeconds: Number(form.heartbeatIntervalSeconds),
         heartbeatGraceSeconds: Number(form.heartbeatGraceSeconds),
+        // --- Sprint 3 ---
+        requireSandbox: form.requireSandbox,
+        workerTokenMaxAgeHours: Number(form.workerTokenMaxAgeHours),
+        nightShiftSafetyFactor: Number(form.nightShiftSafetyFactor),
+        nightShiftWrapUpMinutes: Number(form.nightShiftWrapUpMinutes),
+        nightShiftMinStartMinutes: Number(form.nightShiftMinStartMinutes),
+        nightShiftLargeTaskMinMinutes: Number(form.nightShiftLargeTaskMinMinutes),
+        reportRecipients: splitList(form.reportRecipients),
+        allowedRecipientDomains: splitList(form.allowedRecipientDomains),
+        mailProvider: form.mailProvider as SettingsDto['mailProvider'],
+        modelAssistEnabled: form.modelAssistEnabled,
+        modelProvider: form.modelProvider as SettingsDto['modelProvider'],
       });
       setNotice('Settings saved. The change is recorded in the audit trail.');
       load();
@@ -88,6 +130,9 @@ export function Settings({ user }: { user: CurrentUser }) {
 
   const set = (key: keyof typeof form) => (e: { target: { value: string } }) =>
     setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  const toggle = (key: keyof typeof form) => (e: { target: { checked: boolean } }) =>
+    setForm((f) => ({ ...f, [key]: e.target.checked }));
 
   if (!settings) return <p className="dim">Loading…</p>;
 
@@ -117,6 +162,145 @@ export function Settings({ user }: { user: CurrentUser }) {
                 hint="HH:MM in the timezone above. Overnight runs are stopped at this time; interactive runs are not."
               >
                 <input value={form.overnightCutoff} placeholder="08:00" onChange={set('overnightCutoff')} />
+              </Field>
+            </div>
+          </div>
+
+          {/* --- Sprint 3 ------------------------------------------------- */}
+
+          <div className="card">
+            <h2>Containment and credentials</h2>
+            <div className="grid grid-2">
+              <Field
+                label="Require a sandbox for coding work"
+                hint="When on, a coding run is not dispatched to a worker that has not attested an OS-enforced sandbox. Turning it off lets a coding agent run with the worker's own view of the filesystem."
+              >
+                <label className="inline">
+                  <input type="checkbox" checked={form.requireSandbox} onChange={toggle('requireSandbox')} /> required
+                </label>
+              </Field>
+              <Field
+                label="Worker credential maximum age (hours)"
+                hint="Past this, a worker is asked to rotate on its next call. It rotates itself; nobody touches the VM."
+              >
+                <input
+                  type="number"
+                  min={1}
+                  value={form.workerTokenMaxAgeHours}
+                  onChange={set('workerTokenMaxAgeHours')}
+                />
+              </Field>
+            </div>
+          </div>
+
+          <div className="card">
+            <h2>Night shift</h2>
+            <div className="grid grid-2">
+              <Field
+                label="Effort safety factor"
+                hint="An estimate is multiplied by this before it is compared with the time remaining. 1.5 means Mac assumes work may take half again as long as he thinks."
+              >
+                <input
+                  type="number"
+                  step="0.1"
+                  min={1}
+                  max={5}
+                  value={form.nightShiftSafetyFactor}
+                  onChange={set('nightShiftSafetyFactor')}
+                />
+              </Field>
+              <Field
+                label="Wrap-up allowance (minutes)"
+                hint="Reserved for committing, testing, reviewing and reporting — all of which happen after the coding agent stops."
+              >
+                <input
+                  type="number"
+                  min={0}
+                  value={form.nightShiftWrapUpMinutes}
+                  onChange={set('nightShiftWrapUpMinutes')}
+                />
+              </Field>
+              <Field label="Minimum runway to start anything (minutes)" hint="Below this, nothing new starts at all.">
+                <input
+                  type="number"
+                  min={1}
+                  value={form.nightShiftMinStartMinutes}
+                  onChange={set('nightShiftMinStartMinutes')}
+                />
+              </Field>
+              <Field
+                label="Minimum runway for a large task (minutes)"
+                hint="A large task additionally needs at least this much, so it is not started only to be cut off."
+              >
+                <input
+                  type="number"
+                  min={1}
+                  value={form.nightShiftLargeTaskMinMinutes}
+                  onChange={set('nightShiftLargeTaskMinMinutes')}
+                />
+              </Field>
+            </div>
+          </div>
+
+          <div className="card">
+            <h2>Morning report delivery</h2>
+            <div className="grid grid-2">
+              <Field
+                label="Recipients"
+                hint="Comma separated. This is the ONLY place a recipient can be set — nothing from a task, a brief or a coding agent can reach the send path."
+              >
+                <input
+                  value={form.reportRecipients}
+                  onChange={set('reportRecipients')}
+                  placeholder="you@pac-technologies.com.au"
+                />
+              </Field>
+              <Field
+                label="Allowed recipient domains"
+                hint="Comma separated. An address outside these is refused and audited."
+              >
+                <input
+                  value={form.allowedRecipientDomains}
+                  onChange={set('allowedRecipientDomains')}
+                  placeholder="pac-technologies.com.au"
+                />
+              </Field>
+              <Field
+                label="Mail provider"
+                hint="graph sends from Mac's real mailbox. none generates the report without delivering it."
+              >
+                <select value={form.mailProvider} onChange={set('mailProvider')}>
+                  <option value="none">none</option>
+                  <option value="graph">graph</option>
+                  <option value="fake">fake (testing)</option>
+                </select>
+              </Field>
+            </div>
+          </div>
+
+          <div className="card">
+            <h2>Model assistance</h2>
+            <p className="hint">
+              Off by default. When on, a model may improve the wording of an answer Mac already grounded in his own
+              sources. It never decides confidence, risk, eligibility or whether to execute, and a citation it
+              invents is dropped before the answer is used.
+            </p>
+            <div className="grid grid-2">
+              <Field label="Enabled">
+                <label className="inline">
+                  <input
+                    type="checkbox"
+                    checked={form.modelAssistEnabled}
+                    onChange={toggle('modelAssistEnabled')}
+                  />{' '}
+                  allow model assistance
+                </label>
+              </Field>
+              <Field label="Provider">
+                <select value={form.modelProvider} onChange={set('modelProvider')}>
+                  <option value="none">none</option>
+                  <option value="anthropic">anthropic</option>
+                </select>
               </Field>
             </div>
           </div>
