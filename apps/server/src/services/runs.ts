@@ -199,6 +199,8 @@ export async function listApprovals(runId: string): Promise<ApprovalDto[]> {
     confidenceAtDecision: parseConfidence(r.approval.confidenceAtDecision),
     thresholdAtDecision: parseConfidence(r.approval.thresholdAtDecision),
     thresholdOverridden: r.approval.thresholdOverridden,
+    source: r.approval.source as ApprovalDto['source'],
+    policyBasis: (r.approval.policyBasis as Record<string, unknown> | null) ?? null,
     createdAt: r.approval.createdAt.toISOString(),
   }));
 }

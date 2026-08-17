@@ -219,6 +219,16 @@ export interface ApprovalDto {
   confidenceAtDecision: number | null;
   thresholdAtDecision: number | null;
   thresholdOverridden: boolean;
+  /**
+   * WHICH authority approved this (Sprint 3).
+   *
+   * `night_shift_policy` means a human pre-approved the project, the board and
+   * the item, and the eligibility predicate then found it startable. Carried on
+   * the DTO so the UI shows it rather than rendering a blank approver — a
+   * machine approval must never be readable as a human one.
+   */
+  source: z.infer<typeof approvalSourceSchema>;
+  policyBasis: Record<string, unknown> | null;
   createdAt: string;
 }
 

@@ -68,6 +68,9 @@ beforeEach(async () => {
   setMailProvider(mail);
 
   await api(admin).patch('/api/settings', {
+    // Off by default: autonomous night work is opt-in, and the test for that is
+    // in `the master switch` below.
+    nightShiftEnabled: true,
     mailProvider: 'fake',
     reportRecipients: ['kasper@pac-technologies.com.au'],
     allowedRecipientDomains: ['pac-technologies.com.au'],
@@ -597,6 +600,16 @@ describe('ending a shift', () => {
   it('refuses to start a second shift while one is running', async () => {
     await startShift();
     await expect(startShift()).rejects.toThrow(/already running/);
+  }, 120_000);
+
+  it('refuses to start at all when autonomous night work is switched off', async () => {
+    await api(admin).patch('/api/settings', { nightShiftEnabled: false });
+    /*
+     * The master switch is a real guardrail, not a label. Stopping Mac for a
+     * release week should not mean revoking approval from every project and
+     * board one at a time and then remembering to put them all back.
+     */
+    await expect(startShift()).rejects.toThrow(/switched off/);
   }, 120_000);
 });
 

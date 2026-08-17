@@ -478,6 +478,7 @@ can introduce an address.
 | `maxQuestionsPerRun` | 20 | Bounds an agent stuck in a question loop |
 | `softUsageThresholdPct` | 80 | Warns on non-exact usage; its uncertainty stays visible |
 | `overnightCutoff` / `timezone` | 08:00 Australia/Sydney | DST-correct. Preserves worktrees and partial commits |
+| `nightShiftEnabled` | **false** | The master switch. With it off, no shift can be started whatever is approved |
 | `requireSandbox` | true | A coding run is not dispatched to a worker without an attested sandbox |
 | `workerTokenMaxAgeHours` | 168 | Past this, a worker is asked to rotate itself |
 | `workerTokenOverlapSeconds` | 300 | How long a superseded credential keeps working |
@@ -495,7 +496,7 @@ can introduce an address.
 ## Testing
 
 ```bash
-npm test                  # everything: 716 tests
+npm test                  # everything: 723 tests
 npm run test:unit         # domain only, no database needed
 
 # Opt-in, and each spends something real:
@@ -505,9 +506,9 @@ MAC_MONDAY_LIVE_TEST=1 npm run test:integration -w @mac/server  # a real monday.
 
 | Layer | What it covers |
 |---|---|
-| **Unit** (309) | Lifecycle state machine; confidence bands at 0.59/0.60/0.79/0.80/0.89/0.90 including genuine float-boundary hazards; the git policy against every prohibited form, including obfuscated ones (`HEAD:main`, `:main`, `+refs/heads/main`, `-c receive.*`); supervision decisions; self-review verdicts and PR eligibility; usage-source rules; report assembly; gap analysis; **the sandbox plan's containment rules**; **task eligibility**; **effort and safe-start**; **night scheduling and budget classification**; **investigation and grounding** |
-| **Integration** (232) | Both auth planes and their separation, role enforcement, every guardrail, dispatch, logs, cancellation, schema parity, discovery, briefs, Q&A supervision, self-review, pull requests, usage, reports, memory scoping, the overnight cutoff on a live coding run; **credential rotation, revocation and the sandbox dispatch guardrail**; **monday.com reads, writes, refusals and the outbox**; **the night shift against a real database**; **model resolvers under adversarial scripts and email delivery** |
-| **Worker** (167) | Log buffering and retry idempotency; job handlers; **the git shim as a real process**, refusing real prohibited commands against a real repository and failing closed; git and worktree behaviour against a real bare remote; the Claude Code adapter against a fake CLI; the execution boundary; **the sandbox plan and both providers' argv**; **containment proven against a real provider**; **the coding job's fail-closed path** |
+| **Unit** (310) | Lifecycle state machine; confidence bands at 0.59/0.60/0.79/0.80/0.89/0.90 including genuine float-boundary hazards; the git policy against every prohibited form, including obfuscated ones (`HEAD:main`, `:main`, `+refs/heads/main`, `-c receive.*`); supervision decisions; self-review verdicts and PR eligibility; usage-source rules; report assembly; gap analysis; **the sandbox plan's containment rules**; **task eligibility**; **effort and safe-start**; **night scheduling and budget classification**; **investigation and grounding** |
+| **Integration** (236) | Both auth planes and their separation, role enforcement, every guardrail, dispatch, logs, cancellation, schema parity, discovery, briefs, Q&A supervision, self-review, pull requests, usage, reports, memory scoping, the overnight cutoff on a live coding run; **credential rotation, revocation and the sandbox dispatch guardrail**; **monday.com reads, writes, refusals and the outbox**; **the night shift against a real database**; **model resolvers under adversarial scripts and email delivery** |
+| **Worker** (169) | Log buffering and retry idempotency; job handlers; **the git shim as a real process**, refusing real prohibited commands against a real repository and failing closed; git and worktree behaviour against a real bare remote; the Claude Code adapter against a fake CLI; the execution boundary; **the sandbox plan and both providers' argv**; **containment proven against a real provider**; **the coding job's fail-closed path** |
 | **End-to-end** (9) | Real server, real worker, real Postgres, real git. Sprint 1's control loop; Sprint 2's coding loop; and **a whole night**: two approved projects, three briefed monday items, one completed with a pull request, one blocked and posted, a project switch, the cutoff, exactly one delivered email, and the audit trail asserted in order with `main` proven untouched in both repositories |
 | **Opt-in** (6) | The Sprint 2 loop against the **real** Claude Code CLI, and five checks against a **real** monday.com board. Neither runs by default. |
 

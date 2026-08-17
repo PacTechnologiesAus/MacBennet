@@ -24,7 +24,7 @@ import {
   workers,
 } from '../db/schema.js';
 import type { NightDecisionRow, NightShiftRow } from '../db/schema.js';
-import { AppError } from '../http/errors.js';
+import { AppError, GuardrailError } from '../http/errors.js';
 import { parseConfidence } from '../domain/confidence.js';
 import { evaluateEligibility, type EligibilityInput } from '../domain/eligibility.js';
 import { estimateEffort, safeToStart } from '../domain/effort.js';
@@ -98,6 +98,23 @@ export async function startNightShift(
     if (existing) throw AppError.conflict('NIGHT_SHIFT_RUNNING', 'A night shift is already running.');
 
     const settings = await getSettings(tx);
+
+    /*
+     * The master switch, and a real guardrail rather than a label.
+     *
+     * An administrator who wants Mac to stop working nights entirely — a
+     * release week, an incident, a change of mind — should not have to revoke
+     * approval from every project and board one at a time and then remember to
+     * put them all back.
+     */
+    if (!settings.nightShiftEnabled) {
+      throw new GuardrailError(
+        'NIGHT_SHIFT_DISABLED',
+        'Autonomous night work is switched off in settings. Nothing will be started until an administrator ' +
+          'turns it back on.',
+      );
+    }
+
     const cutoffAt = input.cutoffAt ? new Date(input.cutoffAt) : nextCutoffAfter(new Date(), toCutoffConfig(settings));
     if (Number.isNaN(cutoffAt.getTime())) {
       throw AppError.badRequest('INVALID_CUTOFF', 'That cutoff is not a valid instant.');

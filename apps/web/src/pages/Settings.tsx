@@ -41,6 +41,7 @@ export function Settings({ user }: { user: CurrentUser }) {
     // --- Sprint 3 ---
     requireSandbox: true,
     workerTokenMaxAgeHours: '',
+    nightShiftEnabled: false,
     nightShiftSafetyFactor: '',
     nightShiftWrapUpMinutes: '',
     nightShiftMinStartMinutes: '',
@@ -70,6 +71,7 @@ export function Settings({ user }: { user: CurrentUser }) {
           heartbeatGraceSeconds: String(r.settings.heartbeatGraceSeconds),
           requireSandbox: r.settings.requireSandbox,
           workerTokenMaxAgeHours: String(r.settings.workerTokenMaxAgeHours),
+          nightShiftEnabled: r.settings.nightShiftEnabled,
           nightShiftSafetyFactor: String(r.settings.nightShiftSafetyFactor),
           nightShiftWrapUpMinutes: String(r.settings.nightShiftWrapUpMinutes),
           nightShiftMinStartMinutes: String(r.settings.nightShiftMinStartMinutes),
@@ -109,6 +111,7 @@ export function Settings({ user }: { user: CurrentUser }) {
         // --- Sprint 3 ---
         requireSandbox: form.requireSandbox,
         workerTokenMaxAgeHours: Number(form.workerTokenMaxAgeHours),
+        nightShiftEnabled: form.nightShiftEnabled,
         nightShiftSafetyFactor: Number(form.nightShiftSafetyFactor),
         nightShiftWrapUpMinutes: Number(form.nightShiftWrapUpMinutes),
         nightShiftMinStartMinutes: Number(form.nightShiftMinStartMinutes),
@@ -196,6 +199,15 @@ export function Settings({ user }: { user: CurrentUser }) {
           <div className="card">
             <h2>Night shift</h2>
             <div className="grid grid-2">
+              <Field
+                label="Autonomous night work"
+                hint="The master switch. With this off no shift can be started, whatever is approved — so stopping Mac for a release week does not mean revoking every project and board and remembering to put them all back."
+              >
+                <label className="inline">
+                  <input type="checkbox" checked={form.nightShiftEnabled} onChange={toggle('nightShiftEnabled')} />{' '}
+                  Mac may work nights
+                </label>
+              </Field>
               <Field
                 label="Effort safety factor"
                 hint="An estimate is multiplied by this before it is compared with the time remaining. 1.5 means Mac assumes work may take half again as long as he thinks."

@@ -326,6 +326,7 @@ describe('Sprint 3 end to end: Mac works a whole night unsupervised', () => {
       setMailProvider(mail);
 
       await api(admin).patch('/api/settings', {
+        nightShiftEnabled: true,
         mailProvider: 'fake',
         reportRecipients: ['kasper@pac-technologies.com.au'],
         allowedRecipientDomains: ['pac-technologies.com.au'],
