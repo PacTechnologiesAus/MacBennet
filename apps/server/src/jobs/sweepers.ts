@@ -4,6 +4,7 @@ import { stopRunsPastOvernightCutoff } from '../services/runs.js';
 import { requestRotationForAgedTokens } from '../services/worker-credentials.js';
 import { nightShiftTick } from '../services/night-shift.js';
 import { deliverPendingMondayWrites } from '../services/monday/outbox.js';
+import { deliverPendingEmails } from '../services/mail/delivery.js';
 
 /**
  * Two periodic tasks, run in-process with setInterval.
@@ -30,6 +31,8 @@ const CREDENTIAL_SWEEP_MS = 5 * 60_000;
 const NIGHT_TICK_MS = 30_000;
 /** The monday.com outbox. Fast enough that a board looks live to a human. */
 const MONDAY_SWEEP_MS = 10_000;
+/** The mail outbox. One email a night; there is nothing to hurry. */
+const MAIL_SWEEP_MS = 20_000;
 
 export interface Sweepers {
   stop: () => void;
@@ -39,6 +42,7 @@ export interface Sweepers {
   sweepCredentials: () => Promise<string[]>;
   tickNightShift: () => Promise<unknown>;
   deliverMondayWrites: () => Promise<unknown>;
+  deliverEmails: () => Promise<unknown>;
 }
 
 export function startSweepers(logger: FastifyBaseLogger): Sweepers {
@@ -104,23 +108,35 @@ export function startSweepers(logger: FastifyBaseLogger): Sweepers {
     return result;
   };
 
+  const deliverEmails = async (): Promise<unknown> => {
+    const result = await deliverPendingEmails();
+    if (result.sent > 0) logger.info({ mail: result }, 'reports delivered');
+    // A dead-lettered morning report means nobody was told what happened
+    // overnight, which is worth a warning rather than a metric.
+    if (result.dead > 0) logger.warn({ mail: result }, 'report deliveries dead-lettered');
+    return result;
+  };
+
   const workerTimer = setInterval(guarded(sweepWorkers, 'heartbeat'), HEARTBEAT_SWEEP_MS);
   const cutoffTimer = setInterval(guarded(sweepCutoffs, 'cutoff'), CUTOFF_SWEEP_MS);
   const credentialTimer = setInterval(guarded(sweepCredentials, 'credential'), CREDENTIAL_SWEEP_MS);
   const nightTimer = setInterval(guarded(tickNightShift, 'night-shift'), NIGHT_TICK_MS);
   const mondayTimer = setInterval(guarded(deliverMondayWrites, 'monday-outbox'), MONDAY_SWEEP_MS);
+  const mailTimer = setInterval(guarded(deliverEmails, 'mail-outbox'), MAIL_SWEEP_MS);
 
+  const timers = [workerTimer, cutoffTimer, credentialTimer, nightTimer, mondayTimer, mailTimer];
   // Do not hold the process open purely for a sweep.
-  for (const timer of [workerTimer, cutoffTimer, credentialTimer, nightTimer, mondayTimer]) timer.unref();
+  for (const timer of timers) timer.unref();
 
   return {
     stop: () => {
-      for (const timer of [workerTimer, cutoffTimer, credentialTimer, nightTimer, mondayTimer]) clearInterval(timer);
+      for (const timer of timers) clearInterval(timer);
     },
     sweepWorkers,
     sweepCutoffs,
     sweepCredentials,
     tickNightShift,
     deliverMondayWrites,
+    deliverEmails,
   };
 }

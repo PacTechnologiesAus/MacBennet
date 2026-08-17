@@ -45,6 +45,7 @@ import { appendSystemLog } from './logs.js';
 import { nightEligibleBoards } from './monday/boards.js';
 import { syncAllApprovedBoards } from './monday/sync.js';
 import { queueAssignToMac, queueBlocker, queueStatus, queueUpdate } from './monday/outbox.js';
+import { deliverOvernightReport } from './overnight-report.js';
 
 /**
  * The night shift (Sprint 3 §8).
@@ -144,10 +145,10 @@ export async function startNightShift(
 }
 
 export async function stopNightShift(
-  input: { reason?: string; stopReason?: NightStopReason },
+  input: { reason?: string; stopReason?: NightStopReason; skipReport?: boolean },
   actor: Actor,
 ): Promise<NightShiftDto | null> {
-  return db.transaction(async (tx) => {
+  const ended = await db.transaction(async (tx) => {
     const shift = await getActiveShift(tx);
     if (!shift) return null;
 
@@ -177,6 +178,23 @@ export async function stopNightShift(
 
     return toNightShiftDto(row ?? shift);
   });
+
+  if (!ended) return null;
+
+  /*
+   * The morning report is queued as the shift ends — AFTER the transaction
+   * commits, not inside it.
+   *
+   * Inside, the report builder would read the shift as still running and
+   * summarise a night that had not finished. Outside, it sees the committed
+   * end state. Delivery itself is the outbox's job, so a mail provider that is
+   * down does not prevent the shift from ending cleanly.
+   */
+  if (!input.skipReport) {
+    await deliverOvernightReport(ended.id, actor).catch(() => undefined);
+  }
+
+  return ended;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,13 @@
 import { eq, sql } from 'drizzle-orm';
 import {
   agentAnswerSchema,
+  capUngroundedConfidence,
+  deriveGroundedness,
   handoffBriefContentSchema,
   projectContextSnapshotSchema,
   type AgentAnswer,
   type AskQuestionRequest,
+  type InvestigationResult,
   type ProjectContextSnapshot,
 } from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
@@ -16,6 +19,8 @@ import { memoryForTask } from './memory.js';
 import { appendSystemLog } from './logs.js';
 import { record, type Actor } from './audit.js';
 import { toQuestionDto } from './coding-sessions.js';
+import { runInvestigation as investigation_ } from './investigation.js';
+import { consultedSources } from '../domain/investigation.js';
 
 /**
  * Question-and-answer supervision (Sprint 2 §8).
@@ -155,15 +160,72 @@ export async function answerAgentQuestion(
       },
     });
 
+    /*
+     * Sprint 3: the six-source investigation, run alongside the Sprint 2
+     * retrieval rather than instead of it.
+     *
+     * Sprint 2's supervision reads the brief, task memory and the repository.
+     * The investigation additionally reaches previous runs on this project,
+     * earlier briefs, and what a human wrote on the monday item — which is
+     * exactly where "the CSV header must stay as it is" tends to live.
+     *
+     * The DECISION still comes from `superviseQuestion`: risk classification,
+     * reversibility and scope are unchanged, and the investigation only
+     * contributes evidence and, when it is better grounded, a better answer.
+     * Nothing here can make an unsafe decision safe.
+     */
+    const investigation = await investigation_(
+      {
+        taskId: context.taskId,
+        projectId: context.projectId,
+        runId,
+        subjectKind: 'agent_question',
+        subject: input.question,
+        contextText: input.context,
+        resolveThreshold: settings.answerConfidenceThreshold,
+        allowModel: settings.modelAssistEnabled,
+      },
+      actor,
+    ).catch(() => null);
+
+    const evidence = investigation?.evidence ?? [];
+    const sourcesChecked = investigation ? consultedSources(investigation.checked) : [];
+
+    /*
+     * The better-grounded of the two answers wins — but only for the WORDING
+     * and only when the decision was to answer.
+     *
+     * A blocked decision is never rewritten by an investigation: the reason it
+     * blocked was risk, not ignorance, and a better answer does not make a
+     * destructive operation safe.
+     */
+    const useInvestigation =
+      result.decision !== 'blocked' &&
+      investigation !== null &&
+      investigation.resolved &&
+      investigation.confidence > result.confidence;
+
+    const finalConfidence = useInvestigation ? investigation.confidence : result.confidence;
+    const finalAnswer = useInvestigation ? investigation.answer ?? result.answer : result.answer;
+
     const answer = agentAnswerSchema.parse({
       questionId: input.questionId,
       decision: result.decision,
-      answer: result.answer,
-      confidence: result.confidence,
+      answer: finalAnswer,
+      // Capped here as well as inside the investigation, because this is the
+      // last point before the answer is persisted and handed to an agent.
+      confidence: capUngroundedConfidence(finalConfidence, evidence),
       reasoning: result.reasoning,
-      sources: result.sources,
+      sources: useInvestigation ? evidence.map((e) => e.ref) : result.sources,
       requiredHuman: result.requiredHuman,
       isAssumption: result.isAssumption,
+      evidence,
+      // Derived from the evidence, never asserted: an answer with nothing
+      // factual behind it cannot describe itself as an established fact.
+      groundedness: deriveGroundedness(evidence),
+      reasoningSummary: summariseReasoning(result.reasoning, investigation),
+      modelAssisted: investigation?.modelAssisted ?? false,
+      sourcesChecked,
     });
 
     // --- 3. Persist the consequences ---------------------------------------
@@ -259,6 +321,12 @@ async function finaliseQuestion(
       // An answered or assumed question changed what the agent did next; a
       // blocked one deliberately did not.
       affectedImplementation: answer.decision !== 'blocked',
+      // Sprint 3: the material, the derived grounding, and which of the six
+      // source classes were consulted before answering.
+      evidence: answer.evidence,
+      groundedness: answer.groundedness,
+      modelAssisted: answer.modelAssisted,
+      sourcesChecked: answer.sourcesChecked,
       answeredAt: new Date(),
     })
     .where(eq(agentQuestions.id, questionId));
@@ -285,6 +353,12 @@ async function recordDecisionAudit(
       sources: answer.sources,
       reasoning: truncate(answer.reasoning, 1000),
       requiredHuman: answer.requiredHuman,
+      // Sprint 3: what the answer rests on, and how much of it Mac established
+      // rather than assumed.
+      groundedness: answer.groundedness,
+      evidence: answer.evidence.map((e) => `${e.kind}:${e.ref}`),
+      sourcesChecked: answer.sourcesChecked,
+      modelAssisted: answer.modelAssisted,
     },
   });
 }
@@ -350,6 +424,27 @@ async function loadRunContext(tx: DbHandle, runId: string): Promise<RunSupervisi
     approvedScope: row.approvedScope,
     agentSessionId: session?.id ?? null,
   };
+}
+
+/**
+ * One line a human can read, rather than the scoring detail.
+ *
+ * The full reasoning stays on the question row; this is what appears next to
+ * the answer in a report, and a report that quotes coverage arithmetic at
+ * somebody at 08:00 is a report they stop reading.
+ */
+function summariseReasoning(reasoning: string, investigation: InvestigationResult | null): string {
+  if (!investigation) return truncate(firstLine(reasoning), 300);
+
+  const consulted = investigation.checked.filter((c) => c.consulted).length;
+  const matched = investigation.checked.filter((c) => c.matched).map((c) => c.source);
+
+  return truncate(
+    matched.length > 0
+      ? `Answered from ${matched.join(' and ')} after consulting ${consulted} source class(es).`
+      : `Consulted ${consulted} source class(es); none addressed this, so Mac took the conservative option.`,
+    300,
+  );
 }
 
 const truncate = (text: string, max: number): string => (text.length <= max ? text : `${text.slice(0, max - 1)}…`);

@@ -11,6 +11,11 @@ import {
   revokeWorkerTokens,
 } from '../../services/worker-credentials.js';
 import { getSecurityOverview } from '../../services/security.js';
+import {
+  deliverPendingEmails,
+  listEmailDeliveries,
+  retryEmailDelivery,
+} from '../../services/mail/delivery.js';
 import { getSettings, toSettingsDto, updateSettings } from '../../services/settings.js';
 import { getBudgetStatus } from '../../services/budget.js';
 import { queryAuditEvents } from '../../services/audit-query.js';
@@ -118,6 +123,29 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const token = await createEnrollmentToken(body, currentActor(request));
     return reply.status(201).send({ token });
   });
+
+  // --- Report delivery (Sprint 3 §9) ---------------------------------------
+
+  app.get('/api/reports/deliveries', { preHandler: requireAuth }, async (_request, reply) =>
+    reply.send({ deliveries: await listEmailDeliveries() }),
+  );
+
+  /**
+   * Puts a dead delivery back in the queue.
+   *
+   * Recipients are re-resolved, so fixing the configuration and pressing retry
+   * works without anyone editing a row by hand. A delivery already `sent` is
+   * refused rather than duplicated.
+   */
+  app.post('/api/reports/deliveries/:id/retry', { preHandler: requireRole('operator') }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    return reply.send({ delivery: await retryEmailDelivery(id, currentActor(request)) });
+  });
+
+  /** Drains the mail outbox on demand. Normally the sweeper's job. */
+  app.post('/api/reports/deliver', { preHandler: requireRole('admin') }, async (_request, reply) =>
+    reply.send({ result: await deliverPendingEmails() }),
+  );
 
   // --- Audit ---------------------------------------------------------------
 
