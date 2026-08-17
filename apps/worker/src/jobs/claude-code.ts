@@ -348,6 +348,8 @@ export async function runCodingJob(
 
     const pendingEvents: AgentEvent[] = [];
     let flushing: Promise<void> = Promise.resolve();
+    /** The last thing the agent said it was doing, for the heartbeat below. */
+    let lastActivity = 'coding';
 
     const flushEvents = async () => {
       if (pendingEvents.length === 0) return;
@@ -361,10 +363,35 @@ export async function runCodingJob(
         });
     };
 
+    /*
+     * Flush on a TIMER as well as on a count.
+     *
+     * Sprint 3.1 commissioning watched a real fifteen-minute coding session
+     * produce thirty-six log lines and then apparently freeze: events flushed
+     * only at twenty-five accumulated or when the agent asked a question, and
+     * `updated_at` only moved on a `progress` event. The run was working the
+     * whole time. Nobody watching it could have known that, and spec §27 asks
+     * for a run that is inspectable — which a run you cannot watch is not.
+     *
+     * Five seconds is chosen to be shorter than a human's patience rather than
+     * to be efficient: the batch is usually tiny and the endpoint is idempotent.
+     */
+    const heartbeat = setInterval(() => {
+      flushing = flushing.then(flushEvents);
+      // Moves `updated_at`, so a quiet-but-working run does not read as stalled
+      // on the Runs screen.
+      void ctx.progress(lastActivity.slice(0, 120));
+    }, 5_000);
+    // Never keep the worker process alive on account of a progress ticker.
+    heartbeat.unref?.();
+
     const handle = await agent.start(task, {
       onEvent: (event) => {
         pendingEvents.push(event);
-        if (event.type === 'progress') void ctx.progress(event.stage.slice(0, 120));
+        if (event.type === 'progress') {
+          lastActivity = event.stage.slice(0, 120);
+          void ctx.progress(lastActivity);
+        }
         if (pendingEvents.length >= 25) flushing = flushing.then(flushEvents);
       },
       /*
@@ -397,7 +424,16 @@ export async function runCodingJob(
       })
       .catch(() => undefined);
 
-    const result = await handle.finished;
+    let result;
+    try {
+      result = await handle.finished;
+    } finally {
+      // Stop the ticker before anything else; a heartbeat that outlives its
+      // session would report progress for a run that has ended.
+      clearInterval(heartbeat);
+      await flushing.catch(() => undefined);
+      await flushEvents().catch(() => undefined);
+    }
     await flushing;
     await flushEvents();
 

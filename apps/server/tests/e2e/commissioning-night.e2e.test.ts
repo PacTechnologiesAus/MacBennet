@@ -263,7 +263,7 @@ const TITLES: Record<'A' | 'B' | 'C', string> = {
 };
 
 /** Polls until a run reaches one of the given states, or gives up loudly. */
-async function waitForRun(runId: string, statuses: string[], timeoutMs = 900_000): Promise<string> {
+async function waitForRun(runId: string, statuses: string[], timeoutMs = 30 * 60_000): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   let last = '';
   while (Date.now() < deadline) {
@@ -272,7 +272,11 @@ async function waitForRun(runId: string, statuses: string[], timeoutMs = 900_000
     if (statuses.includes(last)) return last;
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
-  throw new Error(`Run ${runId} never reached ${statuses.join('/')}; last status was "${last}".`);
+  throw new Error(
+    `Run ${runId} never reached ${statuses.join('/')} within ${Math.round(timeoutMs / 60_000)} minute(s); ` +
+      `last status was "${last}". Check run_logs for this run — a coding session that is working but quiet ` +
+      'looks identical to one that has stalled.',
+  );
 }
 
 /**
@@ -372,6 +376,17 @@ describe.skipIf(!runnable)('Sprint 3.1: a commissioning night against real exter
         // See the header: the real CLI cannot authenticate inside a Linux
         // container from a Windows host.
         requireSandbox: false,
+        /*
+         * Twenty minutes rather than the sixty-minute default.
+         *
+         * This is the agent's IDLE timeout, and these are genuinely small tasks
+         * — Mac's own effort model calls each of them "small". A sixty-minute
+         * silence budget makes a commissioning night take three hours of
+         * wall-clock to discover a stall, which is not a useful feedback loop.
+         * An operator lowering this for short work is an ordinary setting, not
+         * a test contrivance.
+         */
+        maxAgentMinutes: 20,
       });
 
       // --- The engineer's day ------------------------------------------------
@@ -595,6 +610,6 @@ describe.skipIf(!runnable)('Sprint 3.1: a commissioning night against real exter
           `\n  audit events: ${events.length}\n  email deliveries: ${deliveries.length}\n`,
       );
     },
-    45 * 60_000,
+    150 * 60_000,
   );
 });
