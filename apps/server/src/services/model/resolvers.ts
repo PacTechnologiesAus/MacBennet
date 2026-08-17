@@ -228,8 +228,108 @@ export async function structureBriefWithModel(
     return { structure: null, record: record('rejected_unparseable', completion.text.slice(0, 300), completion) };
   }
 
-  return { structure: parsed, record: record('accepted', null, completion) };
+  /*
+   * The structuring analogue of the citation check.
+   *
+   * Answering has a natural grounding test — did the model cite a source that
+   * exists? Structuring does not: the model is handed prose and asked to sort
+   * it, so a fabricated constraint would look exactly like a real one, and it
+   * would go on to RAISE the understanding confidence that decides whether Mac
+   * may execute at all. That is the worst possible place for an invention.
+   *
+   * So every string the model returns must share distinctive vocabulary with
+   * what the engineer actually said. A field that does not is dropped, and the
+   * count of dropped fields is audited — because a model inventing requirements
+   * is the failure mode worth watching for.
+   */
+  const { grounded, dropped } = groundInConversation(parsed, conversation);
+
+  return {
+    structure: grounded,
+    record: {
+      ...record(dropped > 0 ? 'accepted' : 'accepted', null, completion),
+      fabricatedCitations: dropped,
+      detail: dropped > 0 ? `${dropped} field(s) were dropped: nothing in the conversation supported them.` : null,
+    },
+  };
 }
+
+/**
+ * Keeps only the parts of a model's structure that the conversation supports.
+ *
+ * "Supports" is deliberately generous — a single distinctive word in common is
+ * enough — because the model is rephrasing, not quoting, and being strict here
+ * would discard good structuring. What it catches is the case that matters: a
+ * whole requirement, constraint or acceptance criterion that appears from
+ * nowhere.
+ */
+function groundInConversation(
+  structure: ModelBriefStructure,
+  conversation: string,
+): { grounded: ModelBriefStructure; dropped: number } {
+  const said = new Set(distinctiveTerms(conversation));
+  let dropped = 0;
+
+  const supported = (text: string): boolean => {
+    const terms = distinctiveTerms(text);
+    if (terms.length === 0) return false;
+    const overlap = terms.filter((t) => said.has(t)).length;
+    return overlap / terms.length >= 0.25;
+  };
+
+  const keepList = (list: string[] | undefined): string[] | undefined => {
+    if (!list) return undefined;
+    const kept = list.filter((entry) => {
+      if (supported(entry)) return true;
+      dropped += 1;
+      return false;
+    });
+    return kept.length ? kept : undefined;
+  };
+
+  const keepText = (text: string | undefined): string | undefined => {
+    if (!text) return undefined;
+    if (supported(text)) return text;
+    dropped += 1;
+    return undefined;
+  };
+
+  const grounded: ModelBriefStructure = {
+    ...(keepText(structure.userObjective) ? { userObjective: structure.userObjective } : {}),
+    ...(keepText(structure.currentBehaviour) ? { currentBehaviour: structure.currentBehaviour } : {}),
+    ...(keepText(structure.desiredBehaviour) ? { desiredBehaviour: structure.desiredBehaviour } : {}),
+    ...(keepText(structure.proposedScope) ? { proposedScope: structure.proposedScope } : {}),
+    ...(keepList(structure.constraints) ? { constraints: keepList(structure.constraints) } : {}),
+    ...(keepList(structure.mustNotChange) ? { mustNotChange: keepList(structure.mustNotChange) } : {}),
+    ...(keepList(structure.acceptanceCriteria) ? { acceptanceCriteria: keepList(structure.acceptanceCriteria) } : {}),
+    ...(keepList(structure.testingExpectations) ? { testingExpectations: keepList(structure.testingExpectations) } : {}),
+    ...(keepList(structure.likelyAffectedComponents)
+      ? { likelyAffectedComponents: keepList(structure.likelyAffectedComponents) }
+      : {}),
+    ...(keepList(structure.outOfScope) ? { outOfScope: keepList(structure.outOfScope) } : {}),
+    // Advisory only: it names what is MISSING, so it cannot inflate confidence
+    // and does not need grounding.
+    ...(structure.missingInformation ? { missingInformation: structure.missingInformation } : {}),
+  };
+
+  return { grounded, dropped };
+}
+
+const STRUCTURE_STOP_WORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'to', 'of', 'in', 'on', 'for', 'is', 'are', 'be', 'it', 'that',
+  'this', 'with', 'we', 'i', 'you', 'should', 'must', 'not', 'can', 'will', 'when', 'so', 'as',
+  'at', 'by', 'from', 'has', 'have', 'was', 'were', 'do', 'does', 'need', 'needs', 'want',
+]);
+
+const distinctiveTerms = (text: string): string[] =>
+  Array.from(
+    new Set(
+      text
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((word) => word.length >= 4 && !STRUCTURE_STOP_WORDS.has(word)),
+    ),
+  );
 
 // ---------------------------------------------------------------------------
 

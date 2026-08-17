@@ -12,6 +12,7 @@ import {
   pullRequestReportRequestSchema,
   registerRequestSchema,
   rotateTokenRequestSchema,
+  runSandboxReportRequestSchema,
   sandboxAttestationRequestSchema,
   submitReviewRequestSchema,
   usageSnapshotRequestSchema,
@@ -33,6 +34,7 @@ import { appendWorkerLogs } from '../../services/logs.js';
 import {
   ingestAgentEvents,
   recordGitViolation,
+  recordRunSandbox,
   recordWorktree,
   startAgentSession,
 } from '../../services/coding-sessions.js';
@@ -309,6 +311,24 @@ export async function workerRoutes(
       await assertRunBelongsToWorker(runId, worker.id, worker.name);
 
       await recordGitViolation(runId, body, workerActor(worker));
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, accepted: true });
+    });
+
+    /**
+     * The containment established for THIS run.
+     *
+     * Reported by the worker at the moment the sandbox opens — or fails to —
+     * so "was this diff produced inside a boundary?" is a queryable fact rather
+     * than something a reviewer has to infer from a log line.
+     */
+    scope.post('/api/worker/runs/:runId/sandbox', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      const body = runSandboxReportRequestSchema.parse(request.body);
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      await recordRunSandbox(runId, body.sandbox, workerActor(worker));
       const control = await buildControlEnvelope(worker.id);
       return reply.send({ control, accepted: true });
     });

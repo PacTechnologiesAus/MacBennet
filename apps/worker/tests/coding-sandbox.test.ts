@@ -134,6 +134,10 @@ function fakeClient() {
       push('violation', body);
       return {} as never;
     },
+    reportRunSandbox: async (_runId: string, body: unknown) => {
+      push('sandbox', body);
+      return {} as never;
+    },
     reportUsage: async (_runId: string, body: unknown) => {
       push('usage', body);
       return {} as never;
@@ -274,6 +278,22 @@ describe('a coding run that requires containment and cannot get it', () => {
     ).rejects.toBeInstanceOf(SandboxUnavailable);
   }, 120_000);
 
+  it('audits the refusal before it throws, so the reason is queryable', async () => {
+    const { client, calls } = fakeClient();
+
+    await runCodingJob(makeAssignment(), makeContext(), {
+      client,
+      skipPush: true,
+      agentFactory: () => new MockCodingAgent({}),
+      sandboxOptions: { provider: 'none' },
+    }).catch(() => undefined);
+
+    const reports = (calls.sandbox ?? []) as Array<{ sandbox: { established: boolean; refusalReason: string } }>;
+    expect(reports).toHaveLength(1);
+    expect(reports[0]!.sandbox.established).toBe(false);
+    expect(reports[0]!.sandbox.refusalReason).toContain('requires an OS-enforced sandbox');
+  }, 120_000);
+
   it('preserves the worktree when it refuses, so nothing is lost', async () => {
     const { client, calls } = fakeClient();
     const assignment = makeAssignment();
@@ -341,6 +361,29 @@ describe('the plan the coding job builds', () => {
       const insideWorkspace = mount.hostPath.startsWith(path.resolve(workspace));
       expect(insideRepo || insideWorkspace, mount.hostPath).toBe(true);
     }
+  }, 180_000);
+
+  it('reports the containment it established, with mount purposes and modes', async () => {
+    const { client, calls } = fakeClient();
+
+    await runCodingJob(makeAssignment(), makeContext(), {
+      client,
+      skipPush: true,
+      sandbox,
+      agentFactory: () => new MockCodingAgent({}),
+    });
+
+    const reports = (calls.sandbox ?? []) as Array<{
+      sandbox: { established: boolean; kind: string; mounts: Array<{ purpose: string; mode: string }> };
+    }>;
+    expect(reports).toHaveLength(1);
+    expect(reports[0]!.sandbox.established).toBe(true);
+
+    const byPurpose = Object.fromEntries(reports[0]!.sandbox.mounts.map((m) => [m.purpose, m.mode]));
+    // What a reviewer needs afterwards: what kind of thing was reachable, and
+    // whether it was writable.
+    expect(byPurpose.worktree).toBe('rw');
+    expect(byPurpose.git_shim).toBe('ro');
   }, 180_000);
 
   it('closes the session when the run finishes', async () => {

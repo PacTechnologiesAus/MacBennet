@@ -384,6 +384,53 @@ export async function recordGitViolation(
   });
 }
 
+/**
+ * Records the containment a worker established for one run (Sprint 3 §22).
+ *
+ * A run-scoped fact, not a fleet-scoped one: "this worker can sandbox" is
+ * useful for dispatch, but "this run WAS sandboxed, with these mounts" is what
+ * a reviewer needs when they are deciding how much to trust a diff produced at
+ * 03:00. It is audited rather than logged so it can be queried.
+ */
+export async function recordRunSandbox(
+  runId: string,
+  input: {
+    established: boolean;
+    kind: string;
+    version: string | null;
+    mounts: Array<{ purpose: string; mode: 'ro' | 'rw' }>;
+    network: 'none' | 'egress';
+    refusalReason: string | null;
+  },
+  actor: Actor,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const ctx = await projectIdForRun(tx, runId);
+
+    await record(tx, {
+      actor,
+      eventType: input.established ? 'sandbox.created' : 'sandbox.refused',
+      context: { runId, ...ctx },
+      metadata: {
+        kind: input.kind,
+        version: input.version,
+        network: input.network,
+        mounts: input.mounts,
+        refusalReason: input.refusalReason,
+      },
+    });
+
+    await appendSystemLog(
+      tx,
+      runId,
+      input.established
+        ? `Execution sandbox established (${input.kind}${input.version ? `, ${input.version}` : ''}): ` +
+            `${input.mounts.map((m) => `${m.purpose}:${m.mode}`).join(', ')}. Network ${input.network}.`
+        : `REFUSED to start a coding session without containment: ${input.refusalReason ?? 'no sandbox available'}.`,
+    );
+  });
+}
+
 export async function listGitViolations(runId: string, handle: DbHandle = db): Promise<GitViolationDto[]> {
   const rows = await handle.select().from(gitViolations).where(eq(gitViolations.runId, runId)).orderBy(asc(gitViolations.at));
   return rows.map((r) => ({

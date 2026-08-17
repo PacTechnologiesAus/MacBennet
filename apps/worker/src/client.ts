@@ -24,6 +24,8 @@ import type {
   ReviewVerdictResponse,
   RotateTokenRequest,
   RotateTokenResponse,
+  RunSandboxReportRequest,
+  RunSandboxReportResponse,
   SandboxAttestationRequest,
   SandboxAttestationResponse,
   SubmitReviewRequest,
@@ -255,6 +257,11 @@ export class ControlPlaneClient {
    */
   rotateToken(body: RotateTokenRequest): Promise<RotateTokenResponse> {
     return this.request<RotateTokenResponse>('/api/worker/rotate-token', body, { attempts: 2, timeoutMs: 15_000 });
+  }
+
+  /** The containment established for one run, or the refusal to run without it. */
+  reportRunSandbox(runId: string, body: RunSandboxReportRequest): Promise<RunSandboxReportResponse> {
+    return this.request<RunSandboxReportResponse>(`/api/worker/runs/${runId}/sandbox`, body);
   }
 
   reportSandboxAttestation(body: SandboxAttestationRequest): Promise<SandboxAttestationResponse> {

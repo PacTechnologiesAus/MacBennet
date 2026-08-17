@@ -463,6 +463,35 @@ export const rotateTokenResponseSchema = withControl({
 });
 export type RotateTokenResponse = z.infer<typeof rotateTokenResponseSchema>;
 
+/**
+ * The worker reports the containment it established for a specific run.
+ *
+ * Distinct from the fleet-level attestation above, which says what a worker CAN
+ * do. This says what it actually did for this piece of work — "the sandbox was
+ * open, and these were its mounts" — which is the fact a reviewer needs
+ * afterwards and which a log line cannot be queried for.
+ */
+export const runSandboxReportSchema = z.object({
+  established: z.boolean(),
+  kind: z.string().max(40),
+  version: z.string().max(120).nullable().default(null),
+  /** Mount purposes and modes only. Never the host paths, which are noise here. */
+  mounts: z
+    .array(z.object({ purpose: z.string().max(40), mode: z.enum(['ro', 'rw']) }))
+    .max(64)
+    .default([]),
+  network: z.enum(['none', 'egress']).default('egress'),
+  /** Present when containment was refused: why, in a form a human can act on. */
+  refusalReason: z.string().max(1000).nullable().default(null),
+});
+export type RunSandboxReport = z.infer<typeof runSandboxReportSchema>;
+
+export const runSandboxReportRequestSchema = z.object({ sandbox: runSandboxReportSchema });
+export type RunSandboxReportRequest = z.infer<typeof runSandboxReportRequestSchema>;
+
+export const runSandboxReportResponseSchema = withControl({ accepted: z.literal(true) });
+export type RunSandboxReportResponse = z.infer<typeof runSandboxReportResponseSchema>;
+
 export const sandboxAttestationRequestSchema = z.object({ sandbox: sandboxAttestationSchema });
 export type SandboxAttestationRequest = z.infer<typeof sandboxAttestationRequestSchema>;
 

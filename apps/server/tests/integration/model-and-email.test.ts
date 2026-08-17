@@ -175,6 +175,90 @@ describe('the model may help, and may not decide', () => {
   });
 });
 
+describe('model-assisted discovery', () => {
+  const CONVERSATION = [
+    'I want the device selection screen changed so users can select multiple devices.',
+    'At the moment it only accepts one, and the API needs to support the change too.',
+  ];
+
+  const runDiscovery = async () => {
+    const project = (await asAdmin().post('/api/projects', { name: `P${Math.random()}` })).json().project;
+    const session = (
+      await asAdmin().post('/api/discovery', { projectId: project.id, title: 'Multi-device selection' })
+    ).json().session;
+    for (const message of CONVERSATION) {
+      await asAdmin().post(`/api/discovery/${session.id}/messages`, { message });
+    }
+    const generated = await asAdmin().post(`/api/discovery/${session.id}/brief`, {});
+    return { projectId: project.id, brief: generated.json().brief };
+  };
+
+  it('lets a model fill a field the sentence classifier left empty', async () => {
+    await asAdmin().patch('/api/settings', { modelAssistEnabled: true, modelProvider: 'none' });
+    setModelProvider(
+      new ScriptedModelProvider([
+        JSON.stringify({
+          // Grounded: every distinctive word appears in what the engineer said.
+          acceptanceCriteria: ['An operator can select multiple devices on the selection screen.'],
+        }),
+      ]),
+    );
+
+    const { projectId, brief } = await runDiscovery();
+    expect(brief.content.acceptanceCriteria).toContain('An operator can select multiple devices on the selection screen.');
+
+    const events = (await queryAuditEvents({ projectId, limit: 50, offset: 0 })).map((e) => e.eventType);
+    expect(events).toContain('model.assisted_discovery');
+  });
+
+  it('DROPS a field nothing in the conversation supports', async () => {
+    await asAdmin().patch('/api/settings', { modelAssistEnabled: true, modelProvider: 'none' });
+    setModelProvider(
+      new ScriptedModelProvider([
+        JSON.stringify({
+          acceptanceCriteria: ['The invoice reconciliation ledger must balance against the quarterly audit export.'],
+        }),
+      ]),
+    );
+
+    const { projectId, brief } = await runDiscovery();
+    /*
+     * An invented acceptance criterion would go on to RAISE the understanding
+     * confidence that decides whether Mac may execute at all — which is the
+     * worst possible place for a fabrication.
+     */
+    expect(JSON.stringify(brief.content)).not.toContain('reconciliation ledger');
+
+    const event = (await queryAuditEvents({ projectId, limit: 50, offset: 0 })).find(
+      (e) => e.eventType === 'model.assisted_discovery',
+    );
+    expect(event!.metadata.ungroundedFieldsDropped).toBe(1);
+  });
+
+  it('never overwrites a field the human actually filled', async () => {
+    await asAdmin().patch('/api/settings', { modelAssistEnabled: true, modelProvider: 'none' });
+    setModelProvider(
+      new ScriptedModelProvider([
+        JSON.stringify({ currentBehaviour: 'At the moment the screen accepts multiple devices already.' }),
+      ]),
+    );
+
+    const { brief } = await runDiscovery();
+    // The classifier put the engineer's own sentence in `currentBehaviour`; a
+    // model rephrasing it might be tidier and might also be subtly different.
+    expect(brief.content.currentBehaviour).toContain('At the moment it only accepts one');
+  });
+
+  it('does not consult a model at all when assistance is off', async () => {
+    const scripted = new ScriptedModelProvider([JSON.stringify({ acceptanceCriteria: ['anything'] })]);
+    setModelProvider(scripted);
+    await asAdmin().patch('/api/settings', { modelAssistEnabled: false });
+
+    await runDiscovery();
+    expect(scripted.prompts).toHaveLength(0);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Email
 // ---------------------------------------------------------------------------

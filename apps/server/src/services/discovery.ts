@@ -7,6 +7,7 @@ import {
   type DiscoverySessionDto,
   type DiscoveryStatus,
   type HandoffBriefContent,
+  type ModelBriefStructure,
   type ProjectContextSnapshot,
 } from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
@@ -16,6 +17,8 @@ import { AppError } from '../http/errors.js';
 import { analyseGaps } from '../domain/gap-analysis.js';
 import { briefDto, createBrief, requireBriefRow } from './briefs.js';
 import { record, type Actor } from './audit.js';
+import { getSettings } from './settings.js';
+import { structureBriefWithModel } from './model/resolvers.js';
 
 /**
  * Discovery (Sprint 2 §5, spec §4).
@@ -323,7 +326,54 @@ export async function generateBrief(
       : null;
 
     const derived = structureConversation(task.title, conversation);
-    const content = handoffBriefContentSchema.parse({ ...derived, ...(input.overrides ?? {}) });
+
+    /*
+     * Sprint 3: a model may help structure the free-flow brief.
+     *
+     * It runs ALONGSIDE the deterministic structurer, never instead of it, and
+     * only fills fields the sentence classifier left empty. Two properties keep
+     * that safe:
+     *
+     *   1. every string it returns must share distinctive vocabulary with what
+     *      the engineer actually said, or it is dropped — because a field the
+     *      model invented would go on to raise the understanding confidence
+     *      that decides whether Mac may execute at all;
+     *   2. an operator override still wins over both, so a human correcting the
+     *      brief is never argued with.
+     */
+    const settings = await getSettings(tx);
+    let modelStructure: Partial<HandoffBriefContent> = {};
+    if (settings.modelAssistEnabled) {
+      const outcome = await structureBriefWithModel(task.title, conversation).catch(() => null);
+      if (outcome?.structure) {
+        modelStructure = onlyEmptyFields(derived, outcome.structure);
+      }
+      if (outcome) {
+        await record(tx, {
+          actor,
+          eventType: outcome.structure ? 'model.assisted_discovery' : 'model.output_rejected',
+          context: { projectId: session.projectId, taskId: session.taskId },
+          metadata: {
+            discoverySessionId: sessionId,
+            provider: outcome.record.provider,
+            model: outcome.record.model,
+            outcome: outcome.record.outcome,
+            inputTokens: outcome.record.inputTokens,
+            outputTokens: outcome.record.outputTokens,
+            // Fields the model produced that nothing in the conversation
+            // supported. The number worth watching.
+            ungroundedFieldsDropped: outcome.record.fabricatedCitations,
+            fieldsFilled: Object.keys(modelStructure),
+          },
+        });
+      }
+    }
+
+    const content = handoffBriefContentSchema.parse({
+      ...derived,
+      ...modelStructure,
+      ...(input.overrides ?? {}),
+    });
 
     const brief = await createBrief(
       {
@@ -487,6 +537,47 @@ export function extractMustNotChange(sentence: string): string | null {
 }
 
 const dedupe = (items: string[]): string[] => Array.from(new Set(items.map((i) => i.trim()))).filter(Boolean).slice(0, 40);
+
+/**
+ * Model output may only fill gaps, never overwrite.
+ *
+ * The deterministic structurer put a sentence in a field because the engineer
+ * wrote that sentence. A model rephrasing it might be tidier and might also be
+ * subtly different, and "subtly different from what the human said" is exactly
+ * the failure this whole arrangement is built to avoid. So a field the
+ * classifier already filled is left alone.
+ */
+function onlyEmptyFields(
+  derived: HandoffBriefContent,
+  structure: ModelBriefStructure,
+): Partial<HandoffBriefContent> {
+  const patch: Partial<HandoffBriefContent> = {};
+
+  const fillText = (key: 'userObjective' | 'currentBehaviour' | 'desiredBehaviour' | 'proposedScope') => {
+    const value = structure[key];
+    if (value && !derived[key]?.trim()) patch[key] = value;
+  };
+
+  const fillList = (
+    key: 'constraints' | 'mustNotChange' | 'acceptanceCriteria' | 'testingExpectations' | 'likelyAffectedComponents' | 'outOfScope',
+  ) => {
+    const value = structure[key];
+    if (value?.length && derived[key].length === 0) patch[key] = dedupe(value);
+  };
+
+  fillText('userObjective');
+  fillText('currentBehaviour');
+  fillText('desiredBehaviour');
+  fillText('proposedScope');
+  fillList('constraints');
+  fillList('mustNotChange');
+  fillList('acceptanceCriteria');
+  fillList('testingExpectations');
+  fillList('likelyAffectedComponents');
+  fillList('outOfScope');
+
+  return patch;
+}
 
 export async function closeDiscovery(sessionId: string, actor: Actor): Promise<DiscoverySessionDto> {
   return db.transaction(async (tx) => {

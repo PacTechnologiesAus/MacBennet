@@ -166,10 +166,23 @@ export async function runCodingJob(
         });
 
     if (coding.sandbox.required && !resolution.available) {
-      throw new SandboxUnavailable(
-        resolution.kind,
-        `This run requires an OS-enforced sandbox and none is available on this worker. ${resolution.detail ?? ''}`.trim(),
-      );
+      const reason =
+        `This run requires an OS-enforced sandbox and none is available on this worker. ${resolution.detail ?? ''}`.trim();
+      // Audited before throwing, so the refusal is a durable, queryable fact
+      // rather than something a reviewer has to infer from a failed run.
+      await client
+        .reportRunSandbox(runId, {
+          sandbox: {
+            established: false,
+            kind: resolution.kind,
+            version: resolution.version,
+            mounts: [],
+            network: 'none',
+            refusalReason: reason,
+          },
+        })
+        .catch(() => undefined);
+      throw new SandboxUnavailable(resolution.kind, reason);
     }
 
     if (resolution.sandbox) {
@@ -200,6 +213,21 @@ export async function runCodingJob(
           'and nothing else on this machine.',
         'system',
       );
+
+      await client
+        .reportRunSandbox(runId, {
+          sandbox: {
+            established: true,
+            kind: resolution.kind,
+            version: resolution.version,
+            // Purposes and modes, not host paths: what a reviewer needs is what
+            // KIND of thing was reachable and whether it was writable.
+            mounts: plan.mounts.map((m) => ({ purpose: m.purpose, mode: m.mode })),
+            network: plan.network,
+            refusalReason: null,
+          },
+        })
+        .catch(() => undefined);
     } else {
       ctx.log(
         'WARNING: no execution sandbox. This run was permitted to proceed unconfined because the control ' +
