@@ -4,7 +4,7 @@ Mac Bennett is a persistent AI Automation Engineer for PAC Technologies — inte
 operate like an additional engineering employee who works overnight, delegates coding to agents such
 as Claude Code, keeps a complete audit trail, and never merges to main on his own.
 
-**This repository contains Sprints 1 and 2.**
+**This repository contains Sprints 1, 2 and 3.**
 
 Sprint 1 built and proved the control loop:
 
@@ -20,13 +20,52 @@ Sprint 2 put an autonomous coding engineer on top of it:
 > and answers its questions from recorded sources → tests run → Mac reviews his own work against
 > the brief → Mac opens a pull request when it is warranted → a human reads a short morning report.
 
+Sprint 3 turned that into a night shift:
+
+> an engineer approves a project, a monday.com board and the items on it, and goes home → Mac picks
+> the highest-priority eligible item, assigns it to himself and sets it In Progress → he works inside
+> an OS-enforced sandbox that can reach the assigned worktree and nothing else on the machine → when
+> a task finishes he leaves a pull request and moves the board to Ready for Review → when one blocks
+> he posts what he needs, preserves the work and moves on to something else → he keeps going until
+> the cutoff, the budget or an empty queue stops him → and one short email is waiting at 08:00.
+
 **Mac never merges, and never touches the default branch.** That is enforced by application code in
 three independent layers, not by a prompt.
 
 The full product specification is in [`Mac_Spec.md`](Mac_Spec.md). The designs behind these
 implementations, each with its self-review against that spec and its post-implementation notes, are
-in [`docs/sprint-1-design.md`](docs/sprint-1-design.md) and
-[`docs/sprint-2-design.md`](docs/sprint-2-design.md).
+in [`docs/sprint-1-design.md`](docs/sprint-1-design.md),
+[`docs/sprint-2-design.md`](docs/sprint-2-design.md) and
+[`docs/sprint-3-design.md`](docs/sprint-3-design.md).
+
+---
+
+## Sprint 3 capabilities
+
+| Capability | State |
+|---|---|
+| Coding sessions run inside an **OS-enforced sandbox** | OK bubblewrap or docker, one shared plan |
+| The sandbox contains the agent **and the project's own test command** | OK `npm test` runs code the agent just wrote |
+| Unrelated projects, home secrets and the worker's own credential are unreachable | OK proven against a real provider |
+| A run that requires containment and cannot get it **fails** | OK no fallback to unconfined execution |
+| Coding work is withheld from a worker that has not attested a sandbox | OK a predicate in the dispatch statement |
+| Worker credentials **rotate**, with a bounded overlap | OK requested through the control envelope; no VM access needed |
+| Credentials can be revoked instantly; a revoked token presented is audited | OK |
+| monday.com: read boards, items, priority, status, assignee, due date, description | OK only from mapped, approved boards |
+| monday.com: assign to Mac, In Progress, updates, blockers, PR links, Ready for Review | OK every write audited |
+| monday.com: **cannot** change priority, due dates, delete anything, or restructure a board | OK no such method exists, and a guard refuses the column by name |
+| Mark complete only where the board's workflow permits it | OK off by default |
+| Project ↔ board ↔ repository mapping with explicit approval | OK two independent gates |
+| Deterministic task-eligibility predicate | OK fourteen checks, no I/O, no model |
+| Multi-task nights across projects, by monday.com priority | OK same project first |
+| Safe-start check near the cutoff | OK size class, safety factor, wrap-up allowance |
+| Every scheduling decision recorded, including the refusals | OK |
+| Blocked work is preserved, posted and distinguishable from failed work | OK |
+| Investigation across six source classes before any human question | OK the checked-source list is persisted |
+| Evidence-based answers with derived groundedness | OK an ungrounded claim cannot be high-confidence |
+| Model-backed resolvers behind the existing interfaces | OK off by default; fabricated citations dropped |
+| Morning report **delivered** by email, idempotently and retryably | OK the send path has no recipient parameter |
+| Night Shift, Night Queue, monday.com and Security screens | OK |
 
 ---
 
@@ -88,8 +127,13 @@ A **modular monolith** control plane plus a **separate worker process**, as spec
 ┌──────────────────────────┐         ┌───────────────────────────────┐
 │  Browser (React SPA)     │         │  Worker VM (Linux)            │
 │  session cookie auth     │         │  @mac/worker                  │
-└───────────┬──────────────┘         │  bearer worker-token auth     │
-            │ /api/*                 └───────────────┬───────────────┘
+└───────────┬──────────────┘         │  rotating worker-token auth   │
+            │ /api/*                 │  ┌─────────────────────────┐  │
+            │                        │  │ SANDBOX (bwrap/docker)  │  │
+            │                        │  │  coding agent           │  │
+            │                        │  │  project test command   │  │
+            │                        │  └─────────────────────────┘  │
+            │                        └───────────────┬───────────────┘
             │                                        │ /api/worker/*
             │                                        │ (outbound only)
             ▼                                        ▼
@@ -267,7 +311,8 @@ be expressed, so adding a coding agent did not turn the worker into a remote she
 
 There are exactly three places that spawn a process, each with an argv array and `shell: false`:
 `GitRunner`, `ClaudeCodeAdapter` and `TestRunner`. Job kind and parameters are validated three times:
-at run creation, at dispatch, and again by the worker.
+at run creation, at dispatch, and again by the worker. Since Sprint 3 the last two spawn **inside the
+sandbox**, and `GitRunner` — Mac's own code, not the agent's — stays outside it.
 
 Adding a capability later means adding one entry to `packages/protocol/src/jobs.ts` and one handler —
 a reviewable code change, never a configuration toggle.
@@ -291,6 +336,62 @@ Three independent layers. Any one of them would still work with the other two re
 The prohibited set — merge into the default branch, push to it, force-push, delete it, bypass branch
 protection, rewrite shared history — is **not configurable**. There is no setting, environment
 variable or parameter that relaxes any of it.
+
+### The execution sandbox (Sprint 3)
+
+Layers 1–3 govern what the agent may do with **git**. They say nothing about the rest of the machine,
+and Sprint 2's risk register admitted it: `cwd` was set to the worktree and the damage was inspected
+afterwards, which is a convention rather than a boundary.
+
+Sprint 3 draws a real one. Two things run agent intent and both go inside it:
+
+* the **coding agent**, and
+* the project's own **test and build command** — the non-obvious half, because `npm test` executes
+  code the agent has just written.
+
+Everything else stays outside: Mac's own policy-checked git, the evidence collection that judges the
+agent's work, and anything holding the worker token.
+
+Inside, the process can reach the run's worktree (rw), this repository's git metadata (rw), a
+per-run scratch directory (rw), the git shim (**ro**, so the policy cannot be rewritten from inside)
+and whatever tooling an administrator explicitly mounted. Everything else is not unreadable —
+it is **absent**. No home directory, no other project, no other worktree, no `~/.ssh`, no `~/.aws`,
+no worker state file. The environment is built from empty rather than filtered, so a secret-bearing
+variable introduced later is excluded by default.
+
+| Provider | When |
+|---|---|
+| `bubblewrap` | The production choice. No daemon, ~10 ms, identity paths, ordinary signal semantics. |
+| `docker` | Portable, and the one available on a Windows development machine. Stronger mount namespace; its daemon is a real trust boundary. |
+| `none` | Development only. The worker attests no containment, and the control plane withholds coding work from it. |
+
+Both providers translate the **same plan**, and the plan holds every containment rule. This is one
+policy with two back-ends, not two policies.
+
+It fails closed in three places: the worker refuses to start a session without containment, the
+dispatch statement removes `claude_code` from the capabilities of a worker that has not attested a
+sandbox, and an invalid plan is a refusal rather than a crash. There is no path that degrades to
+running unconfined.
+
+```bash
+MAC_SANDBOX_PROVIDER=auto                  # bubblewrap, then docker
+MAC_SANDBOX_IMAGE=node:22-bookworm-slim    # must carry the project's toolchain
+MAC_SANDBOX_TOOLING=/opt/toolchain         # optional, read-only, explicit
+```
+
+### Rotating a worker credential (Sprint 3)
+
+Nobody logs into the VM. An admin presses **Request rotation** on the Security screen; the request
+rides the control envelope, which is on every worker-facing response, so the worker picks it up on
+its next call and replaces its own token. The previous credential stays valid for a short overlap
+(300 s by default) so an in-flight request does not fail mid-rotation.
+
+**Revocation** is the immediate one: every token dies at once with no grace period, and the worker
+must re-enroll with a fresh single-use token. Presenting a revoked token is an audit event, because
+it means a credential somebody deliberately killed is still in use.
+
+A credential older than `workerTokenMaxAgeHours` (168 by default) is asked to rotate automatically.
+
 
 ---
 
@@ -329,6 +430,42 @@ variable or parameter that relaxes any of it.
 
 5. **Read the report in the morning.**
 
+## Letting Mac work a night
+
+Sprint 2 let Mac execute one approved task. Sprint 3 lets him work a queue. Setting that up is five
+deliberate acts, and they are deliberately separate.
+
+1. **Approve the project for night shift** (admin). A project Mac may work in during the day is not
+   automatically one he may take work from at 02:00.
+
+2. **Map the monday.com board** (admin): its id, which column is status, which is assignee, which is
+   priority and which is the due date. The last two are recorded precisely so that a write aimed at
+   them can be refused *by name* — Mac has no method that sets either.
+
+3. **Approve the board** (admin). Separate from mapping, because configuring an integration should
+   not be the same gesture as authorising a machine to take work from it. Mac reads only from boards
+   in this table, so he cannot roam every board the connected account can see.
+
+4. **Mark the board night-shift eligible**, and **flag the items** Mac may take. The per-item flag is
+   required by default: work he picks up at 02:00 should have been marked on purpose.
+
+5. **Do discovery during the day**, as in Sprint 2, and record the monday item id on the task. This
+   is the step that cannot be skipped: an item with no handoff brief has no understanding confidence,
+   and Mac will not start it. He does not invent a brief for work he has never discussed.
+
+Then press **Start night shift**. From there he selects the highest-priority eligible item, assigns
+it to himself, sets In Progress, works, opens a pull request, moves the board to Ready for Review,
+and picks the next one — preferring the project he is already in, because the repository is fetched
+and the project memory is the one he has been reasoning with.
+
+When something blocks he posts what he needs, preserves the worktree, does **not** mark it complete,
+and moves on. Near the cutoff he stops starting things that cannot sensibly be left half-done. Every
+one of those decisions, including the refusals, is on the Night Queue screen with its reasoning.
+
+At the end he sends one short email — to the addresses configured in Settings, and to nowhere else:
+the send path has no recipient parameter at all, so nothing from a task, a brief or a coding agent
+can introduce an address.
+
 ### Settings that govern autonomy
 
 | Setting | Default | Effect |
@@ -341,30 +478,47 @@ variable or parameter that relaxes any of it.
 | `maxQuestionsPerRun` | 20 | Bounds an agent stuck in a question loop |
 | `softUsageThresholdPct` | 80 | Warns on non-exact usage; its uncertainty stays visible |
 | `overnightCutoff` / `timezone` | 08:00 Australia/Sydney | DST-correct. Preserves worktrees and partial commits |
+| `requireSandbox` | true | A coding run is not dispatched to a worker without an attested sandbox |
+| `workerTokenMaxAgeHours` | 168 | Past this, a worker is asked to rotate itself |
+| `workerTokenOverlapSeconds` | 300 | How long a superseded credential keeps working |
+| `nightShiftSafetyFactor` | 1.5 | An effort estimate is multiplied by this before it meets the clock |
+| `nightShiftWrapUpMinutes` | 10 | Reserved for committing, testing, reviewing and reporting |
+| `nightShiftMinStartMinutes` | 20 | Below this much runway, nothing new starts |
+| `nightShiftLargeTaskMinMinutes` | 90 | A large task additionally needs this much |
+| `reportRecipients` | — | The **only** place a morning-report recipient can be set |
+| `allowedRecipientDomains` | — | An address outside these is refused and audited |
+| `mailProvider` | none | `graph` sends from Mac's real mailbox |
+| `modelAssistEnabled` | false | Off by default; the model never owns a safety decision |
 
 ---
 
 ## Testing
 
 ```bash
-npm test                  # everything: 492 tests
+npm test                  # everything: 716 tests
 npm run test:unit         # domain only, no database needed
 
-# Opt-in, and it spends real subscription usage:
-MAC_E2E_REAL_CLAUDE=1 npm run test -w @mac/worker
+# Opt-in, and each spends something real:
+MAC_E2E_REAL_CLAUDE=1 npm run test -w @mac/worker            # real Claude Code CLI
+MAC_MONDAY_LIVE_TEST=1 npm run test:integration -w @mac/server  # a real monday.com board
 ```
 
 | Layer | What it covers |
 |---|---|
-| **Unit** (231) | Lifecycle state machine; confidence bands at 0.59/0.60/0.79/0.80/0.89/0.90 including genuine float-boundary hazards; the git policy against every prohibited form, including obfuscated ones (`HEAD:main`, `:main`, `+refs/heads/main`, `-c receive.*`); supervision decisions; self-review verdicts and PR eligibility; usage-source rules; report assembly; gap analysis |
-| **Integration** (136) | Both auth planes and their separation, role enforcement, every guardrail, dispatch, logs, cancellation, schema parity, discovery, briefs, Q&A supervision, self-review, pull requests, usage, reports, memory scoping, and the overnight cutoff on a live coding run |
-| **Worker** (117) | Log buffering and retry idempotency; job handlers; **the git shim as a real process**, refusing real prohibited commands against a real repository and failing closed; git and worktree behaviour against a real bare remote; the Claude Code adapter against a fake CLI; the execution boundary |
-| **End-to-end** (8) | Real server, real worker, real Postgres, real git. Sprint 1's control loop, plus the whole Sprint 2 loop: discovery → brief → approval → worktree → coding agent → commit → tests → self-review → pull request → report, with the audit trail asserted in order and `main` proven untouched on the remote |
-| **Opt-in** (1) | The same flow against the **real** Claude Code CLI. Skipped unless `MAC_E2E_REAL_CLAUDE=1`. |
+| **Unit** (309) | Lifecycle state machine; confidence bands at 0.59/0.60/0.79/0.80/0.89/0.90 including genuine float-boundary hazards; the git policy against every prohibited form, including obfuscated ones (`HEAD:main`, `:main`, `+refs/heads/main`, `-c receive.*`); supervision decisions; self-review verdicts and PR eligibility; usage-source rules; report assembly; gap analysis; **the sandbox plan's containment rules**; **task eligibility**; **effort and safe-start**; **night scheduling and budget classification**; **investigation and grounding** |
+| **Integration** (232) | Both auth planes and their separation, role enforcement, every guardrail, dispatch, logs, cancellation, schema parity, discovery, briefs, Q&A supervision, self-review, pull requests, usage, reports, memory scoping, the overnight cutoff on a live coding run; **credential rotation, revocation and the sandbox dispatch guardrail**; **monday.com reads, writes, refusals and the outbox**; **the night shift against a real database**; **model resolvers under adversarial scripts and email delivery** |
+| **Worker** (167) | Log buffering and retry idempotency; job handlers; **the git shim as a real process**, refusing real prohibited commands against a real repository and failing closed; git and worktree behaviour against a real bare remote; the Claude Code adapter against a fake CLI; the execution boundary; **the sandbox plan and both providers' argv**; **containment proven against a real provider**; **the coding job's fail-closed path** |
+| **End-to-end** (9) | Real server, real worker, real Postgres, real git. Sprint 1's control loop; Sprint 2's coding loop; and **a whole night**: two approved projects, three briefed monday items, one completed with a pull request, one blocked and posted, a project switch, the cutoff, exactly one delivered email, and the audit trail asserted in order with `main` proven untouched in both repositories |
+| **Opt-in** (6) | The Sprint 2 loop against the **real** Claude Code CLI, and five checks against a **real** monday.com board. Neither runs by default. |
 
-The normal suite needs no paid model usage: the coding agent is substituted through the same
-`CodingAgent` interface production uses, and everything around it — the worktree, the git shim, the
-supervision endpoints, the test runner, the review — is the real implementation.
+The normal suite needs no paid model usage and no external service: the coding agent, monday.com and
+the mailbox are all substituted through the same interfaces production uses, and everything around
+them — the worktree, the git shim, the sandbox, the supervision endpoints, the test runner, the
+review, the scheduler, the outboxes — is the real implementation.
+
+**The containment tests are not skipped here.** They run against whichever sandbox provider the host
+has — bubblewrap on Linux, Docker anywhere — and skip only if it has neither, loudly. A boundary
+whose enforcement has never been observed is one nobody should trust.
 
 Integration and e2e tests need PostgreSQL (`npm run db:up`) and refuse to run unless
 `TEST_DATABASE_URL` is set and differs from `DATABASE_URL` — they truncate tables, and pointing them
@@ -374,68 +528,87 @@ at development data would destroy it.
 
 ## Current limitations
 
-Honest list of what this is not, as of Sprint 2.
+Honest list of what this is not, as of Sprint 3.
 
-**Mac's reasoning is retrieval, not a model.** Discovery structures a conversation with sentence
-classification, and supervision answers questions by scoring recorded sources — the brief, project
-and task memory, and the inspected repository. That buys three properties a model call would cost:
-every answer cites what it came from, confidence falls out of match strength rather than fluency, and
-the whole supervision path is testable with no paid usage. It also means Mac is literal-minded: a
-question no source addresses gets a low-confidence conservative answer, not an insight. Replacing
-`resolveAnswer` with a model-backed resolver is a drop-in change; the risk classification and
-decision policy around it are the parts that must not be delegated to a model.
+**The sandbox contains the filesystem, not git.** An agent inside it can reach the repository's `.git`
+directory, because git has to work. What stops it moving the default branch is the three layers
+Sprint 2 built — the closed API, the PATH shim, and the after-the-fact comparison of the default
+branch sha — not the sandbox. The sandbox's guarantee is that it cannot reach *another* project, a
+home directory, a credential store, or the worker's own token, and that guarantee is tested against a
+real provider.
 
-**Question detection from the coding agent is a heuristic.** The CLI has no explicit "I am asking
-you something" event, so an assistant turn with no tool call whose text reads as a question is
-treated as one. Missing a question means the agent proceeds on its own assumption — which the
-self-review still inspects — rather than stalling.
+**Bubblewrap is the production provider and has not been exercised here.** The development machine is
+Windows, so the containment suite ran against Docker. Both translate the same plan and the plan's
+rules are unit-tested on every platform, but "bubblewrap enforced this" is a claim Sprint 3 has not
+observed. Run `npm run test -w @mac/worker` on the Linux VM before relying on it.
 
-**Acceptance-criteria assessment is evidence-seeking, not verification.** Mac looks for each
-criterion's distinctive terms in the diff, the commits and the summary. It can be wrong in both
-directions, which is exactly why a pull request being opened still leaves the merge decision with a
-human.
+**monday.com has only been exercised against an in-memory implementation.** The fake holds real state
+and applies real writes, so the behaviour around the calls is genuinely tested — but that the GraphQL
+documents and column-value shapes are accepted by the live API is unproven. `monday-live.test.ts`
+exists for exactly this and needs a token and a dedicated board.
 
-**The agent could still write outside the worktree.** Its `cwd` is the worktree and `--add-dir` is
-not passed, but nothing enforces filesystem containment at the OS level. The self-review inspects the
-whole repository for unexpected changes. Proper sandboxing is Sprint 3 work.
+**Email has only been exercised against an in-memory provider.** The outbox, the idempotency, the
+retry and the recipient guardrail are all real and tested; the Microsoft Graph client itself has not
+sent a message.
 
-**A dollar budget is not enforceable under subscription access.** The Claude Code CLI reports exact
-token counts, but its dollar figure is a list-price equivalent of those tokens, not money billed —
-so it is recorded as `estimated` and the UI says so. Only under API-key access does the monetary
-budget become a hard limit. There is no subscription percentage available from the CLI at all, and
-none is invented.
+**The authenticated UI has not been driven in a browser.** It typechecks, it builds, the SPA boots
+without console errors, and every endpoint behind it is covered by integration tests — but nobody has
+clicked through the new screens. Sprint 1 found a real CSS defect exactly that way.
 
-**Cross-project fallback scheduling is not implemented** (spec §8). A blocked subtask leaves the rest
-of its own run continuing, but Mac does not move to another project.
+**Mac still needs a human to prepare the work.** A monday item with no handoff brief has no
+understanding confidence, so he will not start it. Discovery happens during the day, with a person;
+the night shift executes what that produced. He does not invent briefs for items he has never
+discussed, and the confidence model is why.
 
-**No integrations.** monday.com, Teams, email, HubSpot, Otto, voice and Forger are all out of scope,
-as the Sprint 2 brief requires.
+**Effort estimation is crude.** It produces a size class from the brief's shape and the board's own
+size label, with the basis stated. It is used only to avoid obviously bad scheduling near the cutoff,
+and it will sometimes be wrong in both directions.
+
+**Acceptance-criteria assessment is evidence-seeking, not verification** (unchanged from Sprint 2).
+Mac looks for each criterion's distinctive terms in the diff, the commits and the summary. This is
+exactly why a pull request being opened still leaves the merge decision with a human.
+
+**Question detection from the coding agent is a heuristic** (unchanged from Sprint 2). The CLI has no
+explicit "I am asking you something" event.
+
+**A dollar budget is not enforceable under subscription access** (unchanged from Sprint 2). The
+Claude Code CLI reports exact token counts, but its dollar figure is a list-price equivalent, so it
+is recorded as `estimated` and the scheduler's decision record says which of the hard or soft rule
+applied. No subscription percentage exists, and none is invented.
+
+**Model assistance is off by default and narrow when on.** It may improve the wording of an answer
+Mac already grounded in his own sources. It never decides confidence, risk, eligibility, or whether
+to execute; a citation it invents is dropped, and an answer citing nothing real is discarded
+entirely.
+
+**No Teams, HubSpot, Otto, voice, OpenClaw or Forger.** All explicitly out of Sprint 3 scope.
 
 **Inherited from Sprint 1, unchanged:** logs are polled rather than streamed; local password auth
-only; worker tokens do not rotate; a run whose worker goes offline stays `running` pending a human
-decision; single control-plane process; no production deployment, CI pipeline or secret manager.
+only; a run whose worker goes offline stays `running` pending a human decision; single control-plane
+process; no production deployment, CI pipeline or secret manager.
 
-**The largest residual risk** is that a worker token now grants access to a machine that executes
-code. The token's scope is unchanged — `/api/worker/*`, and within that only its own runs — and the
-worker still executes only closed job kinds. That is a real reduction in blast radius, not an
-elimination, and it is stated rather than mitigated away.
+**The largest residual risk** is now the sandbox provider's own trust boundary. Under Docker, a worker
+that can reach the daemon socket can escape any container it starts — which is precisely why
+bubblewrap, which has no daemon, is the production choice. Under either, a compromised worker token
+still yields code execution on the VM; the token now rotates and can be revoked instantly, which
+shortens the window rather than closing it.
 
 ---
 
 ## Next planned phase
 
-Sprint 3 should build on a loop that now demonstrably works. In rough priority order:
+Sprint 4 should build on a night shift that now demonstrably works end to end. In rough priority
+order:
 
-1. **Sandbox the coding agent's filesystem access**, so worktree containment is enforced by the OS
-   rather than inspected after the fact.
-2. **A model-backed resolver for discovery structuring and question answering**, behind the existing
-   interfaces, keeping the risk classification and decision policy in code.
-3. **monday.com** — assign, In Progress, progress updates, blockers, Ready for Review, PR links. A
-   design-only sketch is all Sprint 2 was permitted to produce.
-4. **Worker token rotation**, the one Sprint 1 security debt Sprint 2 deliberately did not repay.
-5. **Multi-task nights**: task selection across an approved backlog, and the cross-project fallback
-   of spec §8.
-6. **Codex or a second coding agent**, to prove the `CodingAgent` abstraction by using it twice.
+1. **Prove the two unproven integrations.** Run the containment suite under bubblewrap on the real
+   Linux VM, and the live monday.com test against a dedicated board. Both are written and skipped.
+2. **Microsoft Teams**, so a blocker at 02:00 reaches a person before 08:00 — the spec's intended
+   notification channel, and the one thing that would make a blocked task less costly.
+3. **Drive the UI in a browser**, including the night-shift screens, and fix what that finds.
+4. **A second coding agent** (Codex), to prove the `CodingAgent` abstraction by using it twice.
+5. **Otto collaboration** over real mailboxes, now that Mac can send email.
+6. **Lease recovery**: a run whose worker never comes back still waits for a human. With multi-task
+   nights, that idles the shift.
 
-Sprint 3 should not need to revisit the control loop, the guardrails, the git safety model, or the
-audit model.
+Sprint 4 should not need to revisit the control loop, the guardrails, the git safety model, the audit
+model, the sandbox, or the scheduler.

@@ -961,3 +961,66 @@ Each step ends green before the next begins.
 
 The design covers every item in the Sprint 3 brief and every Definition-of-Done clause, and nothing
 in it is built for a system larger than the one described. Proceeding to implementation.
+
+---
+
+## 22. Implementation notes — where reality differed from this design
+
+Written *after* implementation, so this document describes what was built rather than only what was
+intended. Every item below was found by a test, by running the system, or by reading the log.
+
+### 22.1 Defects found during implementation
+
+| # | Defect | Fix |
+|---|---|---|
+| E-1 | **The sandbox plan builder added tooling mounts to its own allowed-roots list**, so every such mount authorised itself. The containment check read as rigorous and enforced nothing for exactly the entries most worth scrutinising. | Two mount authorities. A *project* mount (worktree, git dir, scratch, shim) must be proven inside the repository or the workspace; an *operator* mount is an administrator's explicit decision and is exempt from the roots rule — but still subject to every absolute refusal (root, home, credential store, worker state). |
+| E-2 | **The sandbox conformance suite decided its skips in `beforeAll`.** Vitest resolves `describe.skip` while collecting, which happens before any hook runs, so every containment test would have silently skipped on a host that could run them — and a skipped containment suite looks exactly like a passing one. | Probed at module level with top-level await. |
+| E-3 | **`sandboxOptions` never reached the coding job.** It was set on the `JobContext` and the job read it from `deps`, so a real run auto-resolved a provider and an image nobody had configured. Caught by the Sprint 2 e2e failing with `exec: "node": executable file not found`. | Threaded through the context explicitly, and the job now takes it from there rather than reaching for a default. |
+| E-4 | **An unapproved project made its monday items invisible rather than explicably skipped.** The commonest configuration mistake — approving the board but not the project — would have produced an empty Night Queue with no explanation. | Board approval is the READ gate; night-shift eligibility and project approval are decided by the eligibility predicate, which can explain itself. Collecting an ineligible candidate costs nothing, because a failing check is never started. |
+| E-5 | **A completed task stayed eligible and would be done twice.** A completed run leaves nothing in flight, and if the monday.com write had not landed the item was still in a startable status — so Mac would have redone the work and opened a second pull request. | `attemptedThisShift` in the eligibility input, checked alongside `hasActiveRun`. |
+| E-6 | **`markStaleWorkersOffline`'s `OR` escaped its `AND` chain** (a *Sprint 1* defect). Any worker with an old heartbeat matched regardless of status, so the sweeper re-marked and re-audited every already-offline worker every fifteen seconds — about 5,700 audit rows a day for one dead VM, which is precisely the flooding the decision not to audit heartbeats exists to prevent. Found by watching the development log, not by a test. | Parenthesised, plus a regression test that runs the sweeper five times and asserts one event. |
+| E-7 | **The morning report was queued inside the transaction that ended the shift**, so the report builder read the shift as still running and would have summarised a night that had not finished. | Moved after the commit. |
+
+### 22.2 Design changes made during implementation
+
+- **A run that finishes with an unresolved blocker is treated as a BLOCKED task**, not a clean
+  completion. Sprint 2's design is that a blocked subtask does not stop the run — right for the run,
+  wrong for the board, because marking the item Ready for Review would tell a human the work was
+  finished when part of it was deliberately not attempted. The lifecycle status stays `completed`;
+  the scheduler posts the blocker and moves on.
+- **The git shim's violations file moved out of the shim directory.** Inside a sandbox the shim is
+  mounted read-only — so the agent cannot rewrite the policy it is being judged by — which means the
+  guard cannot write its evidence there either. It now lives in the run's writable scratch space,
+  and the read-only shim is a small strengthening Sprint 2 could not have had.
+- **`AgentAnswerDraft` was added** so that a mock agent or a test fixture supplying an answer directly
+  need not invent evidence, groundedness or a checked-source list. Those are properties of
+  supervision, not of an answer literal. Same idiom as `AgentEventDraft`, for the same reason.
+- **The worker state file is written atomically** (write-temp-then-rename). Rotation persists the new
+  credential before adopting it, and a process killed part-way through a plain write would leave a
+  truncated file — which `readState` treats as absent, which means re-enrolment, which means a human
+  on the VM.
+- **`ProjectDto` gained `nightShiftApproved`.** The monday.com screen has to show both gates together,
+  and the commonest configuration mistake is having exactly one of the two.
+- **A stub-sandbox test layer was added** between the pure plan tests and the real conformance suite.
+  It proves the coding job builds a valid plan, fails closed without one, and routes both the agent
+  and the project's test command through the session — without needing a container image that
+  happens to carry Node and git. The chain of evidence is: the rules are right (unit), the job uses
+  them correctly (stub), and a real provider enforces them (conformance).
+
+### 22.3 What was verified beyond the automated suite
+
+- **The containment boundary was exercised against real Docker on the development machine.** Fourteen
+  conformance tests run real processes inside a real sandbox and fail to read an unrelated project,
+  a developer's SSH key, or the worker's own credential file; a write to the read-only shim is
+  refused; the environment carries nothing from the worker process; and an abort kills the sandboxed
+  process in about two seconds rather than waiting out a sixty-second sleep.
+- **The control plane and web app were run together** and the SPA was loaded in a browser. It boots
+  with the new routes and reports no application console errors. The authenticated screens were
+  **not** driven in a browser this sprint, because doing so would have required entering a password,
+  which is not something to do on someone's behalf. They are typechecked and built, and every
+  endpoint behind them is covered by integration tests — but "an operator clicked through it" is
+  evidence Sprint 3 does not have, and Sprint 1 found a real CSS defect exactly that way.
+- **An opt-in live monday.com test** exists (`monday-live.test.ts`), gated on `MAC_MONDAY_LIVE_TEST=1`
+  and a dedicated test board. It was **not run** during this sprint: no monday.com credentials were
+  available. What it would prove — that the GraphQL documents and column-value shapes are accepted by
+  the real API — is therefore currently unproven, and that is the largest gap in Sprint 3's evidence.
