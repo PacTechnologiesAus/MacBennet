@@ -186,7 +186,7 @@ if (BOARD_ID && process.env.MONDAY_API_TOKEN) {
    * the night, and Mac claiming fewer changes than monday recorded is not a
    * discrepancy — it is a colleague.
    */
-  const delivered = mondayWrites.rows.filter((w) => w.status === 'sent').length;
+  const delivered = mondayWrites.rows.filter((w) => w.status === 'delivered').length;
   if (delivered > 0 && logs.length === 0) {
     note(
       `Mac recorded ${delivered} delivered monday write(s), but the board's activity log shows nothing ` +

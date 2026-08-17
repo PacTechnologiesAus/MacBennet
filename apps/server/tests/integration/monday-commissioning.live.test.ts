@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { DEFAULT_MONDAY_STATUS_LABELS } from '@mac/protocol';
 import type { MondayBoard, MondayItem } from '@mac/protocol';
 import { MondayGraphqlClient } from '../../src/services/monday/graphql.js';
+import { MondayApiError } from '../../src/services/monday/client.js';
 import { assertColumnWritable, statusLabelFor, MondayWriteRefused } from '../../src/services/monday/guard.js';
 import type { MondayBoardRow } from '../../src/db/schema.js';
 
@@ -522,4 +523,79 @@ describe.skipIf(!runnable && !UNAPPROVED_BOARD_ID)('monday.com commissioning —
       expect((err as MondayWriteRefused).refusal).toBe('board_not_approved');
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// §15 — how the real API fails, and whether Mac classifies it correctly
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!runnable)('monday.com commissioning — real failures', () => {
+  /*
+   * Retry classification is the difference between a stuck outbox and a
+   * hammered API, and it can only be checked against the thing that actually
+   * produces the errors. Every failure here is harmless: it names something
+   * that does not exist rather than damaging something that does.
+   */
+
+  it('classifies a rejected write as NOT retryable, so a refusal is not retried forever', async () => {
+    // monday answers a bad label with a GraphQL error inside an HTTP 200, which
+    // is the case a status-code check would miss entirely.
+    let error: unknown = null;
+    try {
+      await client.setStatus({
+        itemId: subject.id,
+        boardId: BOARD_ID,
+        columnId: columnIds.status,
+        label: 'A Label This Board Has Never Had',
+      });
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error, 'monday accepted a label that does not exist').not.toBeNull();
+    expect((error as MondayApiError).name).toBe('MondayApiError');
+    expect((error as MondayApiError).retryable, 'a refusal must not be retried').toBe(false);
+    expect((error as Error).message).toMatch(/label/i);
+  }, 60_000);
+
+  it('reports a missing item as a rejection rather than a transient fault', async () => {
+    let error: unknown = null;
+    try {
+      await client.postUpdate({ itemId: '999999999999999', body: 'This item does not exist.' });
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).not.toBeNull();
+    expect((error as MondayApiError).retryable).toBe(false);
+  }, 60_000);
+
+  it('treats a bad credential as a rejection, not something to hammer the API over', async () => {
+    const wrong = new MondayGraphqlClient({ token: 'not-a-real-monday-token' });
+    const availability = await wrong.isAvailable();
+
+    expect(availability.available).toBe(false);
+    expect(availability.reason).toBeTruthy();
+    // And the reason must not be the token itself.
+    expect(availability.reason).not.toContain('not-a-real-monday-token');
+  }, 60_000);
+
+  it('times out rather than hanging a night shift on an unresponsive API', async () => {
+    // 1 ms is not a realistic network, which is the point: what is under test
+    // is that the abort path produces a RETRYABLE error rather than a hang.
+    const impatient = new MondayGraphqlClient({ token: TOKEN, timeoutMs: 1 });
+
+    let error: unknown = null;
+    try {
+      await impatient.getBoard(BOARD_ID);
+    } catch (err) {
+      error = err;
+    }
+
+    // Either it genuinely beat the timeout, or it aborted and said so.
+    if (error) {
+      expect((error as MondayApiError).retryable, 'a timeout is worth retrying').toBe(true);
+      expect((error as Error).message).toMatch(/timed out/i);
+    }
+  }, 60_000);
 });

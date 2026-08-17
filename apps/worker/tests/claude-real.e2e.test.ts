@@ -150,3 +150,89 @@ describeReal('the real Claude Code CLI', () => {
     }
   }, 600_000);
 });
+
+/**
+ * §15 — cancelling a REAL coding run.
+ *
+ * Sprint 3 proved cancellation against a sleeping `sh` inside a sandbox, which
+ * demonstrates the signal path but not this one: Claude Code is a long-lived
+ * Node process holding an HTTP stream, and "the abort reaches it promptly" is a
+ * different claim from "SIGTERM kills a shell".
+ *
+ * The task is deliberately open-ended, so the agent is certain to still be
+ * working when the abort arrives. Nothing is damaged by stopping it: the
+ * worktree is a temporary directory and the run is discarded.
+ */
+describeReal('cancelling the real Claude Code CLI', () => {
+  it('aborts a running session promptly and leaves the default branch alone', async () => {
+    const adapter = new ClaudeCodeAdapter({
+      shimBinDir: shimDir,
+      idleTimeoutMs: 10 * 60_000,
+      model: 'sonnet',
+      // Contained is false here: this test is about the signal path, and the
+      // permission mode does not change how a process dies.
+      contained: false,
+    });
+
+    const open = codingTaskSchema.parse({
+      ...task(),
+      brief: handoffBriefContentSchema.parse({
+        title: 'Survey the repository',
+        userObjective:
+          'Read every file in this repository and write a long, careful description of each one into SURVEY.md.',
+        desiredBehaviour: 'SURVEY.md contains a paragraph about every file.',
+        acceptanceCriteria: ['Every file is described at length'],
+      }),
+      briefMarkdown:
+        '# Survey the repository\n\nRead every file and write a long, careful description of each into ' +
+        '`SURVEY.md`. Take your time and be thorough.',
+      limits: { maxMinutes: 10, maxQuestions: 3, maxBudgetUsd: null },
+    });
+
+    const controller = new AbortController();
+    const events: AgentEvent[] = [];
+
+    const handle = await adapter.start(open, {
+      onEvent: (event) => {
+        events.push(event);
+      },
+      onQuestion: async (question) => ({
+        questionId: question.questionId,
+        decision: 'answered' as const,
+        answer: 'Keep going as described.',
+        confidence: 0.9,
+        reasoning: 'Stated in the brief.',
+        sources: ['brief.userObjective'],
+        requiredHuman: false,
+        isAssumption: false,
+      }),
+      signal: controller.signal,
+    });
+
+    // Let it genuinely start before pulling the plug; aborting a process that
+    // has not begun would prove nothing.
+    await new Promise((resolve) => setTimeout(resolve, 20_000));
+    expect(events.length, 'the agent never started, so cancelling it proves nothing').toBeGreaterThan(0);
+
+    const started = Date.now();
+    controller.abort();
+    const result = await handle.finished;
+    const elapsed = Date.now() - started;
+
+    expect(result.state).toBe('cancelled');
+    // Aborted, not waited out. The idle timeout is ten minutes.
+    expect(elapsed, `cancellation took ${elapsed}ms`).toBeLessThan(45_000);
+
+    // The process is gone rather than orphaned holding a model stream.
+    const availability = await adapter.isAvailable();
+    expect(availability.available).toBe(true);
+
+    // And whatever it had done, the default branch did not move.
+    const mainLog = await new Promise<string>((resolve) => {
+      execFile('git', ['log', '--oneline', 'main'], { cwd: worktree, shell: false }, (_e, stdout) =>
+        resolve(String(stdout)),
+      );
+    });
+    expect(mainLog.trim().split('\n')).toHaveLength(1);
+  }, 300_000);
+});

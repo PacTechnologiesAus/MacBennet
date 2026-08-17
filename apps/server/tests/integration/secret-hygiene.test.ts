@@ -159,7 +159,7 @@ describe('a failed monday write records the failure without the credential', () 
 
     const [row] = await db.select().from(mondayWrites).where(eq(mondayWrites.mondayItemId, 'item-1'));
     expect(row, 'the write was never queued').toBeDefined();
-    expect(row!.status).not.toBe('sent');
+    expect(row!.status).not.toBe('delivered');
 
     // The error IS recorded — losing it would be its own defect — and the
     // token is not in it.
