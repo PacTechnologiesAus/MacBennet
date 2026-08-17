@@ -13,5 +13,9 @@ export default defineConfig({
     hookTimeout: 30_000,
     testTimeout: 30_000,
     include: ['tests/**/*.test.ts'],
+    // The repository-root .env is where a developer configures credentials.
+    // Without this, only tests that import `src/config.ts` ever saw it — which
+    // is not the opt-in external tests, the ones that actually need a token.
+    setupFiles: ['./tests/helpers/load-env.ts'],
   },
 });

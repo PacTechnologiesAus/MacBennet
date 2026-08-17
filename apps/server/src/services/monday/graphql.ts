@@ -40,7 +40,7 @@ export class MondayGraphqlClient implements MondayClient {
   readonly name = 'graphql' as const;
 
   /** How raw columns map onto Mac's vocabulary. Set per board before reading. */
-  private columns: ColumnMap = {
+  #columns: ColumnMap = {
     dependency: null,
     nightShiftFlag: null,
     itemType: null,
@@ -51,18 +51,30 @@ export class MondayGraphqlClient implements MondayClient {
     dueDate: null,
   };
 
-  constructor(private readonly options: GraphqlClientOptions) {}
+  /**
+   * `#` rather than a TypeScript parameter property, because this object holds
+   * the API token. A `private readonly options` is an ordinary enumerable field
+   * at runtime, so `(client as any).options.token` — or anything that
+   * `JSON.stringify`s a client into a log line — would have handed it over.
+   */
+  readonly #options: GraphqlClientOptions;
+
+  constructor(options: GraphqlClientOptions) {
+    this.#options = options;
+  }
 
   withColumnMap(map: Partial<ColumnMap>): MondayGraphqlClient {
-    const clone = new MondayGraphqlClient(this.options);
-    clone.columns = { ...this.columns, ...map };
+    // `#` members are reachable across instances of the SAME class, which is
+    // exactly the access this needs and no more.
+    const clone = new MondayGraphqlClient(this.#options);
+    clone.#columns = { ...this.#columns, ...map };
     return clone;
   }
 
   async isAvailable(): Promise<{ available: boolean; reason?: string }> {
-    if (!this.options.token) return { available: false, reason: 'No monday.com API token is configured.' };
+    if (!this.#options.token) return { available: false, reason: 'No monday.com API token is configured.' };
     try {
-      const data = await this.query<{ me: { id: string; name: string } }>('query { me { id name } }');
+      const data = await this.#query<{ me: { id: string; name: string } }>('query { me { id name } }');
       return data.me?.id ? { available: true } : { available: false, reason: 'The token did not resolve to a user.' };
     } catch (err) {
       return { available: false, reason: (err as Error).message };
@@ -72,7 +84,7 @@ export class MondayGraphqlClient implements MondayClient {
   // --- Reads ---------------------------------------------------------------
 
   async getBoard(boardId: string): Promise<MondayBoard | null> {
-    const data = await this.query<{ boards: Array<RawBoard> }>(
+    const data = await this.#query<{ boards: Array<RawBoard> }>(
       `query ($ids: [ID!]) {
          boards (ids: $ids) {
            id name
@@ -94,7 +106,7 @@ export class MondayGraphqlClient implements MondayClient {
   }
 
   async listItems(boardId: string, options: { groupIds?: string[]; limit?: number } = {}): Promise<MondayItem[]> {
-    const data = await this.query<{ boards: Array<{ items_page: { items: RawItem[] } }> }>(
+    const data = await this.#query<{ boards: Array<{ items_page: { items: RawItem[] } }> }>(
       `query ($ids: [ID!], $limit: Int!) {
          boards (ids: $ids) {
            items_page (limit: $limit) {
@@ -109,13 +121,13 @@ export class MondayGraphqlClient implements MondayClient {
       { ids: [boardId], limit: Math.min(options.limit ?? 100, 500) },
     );
 
-    const items = (data.boards?.[0]?.items_page?.items ?? []).map((raw) => this.toItem(raw, boardId));
+    const items = (data.boards?.[0]?.items_page?.items ?? []).map((raw) => this.#toItem(raw, boardId));
     if (!options.groupIds?.length) return items;
     return items.filter((i) => i.groupId !== null && options.groupIds!.includes(i.groupId));
   }
 
   async getItem(itemId: string): Promise<MondayItem | null> {
-    const data = await this.query<{ items: RawItem[] }>(
+    const data = await this.#query<{ items: RawItem[] }>(
       `query ($ids: [ID!]) {
          items (ids: $ids) {
            id name state updated_at url
@@ -128,11 +140,11 @@ export class MondayGraphqlClient implements MondayClient {
     );
 
     const raw = data.items?.[0];
-    return raw ? this.toItem(raw, String(raw.board?.id ?? '')) : null;
+    return raw ? this.#toItem(raw, String(raw.board?.id ?? '')) : null;
   }
 
   async listUpdates(itemId: string, limit = 20): Promise<Array<{ id: string; body: string; createdAt: string }>> {
-    const data = await this.query<{ items: Array<{ updates: Array<{ id: string; text_body: string; created_at: string }> }> }>(
+    const data = await this.#query<{ items: Array<{ updates: Array<{ id: string; text_body: string; created_at: string }> }> }>(
       `query ($ids: [ID!], $limit: Int!) {
          items (ids: $ids) { updates (limit: $limit) { id text_body created_at } }
        }`,
@@ -149,17 +161,17 @@ export class MondayGraphqlClient implements MondayClient {
   // --- Writes --------------------------------------------------------------
 
   async assignToMac(input: { itemId: string; boardId: string; columnId: string; macUserId: string }): Promise<void> {
-    await this.changeColumn(input.boardId, input.itemId, input.columnId, {
+    await this.#changeColumn(input.boardId, input.itemId, input.columnId, {
       personsAndTeams: [{ id: Number(input.macUserId), kind: 'person' }],
     });
   }
 
   async setStatus(input: { itemId: string; boardId: string; columnId: string; label: string }): Promise<void> {
-    await this.changeColumn(input.boardId, input.itemId, input.columnId, { label: input.label });
+    await this.#changeColumn(input.boardId, input.itemId, input.columnId, { label: input.label });
   }
 
   async postUpdate(input: { itemId: string; body: string }): Promise<{ updateId: string | null }> {
-    const data = await this.query<{ create_update: { id: string } }>(
+    const data = await this.#query<{ create_update: { id: string } }>(
       `mutation ($itemId: ID!, $body: String!) {
          create_update (item_id: $itemId, body: $body) { id }
        }`,
@@ -175,25 +187,34 @@ export class MondayGraphqlClient implements MondayClient {
     url: string;
     title: string;
   }): Promise<void> {
-    await this.changeColumn(input.boardId, input.itemId, input.columnId, { url: input.url, text: input.title });
+    await this.#changeColumn(input.boardId, input.itemId, input.columnId, { url: input.url, text: input.title });
   }
 
   /**
-   * Deliberately PRIVATE.
+   * Deliberately PRIVATE — as an ECMAScript `#` field, not a TypeScript one.
    *
    * monday.com's API is one generic `change_column_value` mutation, which is
    * exactly the shape this integration must not expose: a public method taking
    * any column id and any value would make every prohibition in spec §17 a rule
    * somebody has to remember. The five public methods above are the whole
    * surface, and the guard checks the column id before any of them gets here.
+   *
+   * Sprint 3.1 commissioning found this written as `private async changeColumn`,
+   * which TypeScript erases: the method sat on the prototype and
+   * `(client as any).changeColumn(boardId, itemId, dueDateColumnId, …)` would
+   * have moved a customer's deadline, past the guard, with no compile error at
+   * the call site to argue about in review. `#` is enforced by the runtime — the
+   * name is not on the prototype and there is no cast that reaches it — so
+   * "the generic mutation is private" is now a property of the program rather
+   * than a convention its authors agreed to keep.
    */
-  private async changeColumn(
+  async #changeColumn(
     boardId: string,
     itemId: string,
     columnId: string,
     value: Record<string, unknown>,
   ): Promise<void> {
-    await this.query(
+    await this.#query(
       `mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
          change_column_value (board_id: $boardId, item_id: $itemId, column_id: $columnId, value: $value) { id }
        }`,
@@ -203,17 +224,17 @@ export class MondayGraphqlClient implements MondayClient {
 
   // -------------------------------------------------------------------------
 
-  private async query<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
-    const fetchImpl = this.options.fetchImpl ?? fetch;
+  async #query<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
+    const fetchImpl = this.#options.fetchImpl ?? fetch;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30_000);
+    const timer = setTimeout(() => controller.abort(), this.#options.timeoutMs ?? 30_000);
 
     try {
-      const response = await fetchImpl(this.options.apiUrl ?? API_URL, {
+      const response = await fetchImpl(this.#options.apiUrl ?? API_URL, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          authorization: this.options.token,
+          authorization: this.#options.token,
           'API-Version': API_VERSION,
         },
         body: JSON.stringify({ query, variables }),
@@ -247,7 +268,7 @@ export class MondayGraphqlClient implements MondayClient {
   }
 
   /** Maps a raw item onto Mac's vocabulary using the configured column map. */
-  private toItem(raw: RawItem, boardId: string): MondayItem {
+  #toItem(raw: RawItem, boardId: string): MondayItem {
     const columns = (raw.column_values ?? []).map((c) => ({
       id: c.id,
       type: c.type ?? '',
@@ -257,18 +278,18 @@ export class MondayGraphqlClient implements MondayClient {
     const byId = new Map(columns.map((c) => [c.id, c]));
     const textOf = (id: string | null): string | null => (id ? (byId.get(id)?.text ?? null) : null);
 
-    const assigneeIds = this.columns.assignee
-      ? parsePersonIds(byId.get(this.columns.assignee)?.value ?? null)
+    const assigneeIds = this.#columns.assignee
+      ? parsePersonIds(byId.get(this.#columns.assignee)?.value ?? null)
       : [];
 
-    const dependsOn = this.columns.dependency
-      ? (textOf(this.columns.dependency) ?? '')
+    const dependsOn = this.#columns.dependency
+      ? (textOf(this.#columns.dependency) ?? '')
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean)
       : [];
 
-    const flagText = textOf(this.columns.nightShiftFlag);
+    const flagText = textOf(this.#columns.nightShiftFlag);
 
     return mondayItemSchema.parse({
       id: String(raw.id),
@@ -277,17 +298,17 @@ export class MondayGraphqlClient implements MondayClient {
       name: raw.name,
       url: raw.url ?? null,
       state: raw.state ?? null,
-      status: textOf(this.columns.status),
-      priority: textOf(this.columns.priority),
+      status: textOf(this.#columns.status),
+      priority: textOf(this.#columns.priority),
       assigneeIds,
-      dueDate: textOf(this.columns.dueDate),
+      dueDate: textOf(this.#columns.dueDate),
       // The item body lives on updates, not on a column, so a description is
       // whatever a long-text column holds if one was mapped.
       description: null,
       dependsOn,
       nightShiftFlag: isAffirmative(flagText),
-      itemType: textOf(this.columns.itemType),
-      sizeLabel: textOf(this.columns.size),
+      itemType: textOf(this.#columns.itemType),
+      sizeLabel: textOf(this.#columns.size),
       updatedAt: raw.updated_at ?? null,
       columns,
     });
