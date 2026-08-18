@@ -215,7 +215,15 @@ export function analyseGaps(
     return {
       dimension,
       satisfied,
-      weight: Math.round(DIMENSION_WEIGHTS[dimension] * scale * 1000) / 1000,
+      /*
+       * Not rounded here.
+       *
+       * Rounding each renormalised weight to three places left a perfectly
+       * complete brief scoring 0.999 instead of 1.0 — harmless, but it is the
+       * sort of drift that later gets compared against a threshold. The final
+       * confidence is rounded once, below, at the precision it is stored in.
+       */
+      weight: DIMENSION_WEIGHTS[dimension] * scale,
       discoverableFrom: satisfied ? [] : discoverableFrom(dimension, context),
       investigatedFrom,
       question: (generalWork ? GENERAL_DIMENSION_QUESTIONS[dimension] : undefined) ?? DIMENSION_QUESTIONS[dimension],

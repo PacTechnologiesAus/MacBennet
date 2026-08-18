@@ -1,4 +1,4 @@
-import { desc, eq, sql } from 'drizzle-orm';
+import { desc, eq, inArray, sql } from 'drizzle-orm';
 import type { CreateTaskRequest, TaskDto, TaskKind, TaskOrigin, UpdateTaskRequest } from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
 import { handoffBriefs, projects, tasks } from '../db/schema.js';
@@ -43,15 +43,26 @@ async function latestBriefConfidences(
   const out = new Map<string, number | null>();
   if (taskIds.length === 0) return out;
 
-  const rows = await handle.execute<{ task_id: string; confidence: string | null }>(sql`
-    SELECT DISTINCT ON (task_id) task_id, confidence
-    FROM handoff_briefs
-    WHERE task_id IN (${sql.join(taskIds.map((id) => sql`${id}::uuid`), sql`, `)})
-    ORDER BY task_id, version DESC
-  `);
+  /*
+   * Drizzle's query builder rather than raw SQL.
+   *
+   * The first version of this used `handle.execute(sql\`SELECT DISTINCT ON …\`)`
+   * and iterated the result directly, which throws: node-postgres returns a
+   * result OBJECT with a `.rows` array, not an iterable. It slipped through
+   * because every test either had no tasks — the early return above — or fetched
+   * one task by id rather than listing.
+   *
+   * Ordering by (taskId, version) and keeping the first row per task gives the
+   * same answer as DISTINCT ON, in one query, with the types checked.
+   */
+  const rows = await handle
+    .select({ taskId: handoffBriefs.taskId, version: handoffBriefs.version, confidence: handoffBriefs.confidence })
+    .from(handoffBriefs)
+    .where(inArray(handoffBriefs.taskId, taskIds))
+    .orderBy(handoffBriefs.taskId, desc(handoffBriefs.version));
 
-  for (const row of rows as unknown as Array<{ task_id: string; confidence: string | null }>) {
-    out.set(row.task_id, parseConfidence(row.confidence));
+  for (const row of rows) {
+    if (!out.has(row.taskId)) out.set(row.taskId, parseConfidence(row.confidence));
   }
   return out;
 }

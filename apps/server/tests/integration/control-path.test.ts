@@ -93,6 +93,31 @@ describe('tasks', () => {
     expect(events.map((e) => e.eventType)).toContain('task.created');
   });
 
+  it('lists tasks with each one’s derived understanding confidence', async () => {
+    /*
+     * The LIST path, with tasks actually in it.
+     *
+     * A regression test with a specific history: the batched confidence lookup
+     * was written against a raw result object and threw on every list request,
+     * and no existing test caught it because they all either had an empty task
+     * list or fetched a single task by id.
+     */
+    await api().post('/api/tasks', { projectId, title: 'One', priority: 'normal' });
+    await api().post('/api/tasks', { projectId, title: 'Two', priority: 'high' });
+
+    const response = await api().get('/api/tasks');
+    expect(response.statusCode).toBe(200);
+
+    const tasks = response.json().tasks;
+    expect(tasks.length).toBeGreaterThanOrEqual(2);
+    for (const task of tasks) {
+      expect(task).toHaveProperty('taskKind');
+      expect(task).toHaveProperty('origin');
+      // No discovery has happened, so Mac has no understanding confidence.
+      expect(task.understandingConfidence).toBeNull();
+    }
+  });
+
   it('refuses to create a task on an inactive project', async () => {
     await api().patch(`/api/projects/${projectId}`, { isActive: false });
     const response = await api().post('/api/tasks', { projectId, title: 'Should be refused' });

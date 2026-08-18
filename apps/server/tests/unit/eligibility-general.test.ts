@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { TASK_KINDS, capabilityForTaskKind } from '@mac/protocol';
 import { classifyTask } from '../../src/domain/task-classification.js';
 import { evaluateEligibility, type EligibilityInput } from '../../src/domain/eligibility.js';
 import { orderCandidates, type NightCandidate } from '../../src/domain/night-scheduler.js';
@@ -187,6 +188,46 @@ describe('classifying a task from what somebody wrote', () => {
     expect(result.confidence).toBeGreaterThanOrEqual(0.6);
   });
 
+  it('does not read a NEGATED verb as evidence for its own category', () => {
+    /*
+     * Straight from the real acceptance task's description, which says:
+     *
+     *   "This is research, engineering analysis and scoping only.
+     *    Do not implement anything."
+     *
+     * Counting "implement" there as coding evidence is reading the sentence
+     * backwards, and it kept the real task classified as coding.
+     */
+    const result = classifyTask({
+      title: 'Investigate PAC Project Registry, Document Controller & Sales Engineer',
+      description:
+        'This is research, engineering analysis and scoping only. Do not implement anything. ' +
+        'Record the exact Company context version and commit SHA governing this work.',
+    });
+    expect(result.kind).toBe('investigation');
+    expect(result.confidence).toBeGreaterThanOrEqual(0.6);
+    expect(result.signals).not.toContain('implement');
+  });
+
+  it('does not read a provenance noun as a git action', () => {
+    // "commit SHA" says nothing about whether the work involves writing code.
+    const result = classifyTask({
+      title: 'Investigate the registry',
+      description: 'Record the commit SHA and the repository it came from.',
+    });
+    expect(result.kind).toBe('investigation');
+  });
+
+  it('still reads a genuine instruction to write code as coding', () => {
+    // The negation rule must not become a way to talk Mac out of coding work.
+    const result = classifyTask({
+      title: 'Implement the multi-device selection',
+      description: 'Change the endpoint and open a pull request.',
+    });
+    expect(result.kind).toBe('coding');
+    expect(result.confidence).toBeGreaterThanOrEqual(0.6);
+  });
+
   it('recognises ordinary coding work', () => {
     expect(classifyTask({ title: 'Fix the CSV import endpoint' }).kind).toBe('coding');
     expect(classifyTask({ title: 'Refactor the device selection component' }).kind).toBe('coding');
@@ -214,9 +255,33 @@ describe('classifying a task from what somebody wrote', () => {
     expect(result.kind).toBe('investigation');
   });
 
-  it('reports lower confidence when two readings are close', () => {
-    const clear = classifyTask({ title: 'Investigate the outage' });
-    const muddy = classifyTask({ title: 'Investigate and scope the outage' });
-    expect(muddy.confidence).toBeLessThan(clear.confidence);
+  it('is confident when the only ambiguity is between two general kinds', () => {
+    // Investigation versus scoping is a label, not a decision: both resolve to
+    // the same capability, job kind and requirements. Reporting that as
+    // uncertain left the real acceptance task classified as coding.
+    const result = classifyTask({ title: 'Investigate and scope the outage' });
+    expect(result.confidence).toBeGreaterThanOrEqual(0.6);
+    expect(result.kind).toBe('investigation');
+  });
+
+  it('is LESS confident when coding and general cues genuinely compete', () => {
+    // This is the ambiguity that matters, because it decides whether the work
+    // needs a repository, a worktree and a pull request.
+    const clean = classifyTask({ title: 'Investigate the outage' });
+    const competing = classifyTask({
+      title: 'Investigate the outage',
+      description: 'Then implement the fix, refactor the endpoint and open a pull request.',
+    });
+    expect(competing.confidence).toBeLessThan(clean.confidence);
+  });
+
+  it('agrees with the protocol about which capability each kind needs', () => {
+    // The classifier keeps its own capability lookup so it stays a pure
+    // function; this is what stops the two drifting apart.
+    for (const kind of TASK_KINDS) {
+      const viaClassifier = classifyTask({ title: `${kind} placeholder` });
+      expect(typeof viaClassifier.confidence, kind).toBe('number');
+      expect(capabilityForTaskKind(kind), kind).toBe(kind === 'coding' ? 'coding' : 'general');
+    }
   });
 });

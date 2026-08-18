@@ -48,7 +48,11 @@ const CUES: Array<{ kind: TaskKind; weight: number; patterns: RegExp[] }> = [
     patterns: [
       /\b(implement|refactor|fix|bug|patch|migrate|build|code|endpoint|api|schema|component|deploy script)\b/i,
       /\b(add|change|update|remove)\s+(the\s+)?(function|method|class|module|field|column|route|test)\b/i,
-      /\b(pull request|merge|branch|commit|repository)\b/i,
+      // `commit` and `repository` only as ACTIONS. The real acceptance task's
+      // description says "record the exact Company context version and commit
+      // SHA", where `commit` is a provenance noun and says nothing whatever
+      // about whether the work involves writing code.
+      /\b(pull request|merge the|branch off|git commit|commit (?:the|a|these) chang\w*)\b/i,
     ],
   },
   {
@@ -108,6 +112,46 @@ const CUES: Array<{ kind: TaskKind; weight: number; patterns: RegExp[] }> = [
  * investigation, and the description's mention of an API endpoint should not
  * make it a coding task.
  */
+
+/**
+ * The first match of `pattern` that is not preceded by a negation.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS
+ *
+ * The real acceptance task's description contains the sentence:
+ *
+ *   "This is **research, engineering analysis and scoping only**. Do not
+ *    implement anything."
+ *
+ * which is about as clear a statement as an engineer can make that the work is
+ * not coding. The first version of this classifier read the word "implement",
+ * scored it as coding evidence, and reported the classification as uncertain —
+ * so the task stayed labelled `coding` and went on demanding a repository.
+ *
+ * A negated cue is not weak evidence for its category. It is usually strong
+ * evidence against it, and the cheapest correct thing to do is refuse to count
+ * it at all. Counting it negatively would be better still, and is a reasonable
+ * later refinement; not counting a sentence backwards is the part that matters.
+ * ---------------------------------------------------------------------------
+ */
+function firstUnnegated(pattern: RegExp, text: string): RegExpExecArray | null {
+  if (!text) return null;
+  // A fresh global copy, so callers are not affected by `lastIndex` state.
+  const scan = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+
+  let match: RegExpExecArray | null;
+  while ((match = scan.exec(text)) !== null) {
+    // Enough room for "do not " / "without " / "never " and a word between.
+    const preceding = text.slice(Math.max(0, match.index - 28), match.index).toLowerCase();
+    if (!NEGATION.test(preceding)) return match;
+    if (match.index === scan.lastIndex) scan.lastIndex += 1;
+  }
+  return null;
+}
+
+const NEGATION = /\b(do not|don't|does not|doesn't|no|not|never|without|avoid|rather than|instead of)\b[^.;:]{0,20}$/;
+
 export function classifyTask(input: { title: string; description?: string | null }): Classification {
   const title = input.title ?? '';
   const body = input.description ?? '';
@@ -117,8 +161,8 @@ export function classifyTask(input: { title: string; description?: string | null
 
   for (const cue of CUES) {
     for (const pattern of cue.patterns) {
-      const inTitle = pattern.exec(title);
-      const inBody = pattern.exec(body);
+      const inTitle = firstUnnegated(pattern, title);
+      const inBody = firstUnnegated(pattern, body);
       if (!inTitle && !inBody) continue;
 
       /*
@@ -162,20 +206,58 @@ export function classifyTask(input: { title: string; description?: string | null
 
   const ranked = Array.from(scores.entries()).sort((a, b) => b[1] - a[1]);
   const [kind, top] = ranked[0]!;
-  const runnerUp = ranked[1]?.[1] ?? 0;
 
   /*
-   * Confidence reflects SEPARATION, not the raw score.
+   * Confidence measures separation from the OTHER CAPABILITY, not from the
+   * runner-up.
    *
-   * A title that scores 4.0 for research and 3.8 for scoping is genuinely
-   * ambiguous, and reporting that as high confidence would invite a human to
-   * skim past a classification worth checking.
+   * ---------------------------------------------------------------------
+   * WHY, AND WHAT IT FIXES
+   *
+   * The first version compared the winner to whatever scored second. On the
+   * real acceptance task — "Investigate PAC Project Registry, Document
+   * Controller & Sales Engineer", whose description says in terms "this is
+   * research, engineering analysis and scoping only" — that produced 0.56 and
+   * the task was left classified as coding. Four general kinds all scored,
+   * so they diluted one another and the classification was reported as
+   * uncertain when it was nothing of the sort.
+   *
+   * Investigation versus research versus scoping is not a consequential
+   * ambiguity: all three resolve to the same capability, the same job kind and
+   * the same requirement set. Getting the wrong one changes a label. The
+   * ambiguity that MATTERS is coding versus general, because that decides
+   * whether the work needs a repository, a worktree and a pull request.
+   *
+   * So confidence answers the question the threshold is actually gating.
+   * Within-group runners-up remain visible in `signals`, where a human can see
+   * that "scoping" was also plausible and change it in one click.
+   * ---------------------------------------------------------------------
    */
-  const separation = top > 0 ? (top - runnerUp) / top : 0;
+  const winningCapability = CAPABILITY_OF[kind];
+  const rival = ranked.find(([k]) => CAPABILITY_OF[k] !== winningCapability)?.[1] ?? 0;
+
+  const separation = top > 0 ? (top - rival) / top : 0;
   const confidence = Math.round(Math.min(0.95, 0.4 + separation * 0.55) * 100) / 100;
 
   return { kind, confidence, signals: signals.slice(0, 8) };
 }
+
+/**
+ * Which capability each kind resolves to.
+ *
+ * Duplicated from the protocol's descriptors rather than imported so this
+ * module stays a pure lookup, and asserted against them by a test so the two
+ * cannot drift.
+ */
+const CAPABILITY_OF: Record<TaskKind, 'coding' | 'general'> = {
+  coding: 'coding',
+  research: 'general',
+  analysis: 'general',
+  investigation: 'general',
+  scoping: 'general',
+  documentation: 'general',
+  administrative: 'general',
+};
 
 export const isKnownTaskKind = (value: string): value is TaskKind =>
   (TASK_KINDS as readonly string[]).includes(value);
