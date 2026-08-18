@@ -4,6 +4,7 @@ import {
   handoffBriefContentSchema,
   isSafeBranchName,
   renderBriefMarkdown,
+  shortSha,
   type CodingAssignment,
   type CodingRunDetailDto,
   type CreateCodingRunRequest,
@@ -29,6 +30,10 @@ import {
 import { getPullRequest, getReview } from './reviews.js';
 import { usageSummaryForRun } from './usage.js';
 import { record, type Actor } from './audit.js';
+import { contextRefFor, requireActiveRevision, toContextRef } from './company-context/service.js';
+import { revisionById } from './company-context/loader.js';
+import { renderCompanyContextMarkdown, selectCompanyContext } from './company-context/selection.js';
+import { recordContextBinding } from './company-context/bindings.js';
 
 /**
  * Creating and describing coding runs (Sprint 2 §3).
@@ -44,6 +49,9 @@ import { record, type Actor } from './audit.js';
  */
 
 export async function createCodingRun(input: CreateCodingRunRequest, actor: Actor): Promise<RunDto> {
+  // Sprint 3.2: resolved before the transaction; see the note in runs.ts.
+  const companyContext = await requireActiveRevision('coding_run.create');
+
   return db.transaction(async (tx) => {
     const settings = await getSettings(tx);
     if (!settings.codingAgentEnabled) {
@@ -104,6 +112,7 @@ export async function createCodingRun(input: CreateCodingRunRequest, actor: Acto
         executionMode: input.executionMode,
         repositoryId: input.repositoryId,
         handoffBriefId: input.briefId,
+        companyContextRevisionId: companyContext?.id ?? null,
         scopeKind: advice.scopeKind,
         // In the limited band this records what Mac proposes to actually do, so
         // the human approves a scope rather than a vague intention.
@@ -112,6 +121,14 @@ export async function createCodingRun(input: CreateCodingRunRequest, actor: Acto
       })
       .returning();
     if (!row) throw new AppError(500, 'RUN_CREATE_FAILED', 'Could not create the coding run.');
+
+    await recordContextBinding(tx, {
+      actor,
+      runId: row.id,
+      taskId: row.taskId,
+      projectId: task.projectId,
+      revision: companyContext,
+    });
 
     await record(tx, {
       actor,
@@ -130,7 +147,11 @@ export async function createCodingRun(input: CreateCodingRunRequest, actor: Acto
       },
     });
 
-    return toRunDto(row, { taskTitle: task.title, projectId: task.projectId });
+    return toRunDto(row, {
+      taskTitle: task.title,
+      projectId: task.projectId,
+      companyContext: companyContext ? toContextRef(companyContext) : null,
+    });
   });
 }
 
@@ -185,6 +206,41 @@ export async function buildCodingAssignment(tx: DbHandle, run: RunRow): Promise<
 
   const confidence = parseConfidence(run.confidence);
 
+  /*
+   * Sprint 3.2: the company context block the coding agent is given.
+   *
+   * SELECTED, not the whole repository (Sprint 3.2 section 14). The core block -
+   * AUTHORITY.md entire, Mac's role, PAC identity - is always present; the rest
+   * is chosen against this brief's own text, so a CSS fix does not arrive
+   * carrying PAC's warranty policy while an architecture task does arrive
+   * carrying the systems map.
+   *
+   * A selection failure does NOT fail the dispatch here: the run was already
+   * bound and validated at creation, and refusing at assignment time would strand
+   * an approved run. It degrades to the brief without the block, and the run's
+   * binding still records which revision governed it.
+   */
+  const companyRevision = run.companyContextRevisionId
+    ? await revisionById(run.companyContextRevisionId, tx)
+    : null;
+
+  let companyContextMarkdown: string | null = null;
+  if (companyRevision && companyRevision.validationState === 'valid') {
+    const selection = await selectCompanyContext(companyRevision, {
+      text: [
+        content.title,
+        content.userObjective,
+        content.desiredBehaviour,
+        content.relevantArchitecture,
+        ...content.constraints,
+        ...content.likelyAffectedComponents,
+      ]
+        .filter(Boolean)
+        .join(' '),
+    }).catch(() => null);
+    if (selection) companyContextMarkdown = renderCompanyContextMarkdown(selection);
+  }
+
   return {
     repositoryId: repository.id,
     repositoryName: repository.name,
@@ -196,7 +252,13 @@ export async function buildCodingAssignment(tx: DbHandle, run: RunRow): Promise<
     provider: params.provider ?? 'claude_code',
     task: {
       brief: content,
-      briefMarkdown: renderBriefMarkdown(content, { confidence: confidence ?? 0 }),
+      briefMarkdown: renderBriefMarkdown(content, {
+        confidence: confidence ?? 0,
+        companyContext: companyRevision
+          ? { shortSha: shortSha(companyRevision.commitSha), contextVersion: companyRevision.contextVersion }
+          : null,
+        companyContextMarkdown,
+      }),
       testCommand: Array.isArray(repository.testCommand) ? (repository.testCommand as string[]) : [],
       buildCommand: Array.isArray(repository.buildCommand) ? (repository.buildCommand as string[]) : [],
       limits: {
@@ -250,7 +312,11 @@ export async function getCodingRunDetail(runId: string): Promise<CodingRunDetail
     : null;
 
   return {
-    run: toRunDto(row, { taskTitle: task?.title ?? '', projectId: task?.projectId ?? '' }),
+    run: toRunDto(row, {
+      taskTitle: task?.title ?? '',
+      projectId: task?.projectId ?? '',
+      companyContext: await contextRefFor(row.companyContextRevisionId),
+    }),
     repository,
     worktree,
     brief,

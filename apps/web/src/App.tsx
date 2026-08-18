@@ -18,6 +18,7 @@ import { Reports } from './pages/Reports.js';
 import { NightShift } from './pages/NightShift.js';
 import { Monday } from './pages/Monday.js';
 import { Security } from './pages/Security.js';
+import { CompanyContext, CompanyContextWarning } from './pages/CompanyContext.js';
 
 export function App() {
   const [user, setUser] = useState<CurrentUser | null>(null);
@@ -55,7 +56,7 @@ function Shell({ user, onSignedOut }: { user: CurrentUser; onSignedOut: () => vo
       <aside className="sidebar">
         <div className="brand">
           <strong>Mac Bennett</strong>
-          <span>Automation Engineer · Sprint 3</span>
+          <span>Automation Engineer · Sprint 3.2</span>
         </div>
         <nav className="nav">
           <NavLink to="/" end>Dashboard</NavLink>
@@ -67,10 +68,17 @@ function Shell({ user, onSignedOut }: { user: CurrentUser; onSignedOut: () => vo
           <NavLink to="/reports">Reports</NavLink>
           <NavLink to="/monday">monday.com</NavLink>
           <NavLink to="/workers">Workers</NavLink>
+          <NavLink to="/company-context">PAC context</NavLink>
           <NavLink to="/security">Security</NavLink>
           <NavLink to="/audit">Audit</NavLink>
           <NavLink to="/settings">Settings</NavLink>
         </nav>
+        {/*
+          Sprint 3.2: an operator must not have to open a page to learn that Mac
+          is running on week-old cached company policy.
+        */}
+        <CompanyContextWarning />
+
         <div className="sidebar-footer">
           <div>{user.name}</div>
           <div className="dim">{user.role}</div>
@@ -86,6 +94,7 @@ function Shell({ user, onSignedOut }: { user: CurrentUser; onSignedOut: () => vo
           <Route path="/night-shift" element={<NightShift user={user} />} />
           <Route path="/monday" element={<Monday user={user} />} />
           <Route path="/security" element={<Security user={user} />} />
+          <Route path="/company-context" element={<CompanyContext user={user} />} />
           <Route path="/discovery" element={<Discovery user={user} />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/projects" element={<Projects user={user} />} />

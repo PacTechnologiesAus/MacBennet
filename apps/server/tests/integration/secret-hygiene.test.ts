@@ -5,13 +5,22 @@ import { DEFAULT_MONDAY_STATUS_LABELS } from '@mac/protocol';
 import { asUser, closePool, createAndLogin, resetDatabase, startTestApp, type Session } from '../helpers/harness.js';
 import { makeProject } from '../helpers/fixtures.js';
 import { db } from '../../src/db/client.js';
-import { mondayWrites } from '../../src/db/schema.js';
+import { mondayWrites, settings } from '../../src/db/schema.js';
 import { queryAuditEvents } from '../../src/services/audit-query.js';
 import { MondayGraphqlClient } from '../../src/services/monday/graphql.js';
 import { setMondayClient } from '../../src/services/monday/provider.js';
 import { GraphMailProvider, setMailProvider } from '../../src/services/mail/provider.js';
 import { deliverPendingMondayWrites } from '../../src/services/monday/outbox.js';
 import { boardByMondayId } from '../../src/services/monday/boards.js';
+import os from 'node:os';
+import path from 'node:path';
+import { REFUSED_SANDBOX_ENV, RefusedSandboxEnv, resolveSandboxAgentEnv } from '@mac/worker/config';
+import { GitCompanyContextProvider } from '../../src/services/company-context/git-provider.js';
+import { setCompanyContextProvider } from '../../src/services/company-context/provider.js';
+import {
+  refreshCompanyContext,
+  resetCompanyContextCache,
+} from '../../src/services/company-context/service.js';
 
 /**
  * Secrets stay where they were put (Sprint 3.1 §14).
@@ -30,6 +39,8 @@ import { boardByMondayId } from '../../src/services/monday/boards.js';
 
 const MONDAY_TOKEN = 'sentinel-monday-token-fb0c1d2e3f4a5b6c7d8e9f00';
 const GRAPH_SECRET = 'sentinel-graph-secret-a1b2c3d4e5f60718293a4b5c';
+/** Sprint 3.2: the PAC company-context credential. */
+const COMPANY_TOKEN = 'sentinel-company-token-9f8e7d6c5b4a3928170615ff';
 
 let app: FastifyInstance;
 let close: () => Promise<void>;
@@ -205,5 +216,77 @@ describe('no credential leaves the control plane over the API', () => {
     for (const forbidden of ['token', 'secret', 'password', 'credential']) {
       expect(body.toLowerCase(), `the board mapping exposed "${forbidden}"`).not.toContain(forbidden);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sprint 3.2 — the company context credential
+// ---------------------------------------------------------------------------
+
+describe('the PAC company context credential', () => {
+  /**
+   * A provider pointed at an unreachable host, holding a sentinel token.
+   *
+   * The failure is the interesting part: a fetch that cannot authenticate is
+   * exactly when git is most likely to echo a URL, a header or a prompt back on
+   * stderr, and that text goes on to be persisted, audited and shown to an
+   * operator.
+   */
+  const failingProvider = () =>
+    new GitCompanyContextProvider({
+      repositoryUrl: `https://x-access-token:${COMPANY_TOKEN}@company.invalid/PacTechnologiesAus/Company.git`,
+      ref: 'main',
+      cacheDir: path.join(os.tmpdir(), `mac-hygiene-${Math.floor(Math.random() * 1e9)}`),
+      token: COMPANY_TOKEN,
+      timeoutMs: 10_000,
+    });
+
+  it('is absent from the provider\'s own readable fields', () => {
+    const provider = failingProvider();
+
+    expect(JSON.stringify(provider)).not.toContain(COMPANY_TOKEN);
+    expect(JSON.stringify({ ...provider })).not.toContain(COMPANY_TOKEN);
+    expect(JSON.stringify(Object.entries(provider))).not.toContain(COMPANY_TOKEN);
+    expect(`${JSON.stringify({ provider, note: 'debug' })}`).not.toContain(COMPANY_TOKEN);
+    // Even the description, which IS persisted on every revision row.
+    expect(JSON.stringify(provider.describe())).not.toContain(COMPANY_TOKEN);
+  });
+
+  it('never reaches the audit trail, the status endpoint or an API error when a fetch fails', async () => {
+    await db.update(settings).set({ companyContextEnabled: true }).where(eq(settings.id, 1));
+    setCompanyContextProvider(failingProvider());
+
+    const result = await refreshCompanyContext({ reason: 'hygiene' });
+    expect(result.status).toBe('unavailable');
+
+    const events = await queryAuditEvents({ limit: 200, offset: 0 });
+    expect(JSON.stringify(events)).not.toContain(COMPANY_TOKEN);
+
+    const status = await asUser(app, admin).get('/api/company-context/status');
+    expect(status.body).not.toContain(COMPANY_TOKEN);
+    // The failure is still REPORTED — redaction must not mean silence.
+    expect(status.json().status.lastError).not.toBeNull();
+
+    const refresh = await asUser(app, admin).post('/api/company-context/refresh');
+    expect(refresh.body).not.toContain(COMPANY_TOKEN);
+
+    setCompanyContextProvider(null);
+    resetCompanyContextCache();
+  });
+
+  it('is refused by the worker if an administrator tries to forward it into a sandbox', () => {
+    // Prefix-matched, so a future MAC_COMPANY_ANYTHING is refused too.
+    expect(() => resolveSandboxAgentEnv(['MAC_COMPANY_CONTEXT_TOKEN'], { MAC_COMPANY_CONTEXT_TOKEN: COMPANY_TOKEN })).toThrow(
+      RefusedSandboxEnv,
+    );
+    expect(() => resolveSandboxAgentEnv(['MAC_COMPANY_FUTURE_THING'], { MAC_COMPANY_FUTURE_THING: 'x' })).toThrow(
+      RefusedSandboxEnv,
+    );
+  });
+
+  it('is not something the worker configuration reads at all', () => {
+    // Belt and braces: the worker has no company-context code, so there is no
+    // second place the credential could be picked up.
+    expect(REFUSED_SANDBOX_ENV).toContain('MAC_COMPANY_');
   });
 });

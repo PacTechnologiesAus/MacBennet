@@ -39,6 +39,8 @@ import { nextCutoffAfter } from '../domain/overnight.js';
 import { getSettings, toCutoffConfig, type Settings } from './settings.js';
 import { recordedSpendForWindow } from './budget.js';
 import { record, SYSTEM_ACTOR, type Actor } from './audit.js';
+import { requireActiveRevision } from './company-context/service.js';
+import { recordContextBinding } from './company-context/bindings.js';
 import { isWorkerLive } from './workers.js';
 import { transition } from './runs.js';
 import { appendSystemLog } from './logs.js';
@@ -544,6 +546,20 @@ async function startSelectedTask(
 ): Promise<string | null> {
   const taskId = context.taskId!;
 
+  /*
+   * Sprint 3.2: the company context this night's run is governed by.
+   *
+   * Checked before EVERY task the shift starts, not once per shift, because a
+   * PAC policy change at 03:00 should reach the 03:30 task. What it must never
+   * do is reach a task already running - each run pins its own revision, and
+   * the database refuses to move a pin once set.
+   *
+   * A refusal here means the whole task is skipped rather than run ungrounded.
+   */
+  const companyContext = await requireActiveRevision('night_shift.task_start').catch(() => {
+    throw new Error('COMPANY_CONTEXT_UNAVAILABLE');
+  });
+
   return db.transaction(async (tx) => {
     const settings = await getSettings(tx);
 
@@ -592,9 +608,18 @@ async function startSelectedTask(
         mondayItemId: context.candidate.mondayItemId,
         selectedBy: 'night_shift',
         overnightDeadlineAt: shift.cutoffAt,
+        companyContextRevisionId: companyContext?.id ?? null,
       })
       .returning();
     if (!run) return null;
+
+    await recordContextBinding(tx, {
+      actor: SYSTEM_ACTOR,
+      runId: run.id,
+      taskId,
+      projectId: task.projectId,
+      revision: companyContext,
+    });
 
     await tx.insert(approvals).values({
       runId: run.id,

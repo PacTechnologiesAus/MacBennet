@@ -26,6 +26,8 @@ import { clientForBoard } from './monday/provider.js';
 import { mondayItemForTask } from './monday/outbox.js';
 import { record, type Actor } from './audit.js';
 import { resolveAnswerWithModel } from './model/resolvers.js';
+import { revisionById } from './company-context/loader.js';
+import { selectCompanyContext, selectionAsEvidence } from './company-context/selection.js';
 
 /**
  * Gathering the six source classes, and recording what was checked (Sprint 3 §6).
@@ -41,6 +43,16 @@ export interface InvestigationContext {
   projectId: string;
   runId?: string | null;
   discoverySessionId?: string | null;
+  /**
+   * Sprint 3.2: the company context revision this work is BOUND to.
+   *
+   * Passed in rather than looked up, and passed from the run rather than from
+   * whatever is currently active — a commit that lands mid-run must not appear
+   * to have governed a decision made before it existed (Sprint 3.2 section 9.3).
+   */
+  companyContextRevisionId?: string | null;
+  /** Free text describing the work, used to select relevant company sections. */
+  companyContextQuery?: string | undefined;
 }
 
 /**
@@ -152,7 +164,37 @@ export async function gatherSources(
       })),
     previousBriefs: previousBriefSources,
     mondayContext: await gatherMondayContext(context.taskId, handle),
+    companyContext: await gatherCompanyContext(context),
   };
+}
+
+/**
+ * The selected PAC company context for this work.
+ *
+ * Returns an empty list rather than throwing when company context is not part of
+ * this deployment or the revision is unreadable. That produces exactly the shape
+ * every other absent source already produces - `consulted: false` - which is
+ * honest, and which is why turning this feature off changes no existing
+ * behaviour.
+ */
+async function gatherCompanyContext(
+  context: InvestigationContext,
+): Promise<Array<{ ref: string; text: string }>> {
+  if (!context.companyContextRevisionId) return [];
+
+  try {
+    const revision = await revisionById(context.companyContextRevisionId);
+    if (!revision || revision.validationState !== 'valid') return [];
+
+    const selection = await selectCompanyContext(revision, {
+      text: context.companyContextQuery ?? '',
+    });
+    return selectionAsEvidence(selection);
+  } catch {
+    // A mirror that can no longer produce the documents contributes nothing
+    // rather than failing the investigation; `checked` records the absence.
+    return [];
+  }
 }
 
 /**

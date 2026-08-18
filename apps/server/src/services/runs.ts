@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import type {
   ApprovalDto,
+  CompanyContextRef,
   CreateRunRequest,
   RunAssignment,
   RunDto,
@@ -8,9 +9,18 @@ import type {
   RunStatus,
   StopReason,
 } from '@mac/protocol';
-import { PRIORITY_RANK, isTerminalRunStatus, requiresApprovedRepository } from '@mac/protocol';
+import { PRIORITY_RANK, isTerminalRunStatus, requiresApprovedRepository, shortSha } from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
-import { approvals, projects, repositories, runs, tasks, users, workers } from '../db/schema.js';
+import {
+  approvals,
+  companyContextRevisions,
+  projects,
+  repositories,
+  runs,
+  tasks,
+  users,
+  workers,
+} from '../db/schema.js';
 import type { RunRow } from '../db/schema.js';
 import { AppError, GuardrailError } from '../http/errors.js';
 import { assertTransition, IMMEDIATELY_CANCELLABLE, REQUIRES_WORKER_CANCEL } from '../domain/run-lifecycle.js';
@@ -20,6 +30,8 @@ import { nextCutoffAfter } from '../domain/overnight.js';
 import { getSettings, toConfidencePolicy, toCutoffConfig } from './settings.js';
 import { recordedSpendForWindow } from './budget.js';
 import { record, recordRejection, recordRunTransition, SYSTEM_ACTOR, type Actor } from './audit.js';
+import { requireActiveRevision, toContextRef } from './company-context/service.js';
+import { recordContextBinding } from './company-context/bindings.js';
 import { requireTaskWithProject } from './tasks.js';
 import { appendSystemLog } from './logs.js';
 
@@ -38,7 +50,20 @@ const LEASE_SECONDS = 120;
 
 export const toRunDto = (
   row: RunRow,
-  extra: { taskTitle?: string; projectId?: string; projectName?: string; workerName?: string | null } = {},
+  extra: {
+    taskTitle?: string;
+    projectId?: string;
+    projectName?: string;
+    workerName?: string | null;
+    /**
+     * Sprint 3.2: resolved by the caller, which has the row or the join.
+     *
+     * Supplied rather than looked up here so this mapper stays synchronous and
+     * so a missing binding is visibly a missing binding, not a lookup that
+     * quietly returned nothing.
+     */
+    companyContext?: CompanyContextRef | null;
+  } = {},
 ): RunDto => ({
   id: row.id,
   taskId: row.taskId,
@@ -61,6 +86,7 @@ export const toRunDto = (
   stopReason: (row.stopReason as StopReason | null) ?? null,
   startedAt: row.startedAt?.toISOString() ?? null,
   completedAt: row.completedAt?.toISOString() ?? null,
+  companyContext: extra.companyContext ?? null,
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
 });
@@ -71,6 +97,11 @@ const runSelect = {
   projectId: projects.id,
   projectName: projects.name,
   workerName: workers.name,
+  // Sprint 3.2: joined rather than looked up per row, so listing a hundred runs
+  // costs one query and every row reports the revision it is actually pinned to.
+  companyCommitSha: companyContextRevisions.commitSha,
+  companyContextVersion: companyContextRevisions.contextVersion,
+  companyRef: companyContextRevisions.ref,
 };
 
 const runQuery = (handle: DbHandle = db) =>
@@ -79,7 +110,8 @@ const runQuery = (handle: DbHandle = db) =>
     .from(runs)
     .innerJoin(tasks, eq(tasks.id, runs.taskId))
     .innerJoin(projects, eq(projects.id, tasks.projectId))
-    .leftJoin(workers, eq(workers.id, runs.workerId));
+    .leftJoin(workers, eq(workers.id, runs.workerId))
+    .leftJoin(companyContextRevisions, eq(companyContextRevisions.id, runs.companyContextRevisionId));
 
 const mapRunRow = (r: {
   run: RunRow;
@@ -87,7 +119,26 @@ const mapRunRow = (r: {
   projectId: string;
   projectName: string;
   workerName: string | null;
-}) => toRunDto(r.run, { taskTitle: r.taskTitle, projectId: r.projectId, projectName: r.projectName, workerName: r.workerName });
+  companyCommitSha: string | null;
+  companyContextVersion: string | null;
+  companyRef: string | null;
+}) =>
+  toRunDto(r.run, {
+    taskTitle: r.taskTitle,
+    projectId: r.projectId,
+    projectName: r.projectName,
+    workerName: r.workerName,
+    companyContext:
+      r.run.companyContextRevisionId && r.companyCommitSha
+        ? {
+            revisionId: r.run.companyContextRevisionId,
+            commitSha: r.companyCommitSha,
+            shortSha: shortSha(r.companyCommitSha),
+            contextVersion: r.companyContextVersion ?? '',
+            ref: r.companyRef ?? '',
+          }
+        : null,
+  });
 
 // ---------------------------------------------------------------------------
 // Core transition primitive
@@ -214,6 +265,17 @@ export async function createRun(input: CreateRunRequest, actor: Actor): Promise<
   const job = checkJobAllowed(input.jobKind, input.jobParams);
   if (!job.ok) throw new GuardrailError(job.code, job.message);
 
+  /*
+   * Sprint 3.2: the PAC company context this run will be governed by.
+   *
+   * Resolved BEFORE the transaction opens, because it may fetch from GitHub and
+   * a network round trip inside an open transaction holds a connection for no
+   * reason. Returns null when company context is not part of this deployment,
+   * and throws when it is required but unavailable - a run must never look
+   * grounded in PAC policy that was not actually loaded.
+   */
+  const companyContext = await requireActiveRevision('run.create');
+
   return db.transaction(async (tx) => {
     const { task, projectId, projectName, projectActive } = await requireTaskWithProject(tx, input.taskId);
     if (!projectActive) {
@@ -230,10 +292,13 @@ export async function createRun(input: CreateRunRequest, actor: Actor): Promise<
         jobKind: job.job.kind,
         jobParams: job.job.params as Record<string, unknown>,
         executionMode: input.executionMode,
+        companyContextRevisionId: companyContext?.id ?? null,
         createdBy: actor.id,
       })
       .returning();
     if (!row) throw new AppError(500, 'RUN_CREATE_FAILED', 'Could not create run.');
+
+    await recordContextBinding(tx, { actor, runId: row.id, taskId: row.taskId, projectId, revision: companyContext });
 
     await record(tx, {
       actor,
@@ -247,7 +312,12 @@ export async function createRun(input: CreateRunRequest, actor: Actor): Promise<
       },
     });
 
-    return toRunDto(row, { taskTitle: task.title, projectId, projectName });
+    return toRunDto(row, {
+      taskTitle: task.title,
+      projectId,
+      projectName,
+      companyContext: companyContext ? toContextRef(companyContext) : null,
+    });
   });
 }
 

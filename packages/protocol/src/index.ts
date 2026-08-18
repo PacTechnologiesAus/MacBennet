@@ -11,5 +11,7 @@ export * from './monday.js';
 export * from './night.js';
 export * from './mail.js';
 export * from './model.js';
+// --- Sprint 3.2 ---
+export * from './company-context.js';
 export * from './worker-protocol.js';
 export * from './api.js';

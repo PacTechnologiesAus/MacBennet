@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { BriefDto, CurrentUser, DiscoverySessionDto, ProjectDto, RepositoryDto } from '@mac/protocol';
 import { api, ApiError } from '../api.js';
+import { CompanyContextBadge } from './CompanyContext.js';
 import { Badge, humanise } from '../components/ui.js';
 
 /**
@@ -131,7 +132,10 @@ export function Discovery({ user }: { user: CurrentUser }) {
         <>
           <section className="card">
             <h2>{session.taskTitle}</h2>
-            <p className="dim">{session.projectName} · {humanise(session.status)}</p>
+            <p className="dim">
+              {session.projectName} · {humanise(session.status)}{' '}
+              <CompanyContextBadge context={session.companyContext} />
+            </p>
 
             <h3>What Mac read before asking anything</h3>
             {session.contextSummary ? (

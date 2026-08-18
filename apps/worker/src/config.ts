@@ -111,6 +111,16 @@ export const REFUSED_SANDBOX_ENV = [
   'TEST_DATABASE_URL',
   'MONDAY_API_TOKEN',
   'MAC_MAIL_',
+  /*
+   * Sprint 3.2: the PAC company context credential.
+   *
+   * Prefix-matched, so MAC_COMPANY_CONTEXT_TOKEN and any future MAC_COMPANY_*
+   * are both refused without anyone remembering to come back here. It belongs to
+   * the control plane, which reads PAC policy on Mac's behalf; a coding agent
+   * that held it could read - and, with a mis-scoped token, write - the document
+   * defining Mac's own authority.
+   */
+  'MAC_COMPANY_',
   'SEED_ADMIN_',
   'SESSION_',
   'AWS_',

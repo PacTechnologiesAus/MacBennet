@@ -28,6 +28,15 @@ import { z } from 'zod';
  */
 export const INVESTIGATION_SOURCES = [
   'repository',
+  /*
+   * Sprint 3.2: PAC's approved company context.
+   *
+   * Second, not last. Repository facts stay first because they are cheapest and
+   * least ambiguous; company policy comes next because it is authoritative,
+   * human-governed and stable, and an answer from PAC policy should outrank one
+   * from a project memory somebody recorded eight months ago.
+   */
+  'company_context',
   'project_memory',
   'task_memory',
   'previous_runs',
@@ -45,6 +54,14 @@ export type InvestigationSource = z.infer<typeof investigationSourceSchema>;
  */
 export const EVIDENCE_KINDS = [
   'repository_fact',
+  /**
+   * Approved PAC company policy, at a known commit.
+   *
+   * Factual: it is what the company has actually decided, recorded in a
+   * human-governed repository. It is NOT an assumption, and an answer resting
+   * on it is genuinely grounded.
+   */
+  'company_policy',
   'project_memory',
   'task_memory',
   'user_approved_decision',
@@ -57,6 +74,7 @@ export type EvidenceKind = z.infer<typeof evidenceKindSchema>;
 
 export const FACTUAL_EVIDENCE_KINDS: readonly EvidenceKind[] = [
   'repository_fact',
+  'company_policy',
   'project_memory',
   'task_memory',
   'user_approved_decision',

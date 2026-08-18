@@ -16,6 +16,7 @@ import { adviseExecution, parseConfidence } from '../domain/confidence.js';
 import { analyseGaps, deriveFromContext } from '../domain/gap-analysis.js';
 import { getSettings, toConfidencePolicy } from './settings.js';
 import { record, type Actor } from './audit.js';
+import { contextRefFor } from './company-context/service.js';
 
 /**
  * The handoff brief (Sprint 2 §6).
@@ -42,6 +43,15 @@ export async function briefDto(row: HandoffBriefRow, handle: DbHandle = db): Pro
     question: a.question,
   }));
 
+  /*
+   * Sprint 3.2: which PAC company context this brief was written under.
+   *
+   * Rendered into the markdown as well as returned as a field, so the artefact
+   * itself identifies its governing revision - a brief pasted into a pull
+   * request or read on paper stays attributable.
+   */
+  const companyContext = await contextRefFor(row.companyContextRevisionId, handle);
+
   return {
     id: row.id,
     taskId: row.taskId,
@@ -49,7 +59,13 @@ export async function briefDto(row: HandoffBriefRow, handle: DbHandle = db): Pro
     version: row.version,
     status: row.status as BriefStatus,
     content,
-    markdown: renderBriefMarkdown(content, { confidence }),
+    companyContext,
+    markdown: renderBriefMarkdown(content, {
+      confidence,
+      companyContext: companyContext
+        ? { shortSha: companyContext.shortSha, contextVersion: companyContext.contextVersion }
+        : null,
+    }),
     confidence,
     confidenceBand: advice.band,
     completeness,
@@ -97,6 +113,13 @@ export async function createBrief(
     sourceConversation: string;
     contextSummary?: string | null;
     contextSnapshot?: ProjectContextSnapshot | null;
+    /**
+     * Sprint 3.2: passed in by the caller rather than resolved here.
+     *
+     * Discovery supplies its SESSION's revision, so the brief and the session it
+     * came from agree even if a newer company commit landed between the two.
+     */
+    companyContextRevisionId?: string | null;
   },
   actor: Actor,
   handle?: DbHandle,
@@ -157,6 +180,7 @@ export async function createBrief(
         confidence: analysis.confidence.toFixed(3),
         sourceConversation: input.sourceConversation,
         contextSummary: input.contextSummary ?? null,
+        companyContextRevisionId: input.companyContextRevisionId ?? null,
         createdBy: actor.id,
       })
       .returning();
@@ -166,7 +190,12 @@ export async function createBrief(
       actor,
       eventType: 'brief.created',
       context: { projectId: input.projectId, taskId: input.taskId },
-      metadata: { briefId: row.id, version: row.version, confidence: analysis.confidence },
+      metadata: {
+        briefId: row.id,
+        version: row.version,
+        confidence: analysis.confidence,
+        companyContextRevisionId: row.companyContextRevisionId,
+      },
     });
 
     await record(tx, {

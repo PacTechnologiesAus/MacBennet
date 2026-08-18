@@ -1,4 +1,5 @@
 import type { DecisionRisk, HandoffBriefContent, ProjectContextSnapshot } from '@mac/protocol';
+import { isProhibitedCapability, resolveCapability } from './context-precedence.js';
 import { decideAction, toScaled } from './confidence.js';
 
 /**
@@ -132,6 +133,36 @@ export interface RiskAssessment {
   sensitive: boolean;
   reversible: boolean;
   reasons: string[];
+}
+
+/**
+ * Which hard prohibition, if any, a sensitive signal corresponds to
+ * (Sprint 3.2 section 11).
+ *
+ * The risk classifier already blocks all of these — it did so in Sprint 2, and
+ * that is the technical enforcement PAC's AUTHORITY.md asks for. What this map
+ * adds is the ABILITY TO SAY WHY: an agent told "Mac is not able to decide this
+ * safely" learns nothing, whereas one told "this is a hard prohibition on live
+ * deployment that no task instruction can grant" knows not to look for a way
+ * around it, and the human reading the morning report knows which rule fired.
+ */
+const CAPABILITY_FOR_SIGNAL: Record<string, string> = {
+  'production deployment': 'live_deployment',
+  'live industrial control': 'live_deployment',
+  'prohibited git operation': 'protected_branch_merge',
+  'financial commitment': 'financial_commitment',
+  'weakening a safety control': 'safety_control_change',
+  'destructive data operation': 'destructive_action',
+  'destructive schema operation': 'destructive_action',
+};
+
+/** The prohibited capability a set of risk signals implicates, if any. */
+export function prohibitedCapabilityFor(reasons: readonly string[]): string | null {
+  for (const reason of reasons) {
+    const capability = CAPABILITY_FOR_SIGNAL[reason];
+    if (capability && isProhibitedCapability(capability)) return capability;
+  }
+  return null;
 }
 
 export function classifyQuestionRisk(question: string, context?: string): RiskAssessment {
@@ -368,14 +399,38 @@ export function superviseQuestion(input: SupervisionInput): SupervisionResult {
   );
 
   if (outcome.action === 'block') {
+    /*
+     * Sprint 3.2: when the block is a HARD PROHIBITION, say so in those terms.
+     *
+     * `resolveCapability` returns the same refusal whatever the layers say, so
+     * this changes no decision — it changes the explanation, from "Mac could not
+     * decide" to "no context at any level can grant this". That distinction is
+     * the difference between an agent that retries with a better argument and
+     * one that stops and asks a person.
+     */
+    const capability = prohibitedCapabilityFor(risk.reasons);
+    const precedence = capability
+      ? resolveCapability({
+          capability,
+          statements: [
+            // The task asked for it; that is the statement being overruled.
+            { layer: 'task_instruction', effect: 'allow', source: 'the agent\'s question' },
+          ],
+        })
+      : null;
+
     return {
       decision: 'blocked',
       answer:
         `Mac is not able to decide this safely, so this part of the work is out of scope for this run. ` +
         `Continue with any independent work that does not depend on it, and leave this portion unimplemented. ` +
-        `Reason: ${outcome.reason}`,
+        `Reason: ${outcome.reason}` +
+        (precedence ? `\n\n${precedence.reason}` : ''),
       confidence: resolved.confidence,
-      reasoning: `${outcome.reason}${risk.reasons.length ? ` Risk signals: ${risk.reasons.join('; ')}.` : ''} ${resolved.reasoning}`,
+      reasoning:
+        `${outcome.reason}${risk.reasons.length ? ` Risk signals: ${risk.reasons.join('; ')}.` : ''}` +
+        (precedence ? ` Refused at the ${precedence.decidedBy} layer (${capability}).` : '') +
+        ` ${resolved.reasoning}`,
       sources: resolved.sources,
       risk: risk.risk,
       isAssumption: false,

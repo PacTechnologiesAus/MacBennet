@@ -6,6 +6,7 @@ import {
   type AgentSessionDto,
   type AgentSessionState,
   type CodingAgentProvider,
+  type CompanyContextRef,
   type DecisionRisk,
   type GitViolationDto,
   type Groundedness,
@@ -13,10 +14,12 @@ import {
   type RunBlockerDto,
   type WorktreeReportRequest,
 } from '@mac/protocol';
+import { shortSha } from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
 import {
   agentQuestions,
   agentSessions,
+  companyContextRevisions,
   gitViolations,
   runAssumptions,
   runBlockers,
@@ -54,7 +57,11 @@ export const toAgentSessionDto = (row: AgentSessionRow): AgentSessionDto => ({
   error: row.error,
 });
 
-export const toQuestionDto = (row: AgentQuestionRow): AgentQuestionDto => ({
+export const toQuestionDto = (
+  row: AgentQuestionRow,
+  /** Sprint 3.2: resolved by the caller; see the note on `toRunDto`. */
+  companyContext: CompanyContextRef | null = null,
+): AgentQuestionDto => ({
   id: row.id,
   runId: row.runId,
   seq: row.seq,
@@ -73,6 +80,7 @@ export const toQuestionDto = (row: AgentQuestionRow): AgentQuestionDto => ({
   groundedness: row.groundedness as Groundedness,
   modelAssisted: row.modelAssisted,
   sourcesChecked: Array.isArray(row.sourcesChecked) ? (row.sourcesChecked as string[]) : [],
+  companyContext,
 });
 
 async function projectIdForRun(tx: DbHandle, runId: string): Promise<{ projectId: string | null; taskId: string | null }> {
@@ -457,8 +465,30 @@ export async function countGitViolations(runId: string, handle: DbHandle = db): 
 // ---------------------------------------------------------------------------
 
 export async function listQuestions(runId: string, handle: DbHandle = db): Promise<AgentQuestionDto[]> {
-  const rows = await handle.select().from(agentQuestions).where(eq(agentQuestions.runId, runId)).orderBy(asc(agentQuestions.seq));
-  return rows.map(toQuestionDto);
+  const rows = await handle
+    .select({ question: agentQuestions, revision: companyContextRevisions })
+    .from(agentQuestions)
+    .leftJoin(companyContextRevisions, eq(companyContextRevisions.id, agentQuestions.companyContextRevisionId))
+    .where(eq(agentQuestions.runId, runId))
+    .orderBy(asc(agentQuestions.seq));
+
+  // Joined rather than resolved per row: a run with twenty questions should cost
+  // one query, and every answer should name the exact company context it was
+  // decided under rather than whatever happens to be active now.
+  return rows.map((r) =>
+    toQuestionDto(
+      r.question,
+      r.revision
+        ? {
+            revisionId: r.revision.id,
+            commitSha: r.revision.commitSha,
+            shortSha: shortSha(r.revision.commitSha),
+            contextVersion: r.revision.contextVersion,
+            ref: r.revision.ref,
+          }
+        : null,
+    ),
+  );
 }
 
 export async function countUnansweredQuestions(runId: string, handle: DbHandle = db): Promise<number> {

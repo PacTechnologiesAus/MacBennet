@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { emptyBriefContent, capUngroundedConfidence, deriveGroundedness } from '@mac/protocol';
+import {
+  emptyBriefContent,
+  capUngroundedConfidence,
+  deriveGroundedness,
+  INVESTIGATION_SOURCES,
+} from '@mac/protocol';
 import { investigate, type InvestigationSources } from '../../src/domain/investigation.js';
 
 /**
@@ -18,13 +23,14 @@ const empty = (): InvestigationSources => ({
   previousRuns: [],
   previousBriefs: [],
   mondayContext: [],
+  companyContext: [],
 });
 
 const run = (subject: string, sources: Partial<InvestigationSources>, threshold = 0.4) =>
   investigate({ subjectKind: 'agent_question', subject, sources: { ...empty(), ...sources }, resolveThreshold: threshold });
 
 describe('the escalation receipt', () => {
-  it('checks every one of the six source classes, even when the first one answers', () => {
+  it('checks every one of the source classes, even when the first one answers', () => {
     const result = run('What test framework should I use?', {
       repositoryContext: {
         repositoryId: '00000000-0000-4000-8000-000000000000',
@@ -44,15 +50,12 @@ describe('the escalation receipt', () => {
 
     // Stopping early would be faster and would make the receipt a lie:
     // "checked the repository and stopped" does not justify asking a human.
-    expect(result.checked).toHaveLength(6);
-    expect(result.checked.map((c) => c.source)).toEqual([
-      'repository',
-      'project_memory',
-      'task_memory',
-      'previous_runs',
-      'previous_briefs',
-      'monday',
-    ]);
+    //
+    // Asserted against INVESTIGATION_SOURCES rather than a literal list, so that
+    // adding a source class (Sprint 3.2 added `company_context`) cannot quietly
+    // leave this test passing while a source goes unconsulted.
+    expect(result.checked).toHaveLength(INVESTIGATION_SOURCES.length);
+    expect(result.checked.map((c) => c.source)).toEqual([...INVESTIGATION_SOURCES]);
   });
 
   it('says of each source whether it was available, and what it returned', () => {

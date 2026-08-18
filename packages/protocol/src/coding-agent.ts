@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { handoffBriefContentSchema } from './brief.js';
 import { usageSnapshotSchema } from './usage.js';
 import { evidenceRefSchema, groundednessSchema } from './evidence.js';
+import { companyContextRefSchema } from './company-context.js';
 
 /**
  * The coding-agent abstraction (Sprint 2 §4).
@@ -203,8 +204,19 @@ export const agentAnswerSchema = z.object({
   reasoningSummary: z.string().max(1000).default(''),
   /** True when a model contributed to the wording. Always visible to a reviewer. */
   modelAssisted: z.boolean().default(false),
-  /** Which of the six source classes were consulted before answering. */
+  /** Which source classes were consulted before answering. */
   sourcesChecked: z.array(z.string().max(60)).max(12).default([]),
+
+  // --- Sprint 3.2: which company context governed this decision -------------
+
+  /**
+   * The PAC company context revision this answer was decided under.
+   *
+   * Carried on the answer the coding agent receives, not merely recorded beside
+   * it, so an instruction that rests on company policy arrives naming the exact
+   * policy revision. Null when company context is not part of this deployment.
+   */
+  companyContext: companyContextRefSchema.nullable().default(null),
 });
 export type AgentAnswer = z.infer<typeof agentAnswerSchema>;
 

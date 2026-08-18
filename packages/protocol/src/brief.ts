@@ -170,7 +170,29 @@ export const emptyBriefContent = (title: string): HandoffBriefContent =>
  * makes results irreproducible, and a human who has read one brief should be
  * able to skim the next.
  */
-export function renderBriefMarkdown(brief: HandoffBriefContent, meta: { confidence?: number } = {}): string {
+export interface BriefRenderMeta {
+  confidence?: number;
+  /**
+   * Sprint 3.2: the PAC company context revision governing this work.
+   *
+   * Rendered as a provenance line so a brief read on paper, in a pull request,
+   * or by a coding agent identifies which company policy governed it - which is
+   * what makes "handoff brief can identify context revision" true of the
+   * artefact itself and not merely of a database column beside it.
+   */
+  companyContext?: { shortSha: string; contextVersion: string } | null;
+  /**
+   * The rendered company-context block, already selected and attributed.
+   *
+   * Passed in rather than built here because selection needs the repository and
+   * this module is pure protocol. Placed AFTER the task content on purpose: the
+   * agent reads what it is being asked to do, then the standing company policy
+   * that constrains it.
+   */
+  companyContextMarkdown?: string | null;
+}
+
+export function renderBriefMarkdown(brief: HandoffBriefContent, meta: BriefRenderMeta = {}): string {
   const lines: string[] = [];
   const section = (heading: string, body: string) => {
     if (!body.trim()) return;
@@ -184,6 +206,12 @@ export function renderBriefMarkdown(brief: HandoffBriefContent, meta: { confiden
   lines.push(`# ${brief.title}`, '');
   if (meta.confidence !== undefined) {
     lines.push(`_Understanding confidence: ${(meta.confidence * 100).toFixed(0)}%_`, '');
+  }
+  if (meta.companyContext) {
+    lines.push(
+      `_PAC company context: ${meta.companyContext.shortSha} (context version ${meta.companyContext.contextVersion})_`,
+      '',
+    );
   }
 
   section('Objective', brief.userObjective);
@@ -218,6 +246,10 @@ export function renderBriefMarkdown(brief: HandoffBriefContent, meta: { confiden
     lines.push('## Unresolved questions', '');
     for (const q of unresolved) lines.push(`- ${q.question}`);
     lines.push('');
+  }
+
+  if (meta.companyContextMarkdown && meta.companyContextMarkdown.trim()) {
+    lines.push(meta.companyContextMarkdown.trim(), '');
   }
 
   return lines.join('\n').trimEnd();

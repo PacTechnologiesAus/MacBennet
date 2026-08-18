@@ -17,6 +17,7 @@ import {
   retryEmailDelivery,
 } from '../../services/mail/delivery.js';
 import { getSettings, toSettingsDto, updateSettings } from '../../services/settings.js';
+import { getCompanyContextStatus } from '../../services/company-context/service.js';
 import { getBudgetStatus } from '../../services/budget.js';
 import { queryAuditEvents } from '../../services/audit-query.js';
 import {
@@ -158,15 +159,24 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/dashboard', { preHandler: requireAuth }, async (_request, reply) => {
     const settings = await getSettings();
-    const [workers, activeRuns, pendingApprovals, recentlyCompleted, projects, taskCount, budget] = await Promise.all([
-      listWorkers(),
-      listRuns({ status: ['queued', 'running', 'blocked', 'self_review', 'ready_for_human_review'] }),
-      listRuns({ status: ['ready_for_approval'] }),
-      listRuns({ status: ['completed', 'failed', 'cancelled', 'stopped_by_guardrail'] }),
-      listProjects(),
-      countTasks(),
-      getBudgetStatus(settings),
-    ]);
+    const [workers, activeRuns, pendingApprovals, recentlyCompleted, projects, taskCount, budget, companyStatus] =
+      await Promise.all([
+        listWorkers(),
+        listRuns({ status: ['queued', 'running', 'blocked', 'self_review', 'ready_for_human_review'] }),
+        listRuns({ status: ['ready_for_approval'] }),
+        listRuns({ status: ['completed', 'failed', 'cancelled', 'stopped_by_guardrail'] }),
+        listProjects(),
+        countTasks(),
+        getBudgetStatus(settings),
+        /*
+         * Sprint 3.2: the sidebar indicator.
+         *
+         * Read here rather than on a dedicated poll so that an operator who is
+         * simply looking at the dashboard learns that Mac is running on cached
+         * or stale PAC policy, without having to go and ask.
+         */
+        getCompanyContextStatus(),
+      ]);
 
     const since = Date.now() - 24 * 60 * 60 * 1000;
     const allRuns = [...activeRuns, ...pendingApprovals, ...recentlyCompleted];
@@ -184,6 +194,14 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       },
       budget,
       settings: toSettingsDto(settings),
+      companyContext: {
+        enabled: companyStatus.enabled,
+        status: companyStatus.status,
+        shortSha: companyStatus.revision?.shortSha ?? null,
+        contextVersion: companyStatus.revision?.contextVersion ?? null,
+        cached: companyStatus.cached,
+        stale: companyStatus.stale,
+      },
     });
   });
 }
