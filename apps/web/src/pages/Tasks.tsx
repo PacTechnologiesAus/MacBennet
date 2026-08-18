@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
-import type { CurrentUser, ProjectDto, TaskDto, TaskPriority } from '@mac/protocol';
-import { TASK_PRIORITIES } from '@mac/protocol';
+import type { CurrentUser, ProjectDto, TaskDto, TaskKind, TaskPriority } from '@mac/protocol';
+import { TASK_KINDS, TASK_PRIORITIES, describeTaskKind } from '@mac/protocol';
 import { api, ApiError } from '../api.js';
 import { Alert, Badge, Confidence, Empty, Field, Time } from '../components/ui.js';
 
@@ -58,9 +58,11 @@ export function Tasks({ user }: { user: CurrentUser }) {
                 <tr>
                   <th>Title</th>
                   <th>Project</th>
+                  <th>Type</th>
+                  <th>Origin</th>
                   <th>Status</th>
                   <th>Priority</th>
-                  <th>Confidence</th>
+                  <th>Understanding</th>
                   <th>Created</th>
                 </tr>
               </thead>
@@ -71,6 +73,8 @@ export function Tasks({ user }: { user: CurrentUser }) {
                       <Link to={`/tasks/${task.id}`}>{task.title}</Link>
                     </td>
                     <td className="dim">{task.projectName}</td>
+                    <td>{describeTaskKind(task.taskKind).label}</td>
+                    <td className="dim">{task.origin === 'monday' ? 'monday.com' : 'Mac'}</td>
                     <td>
                       <Badge tone={task.status === 'done' ? 'ok' : task.status === 'blocked' ? 'danger' : 'idle'}>
                         {task.status.replace(/_/g, ' ')}
@@ -78,7 +82,8 @@ export function Tasks({ user }: { user: CurrentUser }) {
                     </td>
                     <td>{task.priority}</td>
                     <td>
-                      <Confidence value={task.confidence} />
+                      {/* Mac's DERIVED confidence, not the requester's estimate. */}
+                      <Confidence value={task.understandingConfidence} />
                     </td>
                     <td>
                       <Time value={task.createdAt} />
@@ -108,7 +113,8 @@ export function TaskForm({
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('normal');
-  const [confidence, setConfidence] = useState('');
+  const [taskKind, setTaskKind] = useState<TaskKind | ''>('');
+  const [userInitialConfidence, setUserInitialConfidence] = useState('');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -135,7 +141,11 @@ export function TaskForm({
         title,
         ...(description ? { description } : {}),
         priority,
-        ...(confidence ? { confidence: Number(confidence) / 100 } : {}),
+        // Left unset when the requester did not choose: Mac proposes a kind
+        // during discovery, and a silent default is how research work came to
+        // demand a repository.
+        ...(taskKind ? { taskKind } : {}),
+        ...(userInitialConfidence ? { userInitialConfidence: Number(userInitialConfidence) / 100 } : {}),
       });
       onCreated();
     } catch (err) {
@@ -181,16 +191,42 @@ export function TaskForm({
           </select>
         </Field>
 
-        <Field label="Confidence (%)" hint="Optional. Mac's confidence in his understanding of this task.">
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={confidence}
-            onChange={(e) => setConfidence(e.target.value)}
-          />
+        <Field
+          label="Type of work"
+          hint="Leave blank and Mac will propose one when discovery starts. Research and scoping need no repository."
+        >
+          <select value={taskKind} onChange={(e) => setTaskKind(e.target.value as TaskKind | '')}>
+            <option value="">Let Mac decide</option>
+            {TASK_KINDS.map((kind) => (
+              <option key={kind} value={kind}>
+                {describeTaskKind(kind).label}
+              </option>
+            ))}
+          </select>
         </Field>
       </div>
+
+      {/*
+        Renamed and re-explained (reconciliation drift D-7).
+
+        The old label was "Confidence (%)" and the old hint read "Mac's
+        confidence in his understanding of this task" — which described the
+        DERIVED number while collecting a typed one. Mac derives his own
+        understanding confidence through discovery; this field is the
+        requester's, it is optional, and it gates nothing.
+      */}
+      <Field
+        label="Your own confidence in this request (%)"
+        hint="Optional, and never used to decide whether Mac may execute. Mac derives his own understanding confidence through discovery."
+      >
+        <input
+          type="number"
+          min={0}
+          max={100}
+          value={userInitialConfidence}
+          onChange={(e) => setUserInitialConfidence(e.target.value)}
+        />
+      </Field>
 
       <button type="submit" className="primary" disabled={busy}>
         {busy ? 'Creating…' : 'Create task'}

@@ -245,6 +245,7 @@ function makeAssignment(overrides: Partial<CodingAssignment> = {}): RunAssignmen
     leaseExpiresAt: new Date(Date.now() + 600_000).toISOString(),
     attempt: 1,
     coding,
+    general: null,
   };
 }
 

@@ -51,6 +51,18 @@ const envSchema = z.object({
   /** Model provider for the optional model-backed resolvers. Off by default. */
   ANTHROPIC_API_KEY: z.string().optional(),
   MAC_MODEL_NAME: z.string().default('claude-sonnet-5'),
+  /**
+   * Sprint 3.3: the second real provider.
+   *
+   * Spec section 31 requires replaceable model providers, plural. One
+   * implementation behind an interface is an interface nobody has tested
+   * against a second one.
+   */
+  OPENAI_API_KEY: z.string().optional(),
+  /** Sprint 3.3: a web-search provider for external research. Unset = refused. */
+  MAC_RESEARCH_SEARCH_ENDPOINT: z.string().optional(),
+  MAC_OPENAI_MODEL_NAME: z.string().default('gpt-5'),
+  MAC_OPENAI_BASE_URL: z.string().default('https://api.openai.com/v1'),
 
   /** Base URL used in report links back to the Mac UI. */
   MAC_APP_URL: z.string().default('http://localhost:5173'),
@@ -147,6 +159,19 @@ export const config = Object.freeze({
   model: {
     apiKey: env.ANTHROPIC_API_KEY,
     name: env.MAC_MODEL_NAME,
+    openaiApiKey: env.OPENAI_API_KEY,
+    openaiModel: env.MAC_OPENAI_MODEL_NAME,
+    openaiBaseUrl: env.MAC_OPENAI_BASE_URL,
+  },
+
+  // --- Sprint 3.3 ---
+  research: {
+    /**
+     * Unset in every current deployment, and the tool layer refuses rather than
+     * returning nothing when it is: an empty search result would be read by a
+     * model as "the web contains nothing about this".
+     */
+    searchEndpoint: env.MAC_RESEARCH_SEARCH_ENDPOINT,
   },
 
   // --- Sprint 3.2 ---

@@ -61,6 +61,8 @@ describe('guardrail: job allowlist', () => {
         briefId: '22222222-2222-2222-2222-222222222222',
       },
       repo_inspect: { repositoryId: '11111111-1111-1111-1111-111111111111' },
+      // Sprint 3.3: general work names a brief and a kind. No repository.
+      general_task: { briefId: '22222222-2222-2222-2222-222222222222', taskKind: 'research' },
     };
     for (const kind of JOB_KINDS) {
       expect(checkJobAllowed(kind, valid[kind]).ok, kind).toBe(true);

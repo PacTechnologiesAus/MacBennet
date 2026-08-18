@@ -8,6 +8,7 @@ import { Projects } from './pages/Projects.js';
 import { ProjectDetail } from './pages/ProjectDetail.js';
 import { Tasks } from './pages/Tasks.js';
 import { TaskDetail } from './pages/TaskDetail.js';
+import { Artefact } from './pages/Artefact.js';
 import { Runs } from './pages/Runs.js';
 import { RunDetail } from './pages/RunDetail.js';
 import { Workers } from './pages/Workers.js';
@@ -101,6 +102,7 @@ function Shell({ user, onSignedOut }: { user: CurrentUser; onSignedOut: () => vo
           <Route path="/projects/:id" element={<ProjectDetail user={user} />} />
           <Route path="/tasks" element={<Tasks user={user} />} />
           <Route path="/tasks/:id" element={<TaskDetail user={user} />} />
+          <Route path="/artefacts/:id" element={<Artefact />} />
           <Route path="/runs" element={<Runs />} />
           <Route path="/runs/:id" element={<RunDetail user={user} />} />
           <Route path="/workers" element={<Workers user={user} />} />

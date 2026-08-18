@@ -19,6 +19,7 @@ import {
   worktreeReportRequestSchema,
   ENROLLMENT_TOKEN_PREFIX,
   PROTOCOL_VERSION,
+  researchStepRequestSchema,
 } from '@mac/protocol';
 import { AppError } from '../errors.js';
 import { bearerToken, currentWorker, requireWorkerAuth } from '../worker-auth.js';
@@ -42,6 +43,8 @@ import { answerAgentQuestion } from '../../services/supervision.js';
 import { recordPullRequest, submitReview } from '../../services/reviews.js';
 import { recordUsageSnapshot } from '../../services/usage.js';
 import { recordContextSnapshot } from '../../services/discovery.js';
+import { ensureGeneralPlan } from '../../services/general-runs.js';
+import { performResearchStep } from '../../services/research/runner.js';
 import { recordFetch } from '../../services/repositories.js';
 import { record } from '../../services/audit.js';
 import { db } from '../../db/client.js';
@@ -394,6 +397,34 @@ export async function workerRoutes(
 
       const control = await buildControlEnvelope(worker.id);
       return reply.send({ control, accepted: true });
+    });
+
+    /**
+     * Sprint 3.3: perform one reasoning step of a general run.
+     *
+     * The whole of general work's model access lives behind this endpoint. The
+     * worker supplies nothing but its own identity and the run id — no prompt,
+     * no tool, no provider, no scope — and everything the step touches is
+     * resolved here from the run row.
+     *
+     * `assertRunBelongsToWorker` is what makes that safe: a worker cannot ask
+     * for a step of somebody else's run, so it cannot use this endpoint to reach
+     * a project it was never assigned.
+     */
+    scope.post('/api/worker/runs/:runId/research-step', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      researchStepRequestSchema.parse(request.body ?? {});
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      // Idempotent, and here as well as at dispatch so a worker that reconnects
+      // mid-run does not find itself planless.
+      await ensureGeneralPlan(runId);
+
+      const result = await performResearchStep(runId, {}, workerActor(worker));
+
+      const control = await buildControlEnvelope(worker.id);
+      return reply.send({ control, ...result });
     });
   });
 }

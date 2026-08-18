@@ -163,6 +163,15 @@ export async function ensureTaskForItem(
       status: 'ready',
       priority: mapPriority(item.priority),
       mondayItemId: item.itemId,
+      /*
+       * Sprint 3.3: this task did NOT originate in Mac's UI.
+       *
+       * Load-bearing. `origin` decides which queue the night scheduler collects
+       * a task from, and a mirrored item defaulting to `direct` would appear in
+       * both — so the same work would be considered twice, ordered against
+       * itself, and could be started as a direct task with no board update.
+       */
+      origin: 'monday',
     })
     .returning();
   if (!task) throw new Error('Could not create a task for the monday item.');

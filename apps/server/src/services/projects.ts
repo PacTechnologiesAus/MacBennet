@@ -1,10 +1,27 @@
 import { desc, eq, sql } from 'drizzle-orm';
-import type { CreateProjectRequest, ProjectDto, UpdateProjectRequest } from '@mac/protocol';
-import { db } from '../db/client.js';
-import { projects } from '../db/schema.js';
+import {
+  PROJECT_CAPABILITIES,
+  reconcileCapabilities,
+  type CreateProjectRequest,
+  type ProjectCapability,
+  type ProjectDto,
+  type TaskKind,
+  type UpdateProjectCapabilitiesRequest,
+  type UpdateProjectRequest,
+} from '@mac/protocol';
+import { db, type DbHandle } from '../db/client.js';
+import { mondayBoards, projects, repositories } from '../db/schema.js';
 import type { ProjectRow } from '../db/schema.js';
 import { AppError } from '../http/errors.js';
 import { record, type Actor } from './audit.js';
+
+const asCapabilities = (value: unknown): ProjectCapability[] =>
+  Array.isArray(value)
+    ? value.filter((v): v is ProjectCapability => (PROJECT_CAPABILITIES as readonly string[]).includes(v as string))
+    : [];
+
+const asTaskKinds = (value: unknown): TaskKind[] =>
+  Array.isArray(value) ? value.filter((v): v is TaskKind => typeof v === 'string') : [];
 
 export const toProjectDto = (row: ProjectRow): ProjectDto => ({
   id: row.id,
@@ -16,9 +33,97 @@ export const toProjectDto = (row: ProjectRow): ProjectDto => ({
   isActive: row.isActive,
   nightShiftApproved: row.nightShiftApproved,
   nightShiftApprovedAt: row.nightShiftApprovedAt?.toISOString() ?? null,
+  /*
+   * Sprint 3.3: what the project HAS, and what a human has ALLOWED here.
+   *
+   * Two axes, deliberately. Having a repository does not imply anyone wants Mac
+   * writing code in it, and being an internal project does not imply every kind
+   * of work is welcome. Conflating the two is how a migration ends up granting
+   * permissions nobody asked for.
+   */
+  capabilities: asCapabilities(row.capabilities),
+  allowedTaskKinds: asTaskKinds(row.allowedTaskKinds),
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
 });
+
+/**
+ * Reads a project's capability state, reconciled against what it observably has.
+ *
+ * Reconciliation only ever ADDS: a repository that exists is a fact, and a fact
+ * should not need a second person to type it in. Removing a capability stays a
+ * human decision, because a human may have turned something off deliberately.
+ */
+export async function capabilityStateFor(
+  projectId: string,
+  handle: DbHandle = db,
+): Promise<{ capabilities: ProjectCapability[]; allowedTaskKinds: TaskKind[] }> {
+  const [row] = await handle.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+  if (!row) throw AppError.notFound('Project');
+
+  const [repo] = await handle
+    .select({ id: repositories.id })
+    .from(repositories)
+    .where(eq(repositories.projectId, projectId))
+    .limit(1);
+  const [board] = await handle
+    .select({ id: mondayBoards.id })
+    .from(mondayBoards)
+    .where(eq(mondayBoards.projectId, projectId))
+    .limit(1);
+
+  return {
+    capabilities: reconcileCapabilities(asCapabilities(row.capabilities), {
+      hasApprovedRepository: Boolean(repo),
+      hasApprovedBoard: Boolean(board),
+    }),
+    allowedTaskKinds: asTaskKinds(row.allowedTaskKinds),
+  };
+}
+
+/**
+ * Updates what a project declares and what it permits.
+ *
+ * `allowedTaskKinds` is the authority half, and it is why this is a separate
+ * endpoint from `updateProject` rather than two more optional fields on it:
+ * granting Mac permission to do a new kind of work autonomously deserves its own
+ * audit event and its own role gate, not a diff buried in a rename.
+ */
+export async function updateProjectCapabilities(
+  id: string,
+  patch: UpdateProjectCapabilitiesRequest,
+  actor: Actor,
+): Promise<ProjectDto> {
+  return db.transaction(async (tx) => {
+    const [before] = await tx.select().from(projects).where(eq(projects.id, id)).limit(1);
+    if (!before) throw AppError.notFound('Project');
+
+    const [row] = await tx
+      .update(projects)
+      .set({
+        ...(patch.capabilities !== undefined && { capabilities: patch.capabilities }),
+        ...(patch.allowedTaskKinds !== undefined && { allowedTaskKinds: patch.allowedTaskKinds }),
+        updatedAt: new Date(),
+      })
+      .where(eq(projects.id, id))
+      .returning();
+    if (!row) throw AppError.notFound('Project');
+
+    await record(tx, {
+      actor,
+      eventType: 'project.capabilities_updated',
+      context: { projectId: id },
+      metadata: {
+        capabilitiesBefore: asCapabilities(before.capabilities),
+        capabilitiesAfter: asCapabilities(row.capabilities),
+        allowedTaskKindsBefore: asTaskKinds(before.allowedTaskKinds),
+        allowedTaskKindsAfter: asTaskKinds(row.allowedTaskKinds),
+      },
+    });
+
+    return toProjectDto(row);
+  });
+}
 
 function slugify(name: string): string {
   const base = name

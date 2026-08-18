@@ -100,6 +100,34 @@ export const jobParamSchemas = {
       sinceSha: z.string().max(64).nullable().default(null),
     })
     .strict(),
+
+  // --- Sprint 3.3 -----------------------------------------------------------
+  //
+  // General (non-coding) work. Read this schema with the same suspicion as the
+  // two above, and note what it does NOT contain:
+  //
+  //   * no repository, no worktree, no branch, no path;
+  //   * no command, no script, no tool name, no URL;
+  //   * no prompt, and no objective.
+  //
+  // It carries a brief id and a task kind. The control plane turns those into a
+  // research plan, a permitted tool set and a model provider — all server-side,
+  // from records a human approved. The worker drives the lifecycle (heartbeat,
+  // progress, cancellation, cutoff) and asks the control plane to perform each
+  // reasoning step, so the model credential and the tool layer never leave the
+  // control plane at all (Sprint 3.3 section 29).
+  general_task: z
+    .object({
+      /** The structured handoff brief. The execution contract for this run. */
+      briefId: z.string().uuid(),
+      /** What kind of work this is. Decides the plan and the dimension set. */
+      taskKind: z.enum(['research', 'analysis', 'investigation', 'scoping', 'documentation', 'administrative']),
+      /** Wall-clock ceiling, as for a coding session. */
+      maxMinutes: z.number().int().min(1).max(720).default(60),
+      /** Upper bound on reasoning steps. Also hard-capped by RESEARCH_LIMITS. */
+      maxSteps: z.number().int().min(1).max(12).default(8),
+    })
+    .strict(),
 } as const;
 
 export type JobKind = keyof typeof jobParamSchemas;
@@ -136,6 +164,15 @@ export const JOB_CATALOGUE: readonly JobDescriptor[] = [
     description: 'Read-only inspection of an approved repository for discovery: README, manifests, tests, branches and recent history.',
     typicalDurationSeconds: 30,
   },
+  {
+    kind: 'general_task',
+    label: 'General task (research, analysis, scoping)',
+    description:
+      'Executes non-coding technical work against an approved handoff brief: investigates approved sources, ' +
+      'distinguishes fact from inference, and produces evidence-backed artefacts. Requires no repository and no ' +
+      'monday.com item.',
+    typicalDurationSeconds: 900,
+  },
 ] as const;
 
 /**
@@ -151,6 +188,7 @@ export const jobSpecSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('fail'), params: jobParamSchemas.fail }),
   z.object({ kind: z.literal('claude_code'), params: jobParamSchemas.claude_code }),
   z.object({ kind: z.literal('repo_inspect'), params: jobParamSchemas.repo_inspect }),
+  z.object({ kind: z.literal('general_task'), params: jobParamSchemas.general_task }),
 ]);
 
 export type JobSpec = z.infer<typeof jobSpecSchema>;
@@ -165,6 +203,21 @@ export const requiresApprovedRepository = (kind: string): boolean =>
 
 /** Job kinds that create commits. These are the ones the git policy governs. */
 export const isCodingJobKind = (kind: string): boolean => kind === 'claude_code';
+
+/**
+ * Job kinds executed by the general (non-coding) worker capability.
+ *
+ * Sprint 3.3: these require a reasoning-model provider and a handoff brief, and
+ * require NEITHER a repository nor a monday item. `requiresApprovedRepository`
+ * above deliberately does not include this kind — that is the whole point.
+ */
+export const GENERAL_JOB_KINDS = ['general_task'] as const;
+export const isGeneralJobKind = (kind: string): boolean =>
+  (GENERAL_JOB_KINDS as readonly string[]).includes(kind);
+
+/** Job kinds that need a handoff brief resolved server-side at lease time. */
+export const requiresHandoffBrief = (kind: string): boolean =>
+  kind === 'claude_code' || isGeneralJobKind(kind);
 
 export const isAllowedJobKind = (kind: unknown): kind is JobKind =>
   typeof kind === 'string' && Object.prototype.hasOwnProperty.call(jobParamSchemas, kind);

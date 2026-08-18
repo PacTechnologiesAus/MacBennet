@@ -123,6 +123,21 @@ export const STOP_REASONS = [
   'usage_threshold_reached',
   /** The night shift ended and this run was still holding the worker. */
   'night_shift_ended',
+  // --- Sprint 3.3 ---
+  /**
+   * General reasoning work was dispatched and no real model provider exists.
+   *
+   * A refusal, not a failure — and deliberately NOT a silent success producing
+   * an empty result, which a report would then relay as "researched, found
+   * nothing" (Sprint 3.3 section 10).
+   */
+  'model_provider_required',
+  /** No online worker advertises the capability this task kind needs. */
+  'no_capable_worker',
+  /** The research loop hit its step or tool-call ceiling without finalising. */
+  'research_limit_reached',
+  /** The project has not been allowed to do this kind of work. */
+  'task_kind_not_permitted',
 ] as const;
 export const stopReasonSchema = z.enum(STOP_REASONS);
 export type StopReason = z.infer<typeof stopReasonSchema>;
@@ -330,6 +345,31 @@ export const AUDIT_EVENT_TYPES = [
   'company_context.bound_to_run',
   'company_context.proposal_created',
   'company_context.proposal_status_changed',
+
+  // --- Sprint 3.3 -----------------------------------------------------------
+  // General (non-coding) work. Each entry is something a reader of the trail
+  // genuinely needs: what Mac searched, what he was refused, what he produced,
+  // and what a machine was permitted to do without a person present.
+  'project.capabilities_updated',
+  'task.kind_changed',
+  'task.discovery_requested',
+
+  'research.plan_built',
+  'research.step_completed',
+  /** A tool the run actually performed, with its query. Sprint 3.3 section 15. */
+  'research.tool_called',
+  /** A tool the allowlist or project capability refused. A security signal. */
+  'research.tool_refused',
+  /** Something retrieved from outside PAC, with source and timestamp. */
+  'research.external_source_retrieved',
+  'research.limit_reached',
+
+  'artefact.created',
+
+  /** A genuine reasoning call, with provider, model and token usage. */
+  'model.reasoning_completed',
+  /** Reasoning work could not proceed because no real provider is configured. */
+  'model.provider_required',
 ] as const;
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);
 export type AuditEventType = z.infer<typeof auditEventTypeSchema>;

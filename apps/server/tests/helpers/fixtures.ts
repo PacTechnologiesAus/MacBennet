@@ -14,12 +14,17 @@ import { asUser, type Session } from './harness.js';
 export async function makeProject(
   app: FastifyInstance,
   session: Session,
-  overrides: { name?: string; repoUrl?: string } = {},
+  overrides: { name?: string; repoUrl?: string | null } = {},
 ): Promise<{ id: string; name: string }> {
   const response = await asUser(app, session).post('/api/projects', {
     name: overrides.name ?? `Project ${Math.floor(Math.random() * 1e9)}`,
     description: 'Created by the integration test suite.',
-    repoUrl: overrides.repoUrl ?? 'https://github.com/pac-technologies/example.git',
+    // Sprint 3.3: `null` means a project with genuinely no repository, which is
+    // a legitimate project (PAC Internal Development is one) and not a broken
+    // one. `undefined` keeps the Sprint 1 default.
+    ...(overrides.repoUrl === null
+      ? {}
+      : { repoUrl: overrides.repoUrl ?? 'https://github.com/pac-technologies/example.git' }),
   });
   if (response.statusCode !== 201) throw new Error(`makeProject failed: ${response.body}`);
   return response.json().project;
@@ -29,14 +34,23 @@ export async function makeTask(
   app: FastifyInstance,
   session: Session,
   projectId: string,
-  overrides: { title?: string; priority?: string; confidence?: number } = {},
+  overrides: {
+    title?: string;
+    priority?: string;
+    userInitialConfidence?: number;
+    taskKind?: string;
+    description?: string;
+  } = {},
 ): Promise<{ id: string; title: string }> {
   const response = await asUser(app, session).post('/api/tasks', {
     projectId,
     title: overrides.title ?? 'Prove the control loop',
-    description: 'A Sprint 1 task.',
+    description: overrides.description ?? 'A Sprint 1 task.',
     priority: overrides.priority ?? 'normal',
-    ...(overrides.confidence !== undefined ? { confidence: overrides.confidence } : {}),
+    ...(overrides.taskKind ? { taskKind: overrides.taskKind } : {}),
+    ...(overrides.userInitialConfidence !== undefined
+      ? { userInitialConfidence: overrides.userInitialConfidence }
+      : {}),
   });
   if (response.statusCode !== 201) throw new Error(`makeTask failed: ${response.body}`);
   return response.json().task;

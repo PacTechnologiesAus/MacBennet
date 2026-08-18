@@ -4,7 +4,9 @@ import {
   renderBriefMarkdown,
   type BriefDto,
   type BriefStatus,
+  type CompletenessDimension,
   type CompletenessDto,
+  type TaskKind,
   type HandoffBriefContent,
   type ProjectContextSnapshot,
 } from '@mac/protocol';
@@ -105,6 +107,25 @@ export async function latestBriefForTask(taskId: string): Promise<BriefDto | nul
  * Creates a brief, deriving whatever the inspected repository can supply and
  * computing understanding confidence from the result.
  */
+/**
+ * Folds repository-derived facts into a brief without overwriting the human.
+ *
+ * Exported because discovery needs to run its pre-investigation gap analysis
+ * against exactly the content `createBrief` will store. Two slightly different
+ * merges would mean Mac investigating a dimension the repository had already
+ * answered, which wastes a step and looks, in the receipt, like thoroughness.
+ */
+export function mergeContextIntoBrief(
+  content: HandoffBriefContent,
+  snapshot: ProjectContextSnapshot | null,
+): HandoffBriefContent {
+  if (!snapshot) return content;
+  return handoffBriefContentSchema.parse({
+    ...content,
+    ...withoutOverwriting(content, deriveFromContext(snapshot)),
+  });
+}
+
 export async function createBrief(
   input: {
     taskId: string;
@@ -120,18 +141,28 @@ export async function createBrief(
      * came from agree even if a newer company commit landed between the two.
      */
     companyContextRevisionId?: string | null;
+    /**
+     * Sprint 3.3: which dimensions apply, and which Mac already investigated.
+     *
+     * Both are inputs to the ONE gap analysis this function runs, so a brief has
+     * exactly one understanding confidence computed at exactly one moment and
+     * emits exactly one `brief.confidence_calculated` event. An earlier draft of
+     * this sprint recomputed afterwards, which produced two events and — worse —
+     * a window in which the brief carried a number that was already stale.
+     */
+    taskKind?: TaskKind;
+    investigated?: Partial<Record<CompletenessDimension, string[]>>;
   },
   actor: Actor,
   handle?: DbHandle,
 ): Promise<BriefDto> {
   const run = async (tx: DbHandle) => {
-    // Merge in what the repository already answered, so gap analysis subtracts
-    // it and Mac does not put those questions to the human.
-    const merged: HandoffBriefContent = input.contextSnapshot
-      ? handoffBriefContentSchema.parse({ ...input.content, ...withoutOverwriting(input.content, deriveFromContext(input.contextSnapshot)) })
-      : input.content;
+    const merged = mergeContextIntoBrief(input.content, input.contextSnapshot ?? null);
 
-    const analysis = analyseGaps(merged, input.contextSnapshot ?? null);
+    const analysis = analyseGaps(merged, input.contextSnapshot ?? null, {
+      ...(input.taskKind ? { taskKind: input.taskKind } : {}),
+      ...(input.investigated ? { investigated: input.investigated } : {}),
+    });
 
     // Unanswered gaps become the brief's open questions, so the artefact itself
     // records what is still unknown rather than hiding it behind a number.
@@ -145,7 +176,14 @@ export async function createBrief(
             id: `gap-${a.dimension}`,
             question: a.question,
             dimension: a.dimension,
-            discoverableFrom: a.discoverableFrom,
+            /*
+             * Sprint 3.3: a dimension Mac actually WENT AND FOUND OUT counts
+             * here too. `discoverableFrom` said "the answer exists somewhere";
+             * `investigatedFrom` says "and here is what I read". Both mean the
+             * question must not be put to a human, so both belong in the field
+             * the brief uses to record why it was not asked.
+             */
+            discoverableFrom: [...a.discoverableFrom, ...a.investigatedFrom],
             answer: null,
             answeredAt: null,
             answeredBy: null,

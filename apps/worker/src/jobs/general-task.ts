@@ -1,0 +1,134 @@
+import type { RunAssignment } from '@mac/protocol';
+import type { ControlPlaneClient } from '../client.js';
+import { JobCancelledError, type JobContext, type JobResult } from './index.js';
+
+/**
+ * General (non-coding) work on the worker (Sprint 3.3 §13).
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THIS FILE DELIBERATELY DOES NOT CONTAIN
+ *
+ * No model client. No API key. No company documents. No project memory. No
+ * monday token. No prompt. No tool.
+ *
+ * It is a loop that asks the control plane to perform the next reasoning step
+ * and reports what came back. That split is the whole security argument for
+ * general work: Sprint 3.3 §29 requires that research must not expose worker
+ * credentials, mail credentials, monday credentials, Company repo write
+ * credentials or unrelated project secrets — and the cheapest way to guarantee
+ * that is for the VM never to hold any of them.
+ *
+ * What the worker DOES own is the part it is uniquely placed to own: the lease,
+ * the heartbeat, prompt cancellation, the wall-clock ceiling and the run log.
+ * That is the Sprint 1 lifecycle, unchanged, which is why this is not a second
+ * execution architecture.
+ * ---------------------------------------------------------------------------
+ */
+
+export async function runGeneralTaskJob(
+  assignment: RunAssignment,
+  ctx: JobContext,
+  deps: { client: ControlPlaneClient },
+): Promise<JobResult> {
+  const general = assignment.general;
+  if (!general) {
+    throw new Error('This general run has no assignment. The control plane builds one at lease time.');
+  }
+
+  ctx.log(`Starting ${general.taskKind} work: ${assignment.taskTitle}`);
+  ctx.log(`Objective: ${general.objective}`);
+  if (general.deliverables.length) {
+    ctx.log(`Deliverables: ${general.deliverables.join('; ')}`);
+  }
+  ctx.log(
+    'Reasoning runs in the control plane, not on this worker: the model credential and the approved ' +
+      'sources never leave it.',
+  );
+
+  await ctx.progress('planning', 0);
+
+  /*
+   * The wall-clock ceiling, enforced here as well as by the control plane.
+   *
+   * Two independent limits on the same thing is not belt-and-braces for its own
+   * sake: the server's ceiling counts STEPS, and a step that takes far longer
+   * than expected would satisfy it while still overrunning the night. This one
+   * counts minutes, which is what the cutoff actually cares about.
+   */
+  const deadline = Date.now() + general.maxMinutes * 60_000;
+  const assignmentDeadline = assignment.deadlineAt ? Date.parse(assignment.deadlineAt) : Number.POSITIVE_INFINITY;
+
+  /*
+   * TWO counters, and the local one bounds the loop.
+   *
+   * `iterations` counts what THIS worker has done; `steps` is what the control
+   * plane reports. Looping on the reported figure alone was a real bug: a
+   * control plane whose counter stalls — a persistence failure, a bug in the
+   * step handler — would keep answering "step 1 of 8, not done" and the worker
+   * would call it forever, burning model spend until something else killed it.
+   *
+   * The worker is the component holding the lease and the wall clock, so it is
+   * the one that must be able to stop on its own account.
+   */
+  let iterations = 0;
+  let steps = 0;
+  let artefacts = 0;
+  let lastNarrative = '';
+  let blocker: string | null = null;
+
+  while (iterations < general.maxSteps) {
+    iterations += 1;
+    if (ctx.signal.aborted) throw new JobCancelledError();
+
+    if (Date.now() >= deadline) {
+      ctx.log(`Reached the ${general.maxMinutes}-minute ceiling for this run.`, 'stderr');
+      break;
+    }
+    if (Date.now() >= assignmentDeadline) {
+      ctx.log('Reached the overnight cutoff for this run.', 'stderr');
+      break;
+    }
+
+    const result = await deps.client.performResearchStep(assignment.runId, ctx.signal);
+
+    steps = result.stepsTaken;
+    artefacts += result.artefactsCreated;
+    lastNarrative = result.narrative || lastNarrative;
+    if (result.blockerProposed) blocker = result.blockerProposed;
+
+    ctx.log(
+      `Step ${result.stepsTaken}: ${result.narrative} ` +
+        `(${result.findingsSoFar} finding(s) from ${result.sourcesSoFar} source(s), ` +
+        `${result.toolCallsMade} lookup(s) so far)`,
+    );
+    await ctx.progress(result.stage, result.percent);
+
+    if (result.limitReached) {
+      ctx.log('The research loop reached its configured ceiling.', 'stderr');
+      break;
+    }
+    if (result.done) break;
+  }
+
+  if (ctx.signal.aborted) throw new JobCancelledError();
+
+  await ctx.progress('complete', 100);
+
+  /*
+   * A run that produced no artefact is reported as such, plainly.
+   *
+   * The tempting alternative — completing quietly — is the exact failure the
+   * whole evidence model exists to prevent: a morning report that lists a
+   * finished investigation with nothing in it reads as "looked, found nothing",
+   * which is a claim nobody made.
+   */
+  const summary =
+    artefacts > 0
+      ? `${general.taskKind} work completed in ${steps} step(s); ${artefacts} artefact(s) produced. ${lastNarrative}`.trim()
+      : `${general.taskKind} work ran for ${steps} step(s) but produced NO artefacts. ${lastNarrative}`.trim();
+
+  if (blocker) ctx.log(`Mac believes a human decision is needed: ${blocker}`, 'stderr');
+  ctx.log(summary);
+
+  return { summary: summary.slice(0, 2000) };
+}

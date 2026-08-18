@@ -32,7 +32,20 @@ import { z } from 'zod';
  * ---------------------------------------------------------------------------
  */
 
-export const MODEL_PROVIDERS = ['anthropic', 'scripted', 'none'] as const;
+/**
+ * Sprint 3.3: `openai` joins the list, and the reason is not vendor preference.
+ *
+ * Spec section 31 requires "replaceable model providers", plural. One real
+ * provider behind an interface is an interface nobody has ever tested against a
+ * second implementation, and interfaces like that are usually wrong in ways
+ * discovered on the day they matter. Two real providers keeps the seam honest.
+ *
+ * `none` remains the DEFAULT, and remains correct as a default: a model that is
+ * off cannot degrade an answer at 03:00. What Sprint 3.3 changes is that
+ * genuine research work now REFUSES to run against `none` rather than silently
+ * producing nothing (see `MODEL_PROVIDER_REQUIRED`).
+ */
+export const MODEL_PROVIDERS = ['anthropic', 'openai', 'scripted', 'none'] as const;
 export const modelProviderSchema = z.enum(MODEL_PROVIDERS);
 export type ModelProviderName = z.infer<typeof modelProviderSchema>;
 
@@ -102,4 +115,125 @@ export interface ModelAssistRecord {
   /** Citations the model produced that did not exist. The interesting number. */
   fabricatedCitations: number;
   detail: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 3.3 — general reasoning
+// ---------------------------------------------------------------------------
+
+/**
+ * Providers that talk to a real model on a real account.
+ *
+ * `scripted` is deliberately included: it is a real provider from the caller's
+ * point of view — it returns what it was told to return, deterministically —
+ * and excluding it would make every research test require a network and a
+ * credential, which is how test suites come to be skipped.
+ *
+ * `none` is the one that is not. That distinction is the whole of
+ * `MODEL_PROVIDER_REQUIRED`.
+ */
+export const REAL_MODEL_PROVIDERS: readonly ModelProviderName[] = ['anthropic', 'openai', 'scripted'];
+
+export const isRealModelProvider = (name: ModelProviderName): boolean => REAL_MODEL_PROVIDERS.includes(name);
+
+/**
+ * The error code raised when genuine reasoning work has no provider.
+ *
+ * Sprint 3.3 section 10 is explicit that a null provider must not silently
+ * stand in for a model during real research. The distinction being drawn:
+ *
+ *   * model ASSISTANCE (phrasing an answer the deterministic layer already
+ *     grounded) degrades safely to nothing, and always has;
+ *   * model REASONING (going and finding something out) has no deterministic
+ *     fallback, so producing an empty result would be indistinguishable from
+ *     having researched the question and found nothing.
+ *
+ * The second is a lie a report would then repeat, so it fails instead.
+ */
+export const MODEL_PROVIDER_REQUIRED = 'MODEL_PROVIDER_REQUIRED';
+
+/**
+ * How Mac's reasoning model is reached, and what that means for accounting.
+ *
+ * Sprint 3.3 section 12 asks this to be stated rather than assumed. It matters
+ * because a coding-agent subscription and a reasoning-model API are DIFFERENT
+ * access mechanisms with different usage visibility, and assuming otherwise
+ * would produce a budget that silently does not apply.
+ */
+export const MODEL_ACCESS_MODES = ['api_key', 'subscription_cli'] as const;
+export const modelAccessModeSchema = z.enum(MODEL_ACCESS_MODES);
+export type ModelAccessMode = z.infer<typeof modelAccessModeSchema>;
+
+export interface ModelAccessDescriptor {
+  provider: ModelProviderName;
+  mode: ModelAccessMode;
+  /** Whether the provider reports token counts we can bill against a budget. */
+  reportsExactUsage: boolean;
+  note: string;
+}
+
+/**
+ * What each provider actually offers.
+ *
+ * Written down because the tempting assumption — "Claude Code works off a
+ * subscription, so Mac's reasoning model can too" — is false. Claude Code is a
+ * CLI that holds its own OAuth session; the Messages API is a separate,
+ * key-authenticated product. Mac's reasoning path uses the API, which means
+ * per-token cost we can see, which is what preserves the budget controls.
+ */
+export const MODEL_ACCESS: readonly ModelAccessDescriptor[] = [
+  {
+    provider: 'anthropic',
+    mode: 'api_key',
+    reportsExactUsage: true,
+    note:
+      'Anthropic Messages API, authenticated by ANTHROPIC_API_KEY. Returns input and output token counts on ' +
+      'every call. A Claude Code subscription does NOT grant this access; the coding agent authenticates ' +
+      'separately and its usage is accounted separately.',
+  },
+  {
+    provider: 'openai',
+    mode: 'api_key',
+    reportsExactUsage: true,
+    note: 'OpenAI Chat Completions API, authenticated by OPENAI_API_KEY. Returns prompt and completion token counts.',
+  },
+  {
+    provider: 'scripted',
+    mode: 'api_key',
+    reportsExactUsage: true,
+    note: 'Test provider. Returns supplied responses and character-count usage. Never reaches a network.',
+  },
+  {
+    provider: 'none',
+    mode: 'api_key',
+    reportsExactUsage: false,
+    note: 'No provider. Model assistance degrades to the deterministic path; genuine research work refuses to run.',
+  },
+];
+
+export const describeModelAccess = (provider: ModelProviderName): ModelAccessDescriptor =>
+  MODEL_ACCESS.find((a) => a.provider === provider) ?? MODEL_ACCESS[MODEL_ACCESS.length - 1]!;
+
+/**
+ * A reasoning call, as distinct from an assistance call.
+ *
+ * The difference in the type is `expectSchema`: reasoning callers parse the
+ * result against a schema they name, and a provider that cannot honour the
+ * request still returns text rather than inventing structure. Cancellation is
+ * carried explicitly because a research step must abort when the run does —
+ * Sprint 3.3 section 11 lists cancellation as part of the provider contract.
+ */
+export interface ReasoningRequest extends ModelCompletionRequest {
+  /** Aborts the underlying request. Honoured by every real provider. */
+  signal?: AbortSignal;
+  /** Names the shape the caller will parse. Advisory to the provider. */
+  schemaName?: string;
+}
+
+/** Usage from one reasoning call, in the shape the usage model records. */
+export interface ReasoningUsage {
+  provider: ModelProviderName;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
 }

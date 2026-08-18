@@ -1,12 +1,19 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import {
+  capabilityForTaskKind,
   handoffBriefContentSchema,
+  resolveJobKind,
+  taskKindsForCapability,
   type NightCandidateDto,
   type NightDecisionDto,
   type NightShiftDto,
   type NightShiftStatus,
   type NightStopReason,
+  type ProjectCapability,
   type SchedulingRationale,
+  type TaskKind,
+  type TaskPriority,
+  type WorkCapability,
 } from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
 import {
@@ -26,7 +33,8 @@ import {
 import type { NightDecisionRow, NightShiftRow } from '../db/schema.js';
 import { AppError, GuardrailError } from '../http/errors.js';
 import { parseConfidence } from '../domain/confidence.js';
-import { evaluateEligibility, type EligibilityInput } from '../domain/eligibility.js';
+import { candidateSourceOf, evaluateEligibility, type EligibilityInput } from '../domain/eligibility.js';
+import { evaluateTaskRequirements } from '../domain/task-requirements.js';
 import { estimateEffort, safeToStart } from '../domain/effort.js';
 import {
   decideNextAction,
@@ -39,7 +47,8 @@ import { nextCutoffAfter } from '../domain/overnight.js';
 import { getSettings, toCutoffConfig, type Settings } from './settings.js';
 import { recordedSpendForWindow } from './budget.js';
 import { record, SYSTEM_ACTOR, type Actor } from './audit.js';
-import { requireActiveRevision } from './company-context/service.js';
+import { companyContextSatisfied, requireActiveRevision } from './company-context/service.js';
+import { reasoningProviderAvailable } from './model/provider.js';
 import { recordContextBinding } from './company-context/bindings.js';
 import { isWorkerLive } from './workers.js';
 import { transition } from './runs.js';
@@ -224,10 +233,68 @@ export interface CandidateContext {
   candidate: NightCandidate;
   input: EligibilityInput;
   taskId: string | null;
+  /** Empty for a direct task, which has no board. */
   boardRowId: string;
   mondayItemUrl: string | null;
   confidence: number | null;
+  /** Sprint 3.3: what kind of work, so the job kind can be resolved at start. */
+  taskKind: TaskKind;
 }
+
+/**
+ * Facts that are the same for every candidate this tick.
+ *
+ * Gathered once rather than per candidate: `reasoningProviderAvailable()` reads
+ * settings and may construct a provider, and doing that inside a loop over
+ * forty monday items would be forty pointless round trips.
+ */
+interface ShiftCapabilities {
+  reasoningModelAvailable: boolean;
+  /** False only when company context is enabled and cannot be read. */
+  companyContextSatisfied: boolean;
+  /** Which work capabilities a live, idle, sandbox-ready worker advertises. */
+  workerCapabilities: Set<WorkCapability>;
+}
+
+async function shiftCapabilities(settings: Settings, handle: DbHandle = db): Promise<ShiftCapabilities> {
+  const rows = await handle.select().from(workers);
+  const live = rows.filter(
+    (w) =>
+      isWorkerLive(w, settings.heartbeatIntervalSeconds, settings.heartbeatGraceSeconds) &&
+      w.status !== 'busy' &&
+      w.status !== 'disabled',
+  );
+
+  const capabilities = new Set<WorkCapability>();
+  for (const worker of live) {
+    const advertised = Array.isArray(worker.capabilities) ? (worker.capabilities as string[]) : [];
+    /*
+     * The sandbox rule, applied where it belongs.
+     *
+     * Sprint 3 requires containment for CODING work, because a coding agent
+     * executes processes against a checkout. General work runs no process on the
+     * worker at all — the reasoning happens in the control plane — so a worker
+     * without a sandbox can still do research, and refusing it would be a rule
+     * enforced for its own sake rather than for the risk it addresses.
+     */
+    if (advertised.includes('claude_code') && (!settings.requireSandbox || worker.sandboxReady)) {
+      capabilities.add('coding');
+    }
+    if (advertised.includes('general_task')) capabilities.add('general');
+  }
+
+  return {
+    reasoningModelAvailable: settings.generalWorkEnabled ? await reasoningProviderAvailable() : false,
+    companyContextSatisfied: await companyContextSatisfied(),
+    workerCapabilities: capabilities,
+  };
+}
+
+const asCapabilityList = (value: unknown): ProjectCapability[] =>
+  Array.isArray(value) ? (value.filter((v) => typeof v === 'string') as ProjectCapability[]) : [];
+
+const asTaskKindList = (value: unknown): TaskKind[] =>
+  Array.isArray(value) ? (value.filter((v) => typeof v === 'string') as TaskKind[]) : [];
 
 /**
  * Everything Mac could conceivably start, with a verdict on each.
@@ -236,9 +303,49 @@ export interface CandidateContext {
  * Queue screen shows why something was skipped, and a collection that filtered
  * them out could not.
  */
+/**
+ * Everything Mac could conceivably start tonight, from BOTH queues.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THERE ARE TWO COLLECTORS AND ONE SCHEDULER
+ *
+ * Before Sprint 3.3 this function began `const boards = await readableBoards();
+ * if (boards.length === 0) return [];` — so a task with no monday board was not
+ * merely ineligible, it was INVISIBLE. Spec section 8 ranks direct instructions
+ * highest, and the one class of work ranked first was the one class the
+ * scheduler could not enumerate (reconciliation drift D-3).
+ *
+ * The fix is a second collector, not a second scheduler. Both produce the same
+ * `CandidateContext`, both are ordered by the same comparator, and the same
+ * `decideNextAction` chooses between them. Sprint 3.3 section 5 is explicit that
+ * fake monday rows are not an acceptable way to reuse the existing path, and
+ * they would also have been a lie in the database.
+ *
+ * SELECTION PRECEDENCE, in `orderCandidates`:
+ *   1. the project Mac is already working in;
+ *   2. priority rank (monday priority and task priority share one 0-3 scale);
+ *   3. DIRECT before monday on a tie — a direct task is one a human handed Mac
+ *      personally, and spec section 8 puts that first;
+ *   4. stable id comparison, so two ticks on the same data agree.
+ * ---------------------------------------------------------------------------
+ */
 export async function collectCandidates(
   settings: Settings,
   nightShiftId: string | null,
+  handle: DbHandle = db,
+): Promise<CandidateContext[]> {
+  const capabilities = await shiftCapabilities(settings, handle);
+  const [monday, direct] = await Promise.all([
+    collectMondayCandidates(settings, nightShiftId, capabilities, handle),
+    collectDirectCandidates(settings, nightShiftId, capabilities, handle),
+  ]);
+  return [...direct, ...monday];
+}
+
+async function collectMondayCandidates(
+  settings: Settings,
+  nightShiftId: string | null,
+  capabilities: ShiftCapabilities,
   handle: DbHandle = db,
 ): Promise<CandidateContext[]> {
   // Everything Mac may READ. Whether he may take work from it is the
@@ -272,6 +379,17 @@ export async function collectCandidates(
   );
 
   const taskIds = items.map((i) => i.taskId).filter((id): id is string => Boolean(id));
+
+  // Sprint 3.3: a monday-backed task still has a KIND, and a board may perfectly
+  // well track research. Nothing about coming from monday makes work coding work.
+  const taskKindById = new Map<string, string>();
+  if (taskIds.length) {
+    const rows = await handle
+      .select({ id: tasks.id, taskKind: tasks.taskKind })
+      .from(tasks)
+      .where(inArray(tasks.id, taskIds));
+    for (const row of rows) taskKindById.set(row.id, row.taskKind);
+  }
 
   const briefs = taskIds.length
     ? await handle
@@ -364,8 +482,44 @@ export async function collectCandidates(
     const confidence = brief ? parseConfidence(brief.confidence) : null;
     const dependsOn = Array.isArray(item.dependsOn) ? (item.dependsOn as string[]) : [];
 
+    const taskKind = (taskKindById.get(item.taskId ?? '') ?? 'coding') as TaskKind;
+    const projectCapabilities = asCapabilityList(project.capabilities);
+    const allowedTaskKinds = asTaskKindList(project.allowedTaskKinds);
+
+    const requirements = evaluateTaskRequirements({
+      taskKind,
+      origin: 'monday',
+      facts: {
+        hasApprovedRepository: approvedRepoProjects.has(project.id),
+        hasApprovedBoard: true,
+        hasMondayItem: true,
+        hasBrief: Boolean(brief),
+        hasReasoningModel: capabilities.reasoningModelAvailable,
+        hasCompanyContext: capabilities.companyContextSatisfied,
+        codingAgentEnabled: settings.codingAgentEnabled,
+        projectCapabilities,
+        allowedTaskKinds,
+      },
+    });
+
     const input: EligibilityInput = {
-      project: { nightShiftApproved: project.nightShiftApproved, isActive: project.isActive },
+      project: {
+        nightShiftApproved: project.nightShiftApproved,
+        isActive: project.isActive,
+        capabilities: projectCapabilities,
+        allowedTaskKinds,
+      },
+      work: {
+        taskKind,
+        origin: 'monday',
+        title: item.name,
+        priority: 'normal',
+      },
+      capability: {
+        workerAvailable: capabilities.workerCapabilities.has(capabilityForTaskKind(taskKind)),
+        reasoningModelAvailable: capabilities.reasoningModelAvailable,
+        unmetRequirements: requirements.unmet,
+      },
       board: {
         isApproved: boardEntry.board.isApproved,
         nightShiftEligible: boardEntry.board.nightShiftEligible,
@@ -418,12 +572,240 @@ export async function collectCandidates(
         projectName: project.name,
         eligibility: verdict,
         effort,
+        source: 'monday',
+        taskKind,
       },
       input,
       taskId: item.taskId,
       boardRowId: boardEntry.board.id,
       mondayItemUrl: item.url,
       confidence,
+      taskKind,
+    });
+  });
+
+  return contexts;
+}
+
+/**
+ * The direct-task queue (Sprint 3.3 §5).
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT MAKES A DIRECT TASK ELIGIBLE, AND WHAT DOES NOT
+ *
+ * Deliberately NOT a relaxed version of the monday rules. A direct task passes
+ * the same authority gates — approved project, handoff brief, understanding
+ * confidence in the autonomous band, no run already in flight, not blocked
+ * earlier tonight — plus two the board used to cover implicitly:
+ *
+ *   * `task_kind_permitted`: a human allowed THIS KIND of work on THIS project.
+ *     The board's `allowedItemTypes` did this job for monday work; a direct task
+ *     has no board, so the permission moved onto the project where it belongs.
+ *
+ *   * `worker_capability_available`: an online worker advertises the capability.
+ *     Sprint 3.3 §22 — a run must not disappear into `queued` because nothing
+ *     can execute it.
+ *
+ * What it does NOT require is a repository (unless the work is coding) or a
+ * monday item (ever). Those two lines are the sprint.
+ * ---------------------------------------------------------------------------
+ */
+async function collectDirectCandidates(
+  settings: Settings,
+  nightShiftId: string | null,
+  capabilities: ShiftCapabilities,
+  handle: DbHandle = db,
+): Promise<CandidateContext[]> {
+  const rows = await handle
+    .select({ task: tasks, project: projects })
+    .from(tasks)
+    .innerJoin(projects, eq(projects.id, tasks.projectId))
+    .where(
+      and(
+        eq(tasks.origin, 'direct'),
+        /*
+         * Belt AND braces: origin says where it came from, `monday_item_id`
+         * says what it is linked to now, and this queue wants tasks for which
+         * both agree. A task that is linked to a board is that board's work
+         * whatever its origin column says, and collecting it here as well would
+         * let the scheduler consider one piece of work twice.
+         */
+        isNull(tasks.mondayItemId),
+        // `draft` and `ready` are the two states that mean "not yet done and not
+        // in flight". A task someone cancelled or completed is not work.
+        inArray(tasks.status, ['draft', 'ready']),
+        eq(projects.isActive, true),
+      ),
+    )
+    .orderBy(desc(tasks.createdAt))
+    .limit(200);
+
+  if (rows.length === 0) return [];
+
+  const taskIds = rows.map((r) => r.task.id);
+
+  const briefRows = await handle
+    .select()
+    .from(handoffBriefs)
+    .where(inArray(handoffBriefs.taskId, taskIds))
+    .orderBy(desc(handoffBriefs.version));
+  const briefByTask = new Map<string, (typeof briefRows)[number]>();
+  for (const brief of briefRows) if (!briefByTask.has(brief.taskId)) briefByTask.set(brief.taskId, brief);
+
+  const approvedRepoProjects = new Set(
+    (
+      await handle
+        .select({ projectId: repositories.projectId })
+        .from(repositories)
+        .where(eq(repositories.isApproved, true))
+    ).map((r) => r.projectId),
+  );
+
+  const activeTaskIds = new Set(
+    (
+      await handle
+        .select({ taskId: runs.taskId })
+        .from(runs)
+        .where(and(inArray(runs.taskId, taskIds), inArray(runs.status, [...ACTIVE_RUN_STATUSES])))
+    ).map((r) => r.taskId),
+  );
+
+  // Attempted during THIS shift, whatever the outcome. Same reasoning as the
+  // monday path: a completed run leaves no active run, and without this Mac
+  // would happily do the same investigation twice and write two reports.
+  const attemptedThisShift = new Set<string>();
+  if (nightShiftId) {
+    const attempted = await handle
+      .select({ taskId: runs.taskId })
+      .from(runs)
+      .where(and(inArray(runs.taskId, taskIds), eq(runs.nightShiftId, nightShiftId)));
+    for (const row of attempted) attemptedThisShift.add(row.taskId);
+  }
+
+  const blockedTaskIds = new Set<string>();
+  if (nightShiftId) {
+    const blocked = await handle
+      .select({ taskId: runs.taskId })
+      .from(runBlockers)
+      .innerJoin(runs, eq(runs.id, runBlockers.runId))
+      .where(and(eq(runs.nightShiftId, nightShiftId), eq(runBlockers.resolved, false)));
+    for (const row of blocked) blockedTaskIds.add(row.taskId);
+  }
+
+  /*
+   * A human pre-approved a narrower scope for this task.
+   *
+   * Identical to the monday path and identically strict: only a real approval
+   * row, made by a person, carrying `thresholdOverridden`. Inferring it from a
+   * brief that "looks scoped" would be Mac granting himself the permission the
+   * 60-79% band exists to withhold.
+   */
+  const scopeApproved = new Set<string>();
+  const approvedRows = await handle
+    .select({ taskId: runs.taskId })
+    .from(approvals)
+    .innerJoin(runs, eq(runs.id, approvals.runId))
+    .where(
+      and(
+        inArray(runs.taskId, taskIds),
+        eq(approvals.action, 'approve'),
+        eq(approvals.source, 'human'),
+        eq(approvals.thresholdOverridden, true),
+      ),
+    );
+  for (const row of approvedRows) scopeApproved.add(row.taskId);
+
+  const contexts: CandidateContext[] = [];
+
+  rows.forEach((row, index) => {
+    const { task, project } = row;
+    const taskKind = task.taskKind as TaskKind;
+    const brief = briefByTask.get(task.id);
+    const confidence = brief ? parseConfidence(brief.confidence) : null;
+
+    const projectCapabilities = asCapabilityList(project.capabilities);
+    const allowedTaskKinds = asTaskKindList(project.allowedTaskKinds);
+
+    const requirements = evaluateTaskRequirements({
+      taskKind,
+      origin: 'direct',
+      facts: {
+        hasApprovedRepository: approvedRepoProjects.has(project.id),
+        hasApprovedBoard: false,
+        // A direct task needs no monday item, so this is true by construction
+        // rather than by luck: `deriveExecutionRequirements` never asks for one.
+        hasMondayItem: false,
+        hasBrief: Boolean(brief),
+        hasReasoningModel: capabilities.reasoningModelAvailable,
+        hasCompanyContext: capabilities.companyContextSatisfied,
+        codingAgentEnabled: settings.codingAgentEnabled,
+        projectCapabilities,
+        allowedTaskKinds,
+      },
+    });
+
+    const input: EligibilityInput = {
+      project: {
+        nightShiftApproved: project.nightShiftApproved,
+        isActive: project.isActive,
+        capabilities: projectCapabilities,
+        allowedTaskKinds,
+      },
+      work: {
+        taskKind,
+        origin: 'direct',
+        title: task.title,
+        priority: task.priority as TaskPriority,
+      },
+      // No board and no item. Every board check is skipped rather than failed.
+      board: null,
+      item: null,
+      dependencyStatuses: {},
+      capability: {
+        workerAvailable: capabilities.workerCapabilities.has(capabilityForTaskKind(taskKind)),
+        reasoningModelAvailable: capabilities.reasoningModelAvailable,
+        unmetRequirements: requirements.unmet,
+      },
+      mac: {
+        briefConfidence: confidence,
+        hasApprovedLimitedScope: scopeApproved.has(task.id),
+        repositoryApproved: approvedRepoProjects.has(project.id),
+        hasActiveRun: activeTaskIds.has(task.id),
+        attemptedThisShift: attemptedThisShift.has(task.id),
+        blockedEarlierTonight: blockedTaskIds.has(task.id),
+      },
+      policy: {
+        minExecutionConfidence: settings.minExecutionConfidence,
+        defaultConfidenceThreshold: settings.defaultConfidenceThreshold,
+      },
+      boardOrder: index,
+    };
+
+    const verdict = evaluateEligibility(input);
+    const effort = estimateEffort({
+      brief: brief ? handoffBriefContentSchema.parse(brief.content) : null,
+      sizeLabel: null,
+      scopeKind: 'full',
+    });
+
+    contexts.push({
+      candidate: {
+        taskId: task.id,
+        mondayItemId: null,
+        title: task.title,
+        projectId: project.id,
+        projectName: project.name,
+        eligibility: verdict,
+        effort,
+        source: candidateSourceOf(input),
+        taskKind,
+      },
+      input,
+      taskId: task.id,
+      boardRowId: '',
+      mondayItemUrl: null,
+      confidence,
+      taskKind,
     });
   });
 
@@ -504,7 +886,21 @@ export async function nightShiftTick(now = new Date()): Promise<TickResult> {
       return { shiftId: shift.id, decision: 'record_blocker', runId: decision.runId, rationale: decision.rationale };
 
     case 'start': {
-      const context = contexts.find((c) => c.candidate.mondayItemId === decision.candidate.mondayItemId);
+      /*
+       * Matching by task id first, and by monday item id only as a fallback.
+       *
+       * The Sprint 3 line matched on `mondayItemId`, which for a direct task is
+       * null on BOTH sides — so `null === null` matched the first direct
+       * candidate in the list rather than the chosen one. Task id is the
+       * identity that exists for every candidate from either queue.
+       */
+      const context =
+        contexts.find((c) => decision.candidate.taskId !== null && c.taskId === decision.candidate.taskId) ??
+        contexts.find(
+          (c) =>
+            decision.candidate.mondayItemId !== null &&
+            c.candidate.mondayItemId === decision.candidate.mondayItemId,
+        );
       if (!context?.taskId) {
         return { shiftId: shift.id, decision: 'idle', rationale: decision.rationale };
       }
@@ -566,12 +962,28 @@ async function startSelectedTask(
     const [task] = await tx.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
     if (!task) return null;
 
+    /*
+     * Sprint 3.3: what kind of work this is decides how it is performed.
+     *
+     * Before this sprint the next twenty lines demanded an approved repository
+     * and then wrote `jobKind: 'claude_code'` unconditionally — so a research
+     * task that somehow reached here would either be dropped (no repository) or
+     * handed to a coding agent (reconciliation drift D-4). Spec section 3 says
+     * Mac delegates coding "where appropriate"; this is where "appropriate" is
+     * decided.
+     */
+    const taskKind = task.taskKind as TaskKind;
+    const jobKind = resolveJobKind(taskKind);
+    const needsRepository = jobKind === 'claude_code';
+
     const [repository] = await tx
       .select()
       .from(repositories)
       .where(and(eq(repositories.projectId, task.projectId), eq(repositories.isApproved, true)))
       .limit(1);
-    if (!repository) return null;
+    // Only coding work is refused for want of a repository. Research in a
+    // project that happens to have one may read it, and does not need it.
+    if (needsRepository && !repository) return null;
 
     const [brief] = await tx
       .select()
@@ -583,6 +995,21 @@ async function startSelectedTask(
 
     const confidence = parseConfidence(brief.confidence) ?? 0;
 
+    const jobParams = needsRepository
+      ? {
+          repositoryId: repository!.id,
+          briefId: brief.id,
+          provider: 'claude_code',
+          maxMinutes: settings.maxAgentMinutes,
+          openPullRequest: true,
+        }
+      : {
+          briefId: brief.id,
+          taskKind,
+          maxMinutes: settings.maxAgentMinutes,
+          maxSteps: settings.maxResearchSteps,
+        };
+
     const [run] = await tx
       .insert(runs)
       .values({
@@ -592,16 +1019,10 @@ async function startSelectedTask(
         // such below. It is queued in the same transaction.
         approvalState: 'approved',
         confidence: confidence.toFixed(3),
-        jobKind: 'claude_code',
-        jobParams: {
-          repositoryId: repository.id,
-          briefId: brief.id,
-          provider: 'claude_code',
-          maxMinutes: settings.maxAgentMinutes,
-          openPullRequest: true,
-        },
+        jobKind,
+        jobParams,
         executionMode: 'overnight',
-        repositoryId: repository.id,
+        repositoryId: needsRepository ? repository!.id : null,
         handoffBriefId: brief.id,
         scopeKind: confidence >= settings.defaultConfidenceThreshold ? 'full' : 'limited',
         nightShiftId: shift.id,
@@ -635,7 +1056,10 @@ async function startSelectedTask(
       policyBasis: {
         nightShiftId: shift.id,
         mondayItemId: context.candidate.mondayItemId,
-        boardRowId: context.boardRowId,
+        boardRowId: context.boardRowId || null,
+        // Sprint 3.3: the two facts that decide which authority applied.
+        source: context.candidate.source ?? 'monday',
+        taskKind: context.taskKind,
         eligibility: context.candidate.eligibility,
         effort: context.candidate.effort,
         rationale,
@@ -658,9 +1082,20 @@ async function startSelectedTask(
         source: 'night_shift_policy',
         nightShiftId: shift.id,
         mondayItemId: context.candidate.mondayItemId,
+        taskKind: context.taskKind,
+        jobKind,
         confidence,
         effort: context.candidate.effort.sizeClass,
-        basis: 'project approved + board approved + item flagged + eligibility predicate',
+        /*
+         * The authority chain, stated differently for the two queues because it
+         * genuinely IS different. A machine approval must be readable back to
+         * the human decisions that permit it, and "board approved + item
+         * flagged" is not true of a task that has no board.
+         */
+        basis:
+          (context.candidate.source ?? 'monday') === 'direct'
+            ? 'project approved for night shift + project permits this task kind + eligibility predicate'
+            : 'project approved + board approved + item flagged + eligibility predicate',
       },
     });
 
@@ -685,16 +1120,25 @@ async function startSelectedTask(
       `Selected autonomously during the night shift. ${rationale.reason}`,
     );
 
-    // monday.com: assign to Mac, set In Progress, say what he is doing.
-    await queueAssignToMac(tx, taskId, run.id);
-    await queueStatus(tx, taskId, run.id, 'in_progress');
-    await queueUpdate(
-      tx,
-      taskId,
-      run.id,
-      `**Mac has started this.**\n\n${rationale.reason}\n\nUnderstanding confidence ${(confidence * 100).toFixed(0)}%. ` +
-        'He will post again when it is ready for review, or if he gets blocked.',
-    );
+    /*
+     * monday.com, for work that came from monday.com.
+     *
+     * A direct task has no item to assign, no status to set and no update feed
+     * to post to. Writing to one anyway would mean inventing a board row, which
+     * Sprint 3.3 section 5 forbids and which would also put a fabricated task on
+     * a board humans read.
+     */
+    if (context.candidate.mondayItemId) {
+      await queueAssignToMac(tx, taskId, run.id);
+      await queueStatus(tx, taskId, run.id, 'in_progress');
+      await queueUpdate(
+        tx,
+        taskId,
+        run.id,
+        `**Mac has started this.**\n\n${rationale.reason}\n\nUnderstanding confidence ${(confidence * 100).toFixed(0)}%. ` +
+          'He will post again when it is ready for review, or if he gets blocked.',
+      );
+    }
 
     await tx
       .update(nightShifts)
@@ -1041,7 +1485,7 @@ export async function buildNightQueue(): Promise<NightCandidateDto[]> {
         projectName: c.candidate.projectName,
         mondayItemId: c.candidate.mondayItemId,
         mondayItemUrl: c.mondayItemUrl,
-        priority: c.input.item.priority,
+        priority: c.input.item?.priority ?? null,
         priorityRank: c.candidate.eligibility.priorityRank,
         confidence: c.confidence,
         eligibility: c.candidate.eligibility,

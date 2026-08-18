@@ -2,6 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { evaluateEligibility, type EligibilityInput } from '../../src/domain/eligibility.js';
 
 /**
+ * Sprint 3.3 made `board` and `item` nullable so that direct work can have a
+ * verdict at all. Every case below describes MONDAY-BACKED work, where both are
+ * always present — so the fixture narrows them once here rather than each test
+ * asserting non-null. No assertion in this file changed.
+ */
+type MondayEligibilityInput = EligibilityInput & {
+  board: NonNullable<EligibilityInput['board']>;
+  item: NonNullable<EligibilityInput['item']>;
+};
+
+/**
  * The eligibility predicate (Sprint 3 §7).
  *
  * Every one of these is a rule a human would otherwise have to trust Mac to
@@ -9,7 +20,7 @@ import { evaluateEligibility, type EligibilityInput } from '../../src/domain/eli
  * the whole argument for the predicate being code rather than a prompt.
  */
 
-const base = (): EligibilityInput => ({
+const base = (): MondayEligibilityInput => ({
   project: { nightShiftApproved: true, isActive: true },
   board: {
     isApproved: true,

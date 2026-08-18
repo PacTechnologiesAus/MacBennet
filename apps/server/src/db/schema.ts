@@ -50,10 +50,15 @@ import {
   REVIEW_VERDICTS,
   RUN_SELECTION_SOURCES,
   RUN_STATUSES,
+  ARTEFACT_FORMATS,
+  ARTEFACT_TYPES,
+  RESEARCH_STAGES,
   SANDBOX_KINDS,
   SANDBOX_NETWORK_MODES,
   SCOPE_KINDS,
   STOP_REASONS,
+  TASK_KINDS,
+  TASK_ORIGINS,
   TASK_PRIORITIES,
   TASK_STATUSES,
   USAGE_SOURCES,
@@ -207,6 +212,20 @@ export const settings = pgTable('settings', {
 
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+  // --- Sprint 3.3 ---
+  /** Master switch for general (non-coding) autonomous work. */
+  generalWorkEnabled: boolean('general_work_enabled').notNull().default(true),
+  maxResearchSteps: integer('max_research_steps').notNull().default(8),
+  maxResearchToolCalls: integer('max_research_tool_calls').notNull().default(40),
+  /**
+   * External research is OFF by default.
+   *
+   * It is the only capability in the system that reaches outside PAC, and a
+   * capability like that should be switched on deliberately rather than
+   * inherited from a default somebody chose while thinking about something else.
+   */
+  externalResearchEnabled: boolean('external_research_enabled').notNull().default(false),
+  allowedResearchDomains: jsonb('allowed_research_domains').notNull().default(sql`'[]'::jsonb`),
 });
 
 export const projects = pgTable(
@@ -231,6 +250,21 @@ export const projects = pgTable(
     nightShiftApproved: boolean('night_shift_approved').notNull().default(false),
     nightShiftApprovedBy: uuid('night_shift_approved_by').references(() => users.id, { onDelete: 'set null' }),
     nightShiftApprovedAt: timestamp('night_shift_approved_at', { withTimezone: true }),
+    /**
+     * Sprint 3.3: what this project actually HAS.
+     *
+     * A statement of fact, not a grant of authority. A project with no
+     * repository is a project that does research, not a misconfigured one.
+     */
+    capabilities: jsonb('capabilities').notNull().default(sql`'[]'::jsonb`),
+    /**
+     * Sprint 3.3: what a human has ALLOWED to happen here.
+     *
+     * Empty means nothing is allowed yet. Deliberately a separate axis from
+     * `capabilities` — having a repository does not imply anyone wants Mac
+     * writing code in it.
+     */
+    allowedTaskKinds: jsonb('allowed_task_kinds').notNull().default(sql`'[]'::jsonb`),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -251,7 +285,19 @@ export const tasks = pgTable(
     description: text('description'),
     status: enumText('status', TASK_STATUSES).notNull().default('draft'),
     priority: enumText('priority', TASK_PRIORITIES).notNull().default('normal'),
-    confidence: numeric('confidence', { precision: 4, scale: 3 }),
+    /**
+     * Sprint 3.3: the requester's own rough sense of how well-specified this is.
+     *
+     * NEVER an execution gate. Mac's understanding confidence is DERIVED through
+     * discovery and lives on `handoff_briefs.confidence`; this column was
+     * renamed from `confidence` precisely so the two can no longer be confused
+     * for one another (reconciliation drift D-7).
+     */
+    userInitialConfidence: numeric('user_initial_confidence', { precision: 4, scale: 3 }),
+    /** Sprint 3.3: what kind of work this is. Separate from how it is performed. */
+    taskKind: enumText('task_kind', TASK_KINDS).notNull().default('coding'),
+    /** Sprint 3.3: `direct` (created in Mac's UI) or `monday` (mirrored). */
+    origin: enumText('origin', TASK_ORIGINS).notNull().default('direct'),
     /** The monday.com item this task mirrors, when it came from a board. */
     mondayItemId: text('monday_item_id'),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
@@ -261,6 +307,8 @@ export const tasks = pgTable(
   (t) => ({
     projectIdx: index('tasks_project_id_idx').on(t.projectId),
     statusIdx: index('tasks_status_idx').on(t.status),
+    taskKindIdx: index('tasks_task_kind_idx').on(t.taskKind),
+    originIdx: index('tasks_origin_idx').on(t.origin),
     mondayItemIdx: index('tasks_monday_item_id_idx').on(t.mondayItemId),
   }),
 );
@@ -1222,11 +1270,14 @@ export const discoveryInvestigations = pgTable(
     evidence: jsonb('evidence').notNull().default(sql`'[]'::jsonb`),
     escalatedToHuman: boolean('escalated_to_human').notNull().default(false),
     modelAssisted: boolean('model_assisted').notNull().default(false),
+    /** Sprint 3.3: the brief whose gap this receipt belongs to, when discovery ran it. */
+    briefId: uuid('brief_id').references(() => handoffBriefs.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     taskIdx: index('discovery_investigations_task_id_idx').on(t.taskId),
     runIdx: index('discovery_investigations_run_id_idx').on(t.runId),
+    briefIdx: index('discovery_investigations_brief_idx').on(t.briefId),
   }),
 );
 
@@ -1343,6 +1394,81 @@ export const companyContextStatus = pgTable('company_context_status', {
  * act, outside this system. A CHECK requires a reviewer on any decided row, so
  * an accepted proposal can never look like one Mac accepted himself.
  */
+/**
+ * Sprint 3.3: results that are not commits.
+ *
+ * Every column here exists because a reader needs it to judge the document:
+ * what kind of thing it is, what it says, what is behind each claim, which PAC
+ * policy governed it, and what it cost. An artefact without provenance is a
+ * confident essay, and a confident essay from an autonomous agent is exactly
+ * what nobody should act on.
+ */
+export const runArtefacts = pgTable(
+  'run_artefacts',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    /** Nullable: a future day-mode artefact may exist without a run. */
+    runId: uuid('run_id').references(() => runs.id, { onDelete: 'set null' }),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    artefactType: enumText('artefact_type', ARTEFACT_TYPES).notNull(),
+    title: text('title').notNull(),
+    format: enumText('format', ARTEFACT_FORMATS).notNull().default('markdown'),
+    summary: text('summary').notNull().default(''),
+    body: text('body').notNull(),
+    /** [{statement, evidenceClass, confidence, sources[], reasoning}] */
+    findings: jsonb('findings').notNull().default(sql`'[]'::jsonb`),
+    /** Immutable once set — enforced by trigger, as for runs and briefs. */
+    companyContextRevisionId: uuid('company_context_revision_id'),
+    modelProvider: text('model_provider'),
+    modelName: text('model_name'),
+    inputTokens: integer('input_tokens'),
+    outputTokens: integer('output_tokens'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runIdx: index('run_artefacts_run_idx').on(t.runId),
+    taskIdx: index('run_artefacts_task_idx').on(t.taskId),
+    projectIdx: index('run_artefacts_project_idx').on(t.projectId),
+    createdIdx: index('run_artefacts_created_idx').on(t.createdAt),
+  }),
+);
+
+/**
+ * Sprint 3.3: what one general run accumulates between its steps.
+ *
+ * A 1:1 extension of `runs` rather than six always-null columns on it, so the
+ * dispatch query — the hottest path in the system — does not widen for a run
+ * kind it never selects on.
+ *
+ * This is NOT a second run table. The run is still a `runs` row with a status, a
+ * worker, a lease, an approval and an audit trail; this holds the plan it is
+ * executing and the evidence it has gathered so far.
+ */
+export const generalRunState = pgTable('general_run_state', {
+  runId: uuid('run_id')
+    .primaryKey()
+    .references(() => runs.id, { onDelete: 'cascade' }),
+  taskKind: text('task_kind').notNull(),
+  /** Built server-side from the brief. The model is given it, never writes it. */
+  plan: jsonb('plan').notNull().default(sql`'{}'::jsonb`),
+  state: jsonb('state').notNull().default(sql`'{}'::jsonb`),
+  stage: enumText('stage', RESEARCH_STAGES).notNull().default('planning'),
+  stepsTaken: integer('steps_taken').notNull().default(0),
+  toolCallsMade: integer('tool_calls_made').notNull().default(0),
+  modelProvider: text('model_provider'),
+  modelName: text('model_name'),
+  inputTokens: integer('input_tokens').notNull().default(0),
+  outputTokens: integer('output_tokens').notNull().default(0),
+  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const companyContextProposals = pgTable(
   'company_context_proposals',
   {
@@ -1418,6 +1544,9 @@ export type EmailDeliveryRow = typeof emailDeliveries.$inferSelect;
 export type CompanyContextRevisionRow = typeof companyContextRevisions.$inferSelect;
 export type CompanyContextStatusRow = typeof companyContextStatus.$inferSelect;
 export type CompanyContextProposalRow = typeof companyContextProposals.$inferSelect;
+// --- Sprint 3.3 ---
+export type RunArtefactRow = typeof runArtefacts.$inferSelect;
+export type GeneralRunStateRow = typeof generalRunState.$inferSelect;
 
 /**
  * The authoritative list of enum CHECK constraints.
@@ -1481,4 +1610,10 @@ export const ENUM_CHECKS: Array<{ table: string; column: string; values: readonl
   { table: 'company_context_revisions', column: 'provider_kind', values: COMPANY_CONTEXT_PROVIDER_KINDS },
   { table: 'company_context_status', column: 'status', values: COMPANY_CONTEXT_STATUSES },
   { table: 'company_context_proposals', column: 'status', values: COMPANY_PROPOSAL_STATUSES },
+  // --- Sprint 3.3 ---
+  { table: 'tasks', column: 'task_kind', values: TASK_KINDS },
+  { table: 'tasks', column: 'origin', values: TASK_ORIGINS },
+  { table: 'run_artefacts', column: 'artefact_type', values: ARTEFACT_TYPES },
+  { table: 'run_artefacts', column: 'format', values: ARTEFACT_FORMATS },
+  { table: 'general_run_state', column: 'stage', values: RESEARCH_STAGES },
 ];
