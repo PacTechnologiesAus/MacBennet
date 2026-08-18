@@ -20,6 +20,8 @@ import { record, type Actor } from './audit.js';
 import { getSettings } from './settings.js';
 import { structureBriefWithModel } from './model/resolvers.js';
 import { contextRefFor, requireActiveRevision } from './company-context/service.js';
+import { revisionById } from './company-context/loader.js';
+import { selectCompanyContext } from './company-context/selection.js';
 import { recordContextBinding } from './company-context/bindings.js';
 
 /**
@@ -374,9 +376,36 @@ export async function generateBrief(
      *      brief is never argued with.
      */
     const settings = await getSettings(tx);
+
+    /*
+     * Sprint 3.2: the PAC company context this discovery is bound to.
+     *
+     * Selected against the conversation, and used only as GROUNDING VOCABULARY
+     * for the model-assisted structurer - never as instructions. It is what lets
+     * Mac keep a constraint the engineer implied by naming a PAC process, rather
+     * than dropping it because the phrase lives in company policy instead of in
+     * the transcript.
+     */
+    let companyContextText = '';
+    if (session.companyContextRevisionId) {
+      const revision = await revisionById(session.companyContextRevisionId, tx);
+      if (revision && revision.validationState === 'valid') {
+        const selection = await selectCompanyContext(revision, {
+          text: `${task.title} ${conversation}`,
+        }).catch(() => null);
+        if (selection) {
+          companyContextText = [...selection.core, ...selection.taskRelevant]
+            .map((s) => s.text)
+            .join('\n\n');
+        }
+      }
+    }
+
     let modelStructure: Partial<HandoffBriefContent> = {};
     if (settings.modelAssistEnabled) {
-      const outcome = await structureBriefWithModel(task.title, conversation).catch(() => null);
+      const outcome = await structureBriefWithModel(task.title, conversation, companyContextText).catch(
+        () => null,
+      );
       if (outcome?.structure) {
         modelStructure = onlyEmptyFields(derived, outcome.structure);
       }
@@ -396,6 +425,8 @@ export async function generateBrief(
             // supported. The number worth watching.
             ungroundedFieldsDropped: outcome.record.fabricatedCitations,
             fieldsFilled: Object.keys(modelStructure),
+            // Whether PAC company context was available to the structurer.
+            companyContextChars: companyContextText.length,
           },
         });
       }

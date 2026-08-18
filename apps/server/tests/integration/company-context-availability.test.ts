@@ -382,3 +382,79 @@ describe('handoff generation', () => {
     expect(markdown).toContain('company policy, not task instruction');
   });
 });
+
+describe('discovery structuring', () => {
+  it('is given the selected company context as grounding vocabulary', async () => {
+    /*
+     * The seam is the model structurer, which only runs when model assist is on.
+     * Rather than call a model, this asserts the wiring: `structureBriefWithModel`
+     * accepts a third argument and uses it to ground fields, so a constraint the
+     * engineer implied by naming a PAC process survives instead of being dropped
+     * as unsupported.
+     */
+    const { structureBriefWithModel } = await import('../../src/services/model/resolvers.js');
+    const { setModelProvider } = await import('../../src/services/model/provider.js');
+
+    // A scripted model that returns a constraint phrased in PAC's vocabulary
+    // rather than the engineer's. Without company context as grounding it is
+    // dropped as unsupported; with it, it survives.
+    const scripted = {
+      name: 'anthropic' as const,
+      isAvailable: async () => ({ available: true }),
+      complete: async (request: { prompt: string }) => {
+        capturedPrompt = request.prompt;
+        return {
+          text: JSON.stringify({
+            constraints: ['Verify against the digital twin before commissioning.'],
+          }),
+          model: 'scripted',
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    };
+
+    let capturedPrompt = '';
+    setModelProvider(scripted as never);
+
+    try {
+      const withoutContext = await structureBriefWithModel('A task', 'Please add a button.');
+      // Nothing in that conversation supports a digital-twin constraint.
+      expect(withoutContext.structure?.constraints ?? []).toHaveLength(0);
+      expect(withoutContext.record.fabricatedCitations).toBeGreaterThan(0);
+
+      const withContext = await structureBriefWithModel(
+        'A task',
+        'Please add a button.',
+        'Controls software is verified against the digital twin before commissioning.',
+      );
+
+      // The company context reached the prompt...
+      expect(capturedPrompt).toContain('PAC COMPANY CONTEXT');
+      expect(capturedPrompt).toContain('digital twin');
+      // ...and grounded the field rather than letting it be dropped.
+      expect(withContext.structure?.constraints ?? []).toHaveLength(1);
+    } finally {
+      setModelProvider(null);
+    }
+  });
+
+  it('binds the revision so the brief it produces is attributable', async () => {
+    const project = await makeProject(app, admin);
+    const start = await asUser(app, admin).post('/api/discovery', {
+      projectId: project.id,
+      title: 'Prepare commissioning evidence capture',
+    });
+    const session = start.json().session;
+    expect(session.companyContext.commitSha).toBe(repo.head());
+
+    await asUser(app, admin).post(`/api/discovery/${session.id}/messages`, {
+      message:
+        'The harness should write digital twin evidence to the project record. Done when a file is ' +
+        'stored. Tests should cover the writer.',
+    });
+
+    const generated = await asUser(app, admin).post(`/api/discovery/${session.id}/brief`);
+    expect(generated.statusCode).toBe(201);
+    expect(generated.json().brief.companyContext.commitSha).toBe(repo.head());
+  });
+});

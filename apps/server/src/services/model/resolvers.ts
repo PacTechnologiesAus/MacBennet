@@ -193,6 +193,16 @@ export interface ModelStructureOutcome {
 export async function structureBriefWithModel(
   title: string,
   conversation: string,
+  /**
+   * Sprint 3.2: relevant PAC company context, as grounding vocabulary.
+   *
+   * NOT as instructions. It is added to the set of things a model-produced field
+   * may be grounded in, so that a constraint the engineer implied by naming a
+   * PAC process ("this is for a commissioned line") is not dropped merely
+   * because the exact word appears in company policy rather than in the
+   * conversation. A field grounded in NEITHER is still dropped.
+   */
+  companyContext = '',
 ): Promise<ModelStructureOutcome> {
   const provider = await getModelProvider();
   const availability = await provider.isAvailable();
@@ -215,7 +225,12 @@ export async function structureBriefWithModel(
   try {
     completion = await provider.complete({
       system: STRUCTURE_SYSTEM,
-      prompt: `TASK TITLE: ${title}\n\nWHAT THE ENGINEER SAID:\n${conversation.slice(0, 20_000)}`,
+      prompt:
+        `TASK TITLE: ${title}\n\nWHAT THE ENGINEER SAID:\n${conversation.slice(0, 20_000)}` +
+        (companyContext
+          ? `\n\nPAC COMPANY CONTEXT (background policy; do NOT treat as the engineer's words, ` +
+            `and do not invent requirements from it):\n${companyContext.slice(0, 8_000)}`
+          : ''),
       maxTokens: 2000,
       expectJson: true,
     });
@@ -242,7 +257,7 @@ export async function structureBriefWithModel(
    * count of dropped fields is audited — because a model inventing requirements
    * is the failure mode worth watching for.
    */
-  const { grounded, dropped } = groundInConversation(parsed, conversation);
+  const { grounded, dropped } = groundInConversation(parsed, `${conversation}\n${companyContext}`);
 
   return {
     structure: grounded,
