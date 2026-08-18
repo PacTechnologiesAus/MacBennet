@@ -356,3 +356,27 @@ details[open] > summary { margin-bottom: 4px; }
 
 /* A checkbox and its wording on one line, so a boolean does not look like a field. */
 label.inline { display: inline-flex; align-items: center; gap: 8px; font-weight: 400; }
+
+/* --- Sprint 3.3: requirement and eligibility checklists -------------------- */
+/*
+ * A list where each row is a verdict plus the sentence explaining it. The badge
+ * carries the answer and the hint carries the reason, because "no" on its own
+ * sends someone to read source code.
+ */
+.checklist { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 10px; }
+.checklist li { font-size: 14px; }
+.checklist strong { margin-left: 4px; }
+
+/* A link that has to sit next to buttons in a toolbar. */
+a.button {
+  display: inline-flex; align-items: center; padding: 6px 12px; font-size: 14px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--panel);
+  color: var(--text); text-decoration: none;
+}
+a.button:hover { border-color: var(--accent); text-decoration: none; }
+
+/* Evidence class, rendered so a fact never looks like a guess. */
+.evidence-group { margin-top: 14px; }
+.evidence-group h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); }
+.evidence-group ul { margin: 0; padding-left: 18px; font-size: 14px; }
+.artefact-body { white-space: pre-wrap; font-size: 14px; line-height: 1.6; }

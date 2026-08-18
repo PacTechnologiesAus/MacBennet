@@ -1,11 +1,21 @@
 import { desc, eq, gte } from 'drizzle-orm';
-import { handoffBriefContentSchema, reviewEvidenceSchema, type MorningReportDto, type StopReason } from '@mac/protocol';
+import {
+  handoffBriefContentSchema,
+  isGeneralJobKind,
+  reviewEvidenceSchema,
+  type MorningReportDto,
+  type StopReason,
+  type TaskKind,
+} from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
 import { handoffBriefs, projects, runReports, runReviews, runs, tasks } from '../db/schema.js';
 import { AppError } from '../http/errors.js';
-import { buildMorningReport } from '../domain/report.js';
+import { buildMorningReport, type ReportInputs } from '../domain/report.js';
 import type { ReviewOutcome } from '../domain/review.js';
 import { getSettings } from './settings.js';
+import { listArtefacts } from './artefacts.js';
+import { getGeneralRunState } from './research/runner.js';
+import { contextRefFor } from './company-context/service.js';
 import { listAssumptions, listBlockers, listQuestions } from './coding-sessions.js';
 import { getPullRequest } from './reviews.js';
 import { usageSummaryForRun } from './usage.js';
@@ -24,6 +34,42 @@ import { record, type Actor } from './audit.js';
  * change underneath them.
  */
 
+/**
+ * The findings, deliverables and source counts of a general run.
+ *
+ * Returns null for a coding run, which is what keeps every Sprint 3 report
+ * identical: `buildMorningReport` branches on this being present, not on a flag
+ * somebody might set inconsistently.
+ */
+async function generalReportBlock(
+  jobKind: string,
+  runId: string,
+  tx: DbHandle,
+): Promise<ReportInputs['general']> {
+  if (!isGeneralJobKind(jobKind)) return null;
+
+  const [state, artefacts] = await Promise.all([
+    getGeneralRunState(runId, tx),
+    listArtefacts({ runId }, tx),
+  ]);
+
+  return {
+    findings: state?.state.findings ?? [],
+    unknowns: state?.state.unknowns ?? [],
+    artefacts: artefacts.map((a) => ({
+      id: a.id,
+      type: a.type,
+      title: a.title,
+      summary: a.summary || a.body.slice(0, 200),
+    })),
+    sourcesConsulted: state?.state.sources.length ?? 0,
+    // Counted separately because a claim resting on the public internet is a
+    // different kind of claim from one resting on PAC's own records, and a
+    // reader deciding how much to trust the report should see the split.
+    externalSourcesUsed: (state?.state.sources ?? []).filter((source) => source.external).length,
+  };
+}
+
 export async function generateRunReport(runId: string, actor: Actor, handle?: DbHandle): Promise<MorningReportDto> {
   const run = async (tx: DbHandle) => {
     const [row] = await tx
@@ -36,6 +82,9 @@ export async function generateRunReport(runId: string, actor: Actor, handle?: Db
         status: runs.status,
         stopReason: runs.stopReason,
         briefId: runs.handoffBriefId,
+        jobKind: runs.jobKind,
+        taskKind: tasks.taskKind,
+        companyContextRevisionId: runs.companyContextRevisionId,
       })
       .from(runs)
       .innerJoin(tasks, eq(tasks.id, runs.taskId))
@@ -97,6 +146,17 @@ export async function generateRunReport(runId: string, actor: Actor, handle?: Db
       pullRequest: pullRequest ? { url: pullRequest.url, number: pullRequest.number } : null,
       answerConfidenceThreshold: settings.answerConfidenceThreshold,
       generatedAt: new Date(),
+      taskKind: row.taskKind as TaskKind,
+      /*
+       * Sprint 3.3: the general-work block, present only for a general run.
+       *
+       * Its presence is what switches the report from "what changed" to "what
+       * Mac found" and drops the pull-request section — so a coding run gets
+       * byte-identical output to Sprint 3, and a research run gets a report
+       * shaped like its own work.
+       */
+      general: await generalReportBlock(row.jobKind, runId, tx),
+      companyContext: await contextRefFor(row.companyContextRevisionId, tx),
     });
 
     await tx

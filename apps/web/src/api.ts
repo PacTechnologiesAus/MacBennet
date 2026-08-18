@@ -27,6 +27,11 @@ import type {
   UpdateSettingsRequest,
   UpdateTaskRequest,
   WorkerDto,
+  // --- Sprint 3.3 ---
+  ArtefactDto,
+  GeneralRunStateDto,
+  TaskExecutionStateDto,
+  UpdateProjectCapabilitiesRequest,
   // --- Sprint 3 ---
   CompanyContextStatusDto,
   CompanyProposalDto,
@@ -111,11 +116,27 @@ export const api = {
   createProject: (body: CreateProjectRequest) => post<{ project: ProjectDto }>('/api/projects', body),
   updateProject: (id: string, body: UpdateProjectRequest) =>
     patch<{ project: ProjectDto }>(`/api/projects/${id}`, body),
+  /** Admin only: `allowedTaskKinds` is an authority grant, not a description. */
+  updateProjectCapabilities: (id: string, body: UpdateProjectCapabilitiesRequest) =>
+    patch<{ project: ProjectDto }>(`/api/projects/${id}/capabilities`, body),
 
   // --- Tasks --------------------------------------------------------------
   listTasks: (projectId?: string) =>
     get<{ tasks: TaskDto[] }>(`/api/tasks${projectId ? `?projectId=${projectId}` : ''}`),
-  getTask: (id: string) => get<{ task: TaskDto; runs: RunDto[] }>(`/api/tasks/${id}`),
+  getTask: (id: string) =>
+    get<{
+      task: TaskDto;
+      runs: RunDto[];
+      // Sprint 3.3: everything the screen needs to explain why a task can or
+      // cannot run, assembled server-side from the same domain functions the
+      // night scheduler uses.
+      execution: TaskExecutionStateDto;
+      artefacts: ArtefactDto[];
+      discovery: DiscoverySessionDto[];
+    }>(`/api/tasks/${id}`),
+  /** Sprint 3.3: the action a draft task was missing entirely. */
+  startTaskDiscovery: (id: string) =>
+    post<{ discovery: DiscoverySessionDto; created: boolean }>(`/api/tasks/${id}/discovery`, {}),
   createTask: (body: CreateTaskRequest) => post<{ task: TaskDto }>('/api/tasks', body),
   updateTask: (id: string, body: UpdateTaskRequest) => patch<{ task: TaskDto }>(`/api/tasks/${id}`, body),
 
@@ -128,7 +149,13 @@ export const api = {
     return get<{ runs: RunDto[] }>(`/api/runs${suffix ? `?${suffix}` : ''}`);
   },
   getRun: (id: string) =>
-    get<{ run: RunDto; approvals: ApprovalDto[]; auditEvents: AuditEventDto[] }>(`/api/runs/${id}`),
+    get<{
+      run: RunDto;
+      approvals: ApprovalDto[];
+      auditEvents: AuditEventDto[];
+      artefacts: ArtefactDto[];
+      research: GeneralRunStateDto | null;
+    }>(`/api/runs/${id}`),
   getRunLogs: (id: string, afterId?: number) =>
     get<{ logs: RunLogDto[]; cursor: number | null }>(
       `/api/runs/${id}/logs${afterId !== undefined ? `?afterId=${afterId}` : ''}`,
@@ -141,6 +168,16 @@ export const api = {
   cancelRun: (id: string, reason?: string) => post<{ run: RunDto }>(`/api/runs/${id}/cancel`, { reason }),
   forceCancelRun: (id: string, reason?: string) => post<{ run: RunDto }>(`/api/runs/${id}/force-cancel`, { reason }),
   jobCatalogue: () => get<{ jobs: JobDescriptor[] }>('/api/job-catalogue'),
+
+  // --- Artefacts (Sprint 3.3) ----------------------------------------------
+  listArtefacts: (params: { taskId?: string; runId?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.taskId) query.set('taskId', params.taskId);
+    if (params.runId) query.set('runId', params.runId);
+    const suffix = query.toString();
+    return get<{ artefacts: ArtefactDto[] }>(`/api/artefacts${suffix ? `?${suffix}` : ''}`);
+  },
+  getArtefact: (id: string) => get<{ artefact: ArtefactDto; markdown: string }>(`/api/artefacts/${id}`),
 
   // --- Workers ------------------------------------------------------------
   listWorkers: () => get<{ workers: WorkerDto[] }>('/api/workers'),

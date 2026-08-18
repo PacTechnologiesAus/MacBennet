@@ -20,6 +20,8 @@ import {
 } from '../../services/runs.js';
 import { getRunLogs } from '../../services/logs.js';
 import { auditTrailForRun } from '../../services/audit-query.js';
+import { listArtefacts } from '../../services/artefacts.js';
+import { getGeneralRunState } from '../../services/research/runner.js';
 import { currentActor, requireAuth, requireRole } from '../auth-plugin.js';
 
 export async function runRoutes(app: FastifyInstance): Promise<void> {
@@ -40,12 +42,16 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/runs/:id', { preHandler: requireAuth }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const [run, approvals, auditEvents] = await Promise.all([
+    const [run, approvals, auditEvents, artefacts, research] = await Promise.all([
       getRun(id),
       listApprovals(id),
       auditTrailForRun(id),
+      // Sprint 3.3: a general run's results and its research state. Both null or
+      // empty for a coding run, so the screen renders nothing extra for one.
+      listArtefacts({ runId: id }),
+      getGeneralRunState(id),
     ]);
-    return reply.send({ run, approvals, auditEvents });
+    return reply.send({ run, approvals, auditEvents, artefacts, research });
   });
 
   /** Polled by the Run Detail screen. `afterId` is the monotonic cursor. */

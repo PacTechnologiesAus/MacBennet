@@ -1,4 +1,5 @@
 import {
+  establishedFindings,
   computeUsageDelta,
   describeUsageSource,
   PROVIDER_USAGE_UNAVAILABLE,
@@ -9,6 +10,8 @@ import {
   type RunUsageSummaryDto,
   type UsageSnapshot,
   type UsageSnapshotDto,
+  type Finding,
+  type TaskKind,
 } from '@mac/protocol';
 import type { ReviewOutcome } from './review.js';
 
@@ -42,6 +45,24 @@ export interface ReportInputs {
   /** Threshold below which an answer counts as low-confidence. */
   answerConfidenceThreshold: number;
   generatedAt: Date;
+  /**
+   * Sprint 3.3: what kind of work this run performed.
+   *
+   * Decides which sections the report has. A research run has no diff, no
+   * tests and no pull request, and a report that printed those headings with
+   * "None" under each would read as a coding run that went badly rather than a
+   * research run that went well.
+   */
+  taskKind?: TaskKind;
+  /** Sprint 3.3: what a non-coding run established and produced. */
+  general?: {
+    findings: Finding[];
+    unknowns: string[];
+    artefacts: Array<{ id: string; type: string; title: string; summary: string }>;
+    sourcesConsulted: number;
+    externalSourcesUsed: number;
+  } | null;
+  companyContext?: { shortSha: string; contextVersion: string } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +281,29 @@ export function buildMorningReport(input: ReportInputs): MorningReportDto {
     questionsLogUrl: `/runs/${input.runId}/questions`,
     pullRequestUrl: input.pullRequest?.url ?? null,
     pullRequestDeclineReason: input.pullRequest ? null : (input.review?.prDeclineReason ?? null),
+    ...(input.taskKind ? { taskKind: input.taskKind } : {}),
+    ...(input.general
+      ? {
+          findings: {
+            /*
+             * Only ESTABLISHED findings reach the report's headline list.
+             *
+             * Inferences and recommendations are Mac's own work and belong in
+             * the artefact, where they sit under a heading that says so. A
+             * morning report that mixed them into one bulleted list would be the
+             * single most effective way to get a guess acted on.
+             */
+            keyFindings: establishedFindings(input.general.findings)
+              .slice(0, 8)
+              .map((f) => `${f.statement} _(${f.sources.slice(0, 2).join(', ')})_`),
+            unknowns: input.general.unknowns.slice(0, 8),
+            artefacts: input.general.artefacts,
+            sourcesConsulted: input.general.sourcesConsulted,
+            externalSourcesUsed: input.general.externalSourcesUsed,
+          },
+        }
+      : {}),
+    ...(input.companyContext !== undefined ? { companyContext: input.companyContext } : {}),
     estimatedHumanHours: effort.hours,
     estimatedHumanHoursBasis: effort.basis,
     usage: input.usage,
@@ -273,6 +317,28 @@ export function buildMorningReport(input: ReportInputs): MorningReportDto {
 
 /** One or two sentences. If Mac needs a paragraph here, he is doing it wrong. */
 function shortWhatChanged(input: ReportInputs): string {
+  /*
+   * For non-coding work the question "what changed" is the wrong one.
+   *
+   * Nothing changed, by design — the deliverable is what Mac FOUND OUT. Asking
+   * the coding question of a research run produces "No code changes were
+   * produced", which is true, useless, and reads like a failure.
+   */
+  if (input.general) {
+    const established = establishedFindings(input.general.findings).length;
+    const artefacts = input.general.artefacts.length;
+    if (artefacts === 0) {
+      return (
+        `No artefacts were produced. ${input.general.sourcesConsulted} source(s) were consulted; ` +
+        `${input.general.unknowns.length} question(s) remain open.`
+      );
+    }
+    return (
+      `${artefacts} artefact(s) produced: ${input.general.artefacts.map((a) => a.title).join('; ')}. ` +
+      `${established} established finding(s) from ${input.general.sourcesConsulted} source(s).`
+    );
+  }
+
   const e = input.evidence;
   if (!e || e.diffStat.files === 0) {
     return input.outcome === 'completed'
@@ -294,7 +360,35 @@ export function renderMorningReportMarkdown(r: MorningReportDto): string {
   const out: string[] = [];
   out.push(`# ${r.taskTitle}`, '', `_${r.projectName} · ${new Date(r.generatedAt).toISOString()} · outcome: **${r.outcome}**_`, '');
 
-  out.push('## What Changed', '', r.whatChanged, '');
+  out.push(r.findings ? '## What Mac Found' : '## What Changed', '', r.whatChanged, '');
+
+  if (r.findings) {
+    out.push('## Key Findings', '');
+    out.push(
+      r.findings.keyFindings.length
+        ? r.findings.keyFindings.map((f) => `- ${f}`).join('\n')
+        : 'Nothing could be established from the sources available.',
+      '',
+    );
+
+    out.push('## Artefacts', '');
+    out.push(
+      r.findings.artefacts.length
+        ? r.findings.artefacts.map((a) => `- **${a.title}** (${a.type.replace(/_/g, ' ')}) — ${a.summary}`).join('\n')
+        : 'None produced.',
+      '',
+    );
+
+    /*
+     * Unknowns get their own heading rather than being folded into exceptions.
+     *
+     * "Mac looked and could not establish this" is a RESULT, and it is often the
+     * most useful line in the report. Filing it under anomalies would make an
+     * honest answer look like something went wrong.
+     */
+    out.push('## Still Unknown', '');
+    out.push(r.findings.unknowns.length ? r.findings.unknowns.map((u) => `- ${u}`).join('\n') : 'Nothing outstanding.', '');
+  }
   out.push('## Why', '', r.why, '');
   out.push('## Risk', '', `**${r.risk.toUpperCase()}** — ${r.riskRationale}`, '');
 
@@ -320,12 +414,33 @@ export function renderMorningReportMarkdown(r: MorningReportDto): string {
     '',
   );
 
-  out.push('## Pull Request', '');
-  out.push(r.pullRequestUrl ? r.pullRequestUrl : `None opened. ${r.pullRequestDeclineReason ?? 'No reason recorded.'}`, '');
+  /*
+   * The pull-request section appears only for work that could have produced one.
+   *
+   * Sprint 3.3 §25: coding-only fields must be optional. Printing "None opened"
+   * on a research report invites the reader to ask why, about a thing that was
+   * never going to happen.
+   */
+  if (!r.findings) {
+    out.push('## Pull Request', '');
+    out.push(r.pullRequestUrl ? r.pullRequestUrl : `None opened. ${r.pullRequestDeclineReason ?? 'No reason recorded.'}`, '');
+  }
 
   out.push('## Estimated Human Hours', '', `~${r.estimatedHumanHours}h — ${r.estimatedHumanHoursBasis}`, '');
 
   out.push('## AI Usage', '', renderUsageLine(r.usage), '');
+
+  if (r.findings) {
+    out.push(
+      '',
+      `_${r.findings.sourcesConsulted} source(s) consulted` +
+        (r.findings.externalSourcesUsed > 0
+          ? `, ${r.findings.externalSourcesUsed} from outside PAC`
+          : ', none from outside PAC') +
+        (r.companyContext ? ` · PAC company context ${r.companyContext.shortSha}` : '') +
+        '_',
+    );
+  }
 
   return out.join('\n').trimEnd();
 }

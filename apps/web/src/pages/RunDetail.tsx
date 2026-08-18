@@ -1,11 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { ApprovalDto, AuditEventDto, CurrentUser, RunDto, RunLogDto, SettingsDto } from '@mac/protocol';
+import type {
+  ApprovalDto,
+  ArtefactDto,
+  AuditEventDto,
+  CurrentUser,
+  GeneralRunStateDto,
+  RunDto,
+  RunLogDto,
+  SettingsDto,
+} from '@mac/protocol';
 import { isTerminalRunStatus } from '@mac/protocol';
 import { api, ApiError } from '../api.js';
 import { CompanyContextBadge } from './CompanyContext.js';
 import { Alert, ApprovalBadge, Badge, Confidence, Empty, Field, RunStatusBadge, Time, humanise } from '../components/ui.js';
 import { CodingRunPanels } from './CodingRun.js';
+import { ArtefactList } from './TaskDetail.js';
 
 /**
  * Run Detail.
@@ -20,6 +30,10 @@ export function RunDetail({ user }: { user: CurrentUser }) {
   const [run, setRun] = useState<RunDto | null>(null);
   const [approvals, setApprovals] = useState<ApprovalDto[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEventDto[]>([]);
+  // Sprint 3.3: empty and null respectively for a coding run, so nothing extra
+  // renders on one.
+  const [artefacts, setArtefacts] = useState<ArtefactDto[]>([]);
+  const [research, setResearch] = useState<GeneralRunStateDto | null>(null);
   const [settings, setSettings] = useState<SettingsDto | null>(null);
   const [logs, setLogs] = useState<RunLogDto[]>([]);
   const [error, setError] = useState('');
@@ -38,6 +52,8 @@ export function RunDetail({ user }: { user: CurrentUser }) {
     setRun(detail.run);
     setApprovals(detail.approvals);
     setAuditEvents(detail.auditEvents);
+    setArtefacts(detail.artefacts);
+    setResearch(detail.research);
   }, [id]);
 
   const loadLogs = useCallback(async () => {
@@ -249,6 +265,69 @@ export function RunDetail({ user }: { user: CurrentUser }) {
           )}
         </div>
       </div>
+
+      {research && (
+        <div className="card">
+          <h2>Research</h2>
+          <dl className="kv">
+            <dt>Objective</dt>
+            <dd>{research.plan?.objective ?? <span className="dim">—</span>}</dd>
+            <dt>Stage</dt>
+            <dd>
+              <Badge tone={research.stage === 'complete' ? 'ok' : 'idle'}>{research.stage}</Badge>{' '}
+              step {research.stepsTaken}
+              {research.plan ? ` of at most ${research.plan.maxSteps}` : ''}
+            </dd>
+            <dt>Sources consulted</dt>
+            <dd>
+              {research.state.sources.length}
+              {/*
+                External sources are counted separately, not hidden in a total.
+                A claim resting on the public internet is a different kind of
+                claim from one resting on PAC's own records.
+              */}
+              {research.state.sources.some((src) => src.external)
+                ? ` (${research.state.sources.filter((src) => src.external).length} from outside PAC)`
+                : ' (none from outside PAC)'}
+            </dd>
+            <dt>Lookups</dt>
+            <dd>{research.toolCallsMade}</dd>
+            <dt>Findings</dt>
+            <dd>{research.state.findings.length}</dd>
+            <dt>Still unknown</dt>
+            <dd>
+              {research.state.unknowns.length === 0 ? (
+                <span className="dim">Nothing outstanding.</span>
+              ) : (
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {research.state.unknowns.slice(0, 10).map((u, i) => (
+                    <li key={i}>{u}</li>
+                  ))}
+                </ul>
+              )}
+            </dd>
+            <dt>Reasoning model</dt>
+            <dd>
+              {research.modelProvider ? (
+                <>
+                  {research.modelProvider}
+                  {research.modelName ? ` · ${research.modelName}` : ''} · {research.inputTokens} in /{' '}
+                  {research.outputTokens} out tokens
+                </>
+              ) : (
+                <span className="dim">Not recorded</span>
+              )}
+            </dd>
+          </dl>
+        </div>
+      )}
+
+      {artefacts.length > 0 && (
+        <div className="card">
+          <h2>Results</h2>
+          <ArtefactList artefacts={artefacts} />
+        </div>
+      )}
 
       <div className="card">
         <h2>Log output</h2>

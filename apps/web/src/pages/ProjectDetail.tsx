@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { CurrentUser, ProjectDto, TaskDto } from '@mac/protocol';
-import { api } from '../api.js';
+import type { CurrentUser, ProjectCapability, ProjectDto, TaskDto, TaskKind } from '@mac/protocol';
+import {
+  PROJECT_CAPABILITIES,
+  PROJECT_CAPABILITY_LABELS,
+  TASK_KINDS,
+  describeTaskKind,
+} from '@mac/protocol';
+import { api, ApiError } from '../api.js';
 import { Alert, Badge, Confidence, Empty, Time } from '../components/ui.js';
 import { TaskForm } from './Tasks.js';
 
@@ -92,6 +98,8 @@ export function ProjectDetail({ user }: { user: CurrentUser }) {
         </Alert>
       )}
 
+      <CapabilityPanel project={project} user={user} onSaved={load} onError={setError} />
+
       {showForm && canWrite && (
         <TaskForm
           projectId={project.id}
@@ -132,7 +140,7 @@ export function ProjectDetail({ user }: { user: CurrentUser }) {
                     </td>
                     <td>{task.priority}</td>
                     <td>
-                      <Confidence value={task.confidence} />
+                      <Confidence value={task.understandingConfidence} />
                     </td>
                     <td>
                       <Time value={task.createdAt} />
@@ -145,5 +153,123 @@ export function ProjectDetail({ user }: { user: CurrentUser }) {
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * What a project has, and what Mac is allowed to do here (Sprint 3.3 §6, §21).
+ *
+ * ---------------------------------------------------------------------------
+ * TWO AXES, AND ONLY ONE OF THEM IS A PERMISSION
+ *
+ * `capabilities` describes resources: this project has a repository, a board, a
+ * Dropbox folder. Editing it is bookkeeping.
+ *
+ * `allowedTaskKinds` decides what Mac may do here unsupervised overnight.
+ * Editing it is an authority grant, which is why the endpoint behind it is
+ * admin-only and why the two are presented as visibly different things rather
+ * than as one list of checkboxes.
+ *
+ * `PAC Internal Development` reaches this screen after migration with an empty
+ * allowlist, which is deliberate: Sprint 3.3 §21 requires a human to approve it
+ * for autonomous work, and a migration that ticked the box would be the machine
+ * granting itself the permission.
+ * ---------------------------------------------------------------------------
+ */
+function CapabilityPanel({
+  project,
+  user,
+  onSaved,
+  onError,
+}: {
+  project: ProjectDto;
+  user: CurrentUser;
+  onSaved: () => void;
+  onError: (message: string) => void;
+}) {
+  const [capabilities, setCapabilities] = useState<ProjectCapability[]>(project.capabilities);
+  const [allowedTaskKinds, setAllowedTaskKinds] = useState<TaskKind[]>(project.allowedTaskKinds);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setCapabilities(project.capabilities);
+    setAllowedTaskKinds(project.allowedTaskKinds);
+  }, [project.capabilities, project.allowedTaskKinds]);
+
+  const isAdmin = user.role === 'admin';
+
+  const toggle = <T,>(list: T[], value: T): T[] =>
+    list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
+
+  const save = async () => {
+    setBusy(true);
+    onError('');
+    try {
+      await api.updateProjectCapabilities(project.id, { capabilities, allowedTaskKinds });
+      onSaved();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : 'Could not update the project.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Capabilities and permitted work</h2>
+
+      <h3 style={{ fontSize: 13, marginBottom: 4 }}>What this project has</h3>
+      <p className="hint">A statement of fact. Declaring a resource does not grant Mac permission to use it.</p>
+      <div style={{ display: 'grid', gap: 6, marginBottom: 16 }}>
+        {PROJECT_CAPABILITIES.map((capability) => (
+          <label className="inline" key={capability}>
+            <input
+              type="checkbox"
+              disabled={!isAdmin || busy}
+              checked={capabilities.includes(capability)}
+              onChange={() => setCapabilities((c) => toggle(c, capability))}
+            />
+            {PROJECT_CAPABILITY_LABELS[capability]}
+          </label>
+        ))}
+      </div>
+
+      <h3 style={{ fontSize: 13, marginBottom: 4 }}>What Mac may do here</h3>
+      <p className="hint">
+        An authority grant. Mac may take on these kinds of work autonomously overnight, subject to every other
+        guardrail. Leave everything unticked and only coding is permitted &mdash; exactly what was possible before
+        task kinds existed.
+      </p>
+      <div style={{ display: 'grid', gap: 6 }}>
+        {TASK_KINDS.map((kind) => (
+          <label className="inline" key={kind}>
+            <input
+              type="checkbox"
+              disabled={!isAdmin || busy}
+              checked={allowedTaskKinds.includes(kind)}
+              onChange={() => setAllowedTaskKinds((k) => toggle(k, kind))}
+            />
+            <span>
+              {describeTaskKind(kind).label}
+              <span className="hint" style={{ display: 'block' }}>
+                {describeTaskKind(kind).description}
+              </span>
+            </span>
+          </label>
+        ))}
+      </div>
+
+      {isAdmin ? (
+        <div className="button-row">
+          <button className="primary" disabled={busy} onClick={save}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      ) : (
+        <p className="hint" style={{ marginTop: 10 }}>
+          Only an administrator may change what Mac is permitted to do in a project.
+        </p>
+      )}
+    </div>
   );
 }

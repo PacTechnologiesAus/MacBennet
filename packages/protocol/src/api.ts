@@ -28,7 +28,8 @@ import { agentAnswerDecisionSchema, agentSessionStateSchema, codingAgentProvider
 // --- Sprint 3.3 ---
 import { taskKindSchema, type ExecutionRequirement, type TaskKind, type TaskOrigin } from './task-model.js';
 import { projectCapabilitySchema, type ProjectCapability } from './project-capabilities.js';
-import { artefactContentSchema } from './artefacts.js';
+import { artefactContentSchema, type ArtefactDto } from './artefacts.js';
+import type { ResearchPlan, ResearchState } from './research.js';
 import { evidenceRefSchema, groundednessSchema, investigationResultSchema } from './evidence.js';
 import { sandboxKindSchema, sandboxNetworkModeSchema } from './sandbox.js';
 import { mondayStatusLabelsSchema, mondayWriteKindSchema, mondayWriteStatusSchema } from './monday.js';
@@ -228,6 +229,21 @@ export const createArtefactRequestSchema = z.object({
   content: artefactContentSchema,
 });
 export type CreateArtefactRequest = z.infer<typeof createArtefactRequestSchema>;
+
+/** Sprint 3.3: the live state of a general run, for the Run Detail screen. */
+export interface GeneralRunStateDto {
+  runId: string;
+  taskKind: TaskKind;
+  plan: ResearchPlan | null;
+  state: ResearchState;
+  stage: string;
+  stepsTaken: number;
+  toolCallsMade: number;
+  modelProvider: string | null;
+  modelName: string | null;
+  inputTokens: number;
+  outputTokens: number;
+}
 
 // --- Project capabilities --------------------------------------------------
 
@@ -942,8 +958,28 @@ export interface MorningReportDto {
   lowConfidenceAnswers: number;
   /** Detailed Q&A lives behind this link, not in the report body. */
   questionsLogUrl: string;
+  /**
+   * Null for work that produces no pull request.
+   *
+   * Sprint 3.3 §25: a report for a research run must not carry an empty PR
+   * field that reads as "a pull request was expected and did not appear". The
+   * renderer omits the section entirely rather than printing a dash.
+   */
   pullRequestUrl: string | null;
   pullRequestDeclineReason: string | null;
+  /** Sprint 3.3: what kind of work this reports on. Decides which sections appear. */
+  taskKind?: TaskKind;
+  /** Sprint 3.3: findings and deliverables, for non-coding work. */
+  findings?: {
+    /** One line per established fact, strongest evidence class first. */
+    keyFindings: string[];
+    unknowns: string[];
+    artefacts: Array<{ id: string; type: string; title: string; summary: string }>;
+    sourcesConsulted: number;
+    externalSourcesUsed: number;
+  };
+  /** Sprint 3.3: the PAC company context this work ran under. */
+  companyContext?: { shortSha: string; contextVersion: string } | null;
   estimatedHumanHours: number;
   estimatedHumanHoursBasis: string;
   usage: RunUsageSummaryDto;
