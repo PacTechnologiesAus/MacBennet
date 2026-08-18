@@ -194,12 +194,27 @@ function evaluateOne(
   }
 }
 
+/**
+ * Requirements that are CONSEQUENCES of another requirement, not causes.
+ *
+ * A missing repository makes the worktree, the test command and the pull
+ * request unmet too, but reporting four unmet requirements for one root cause
+ * buries the sentence a reader can act on under three restatements of it.
+ */
+const CONSEQUENCES_OF_REPOSITORY: readonly ExecutionRequirement[] = ['worktree', 'build_and_tests', 'pull_request'];
+
 function summarise(taskKind: TaskKind, failed: RequirementCheck[]): string {
   const label = describeTaskKind(taskKind).label.toLowerCase();
-  if (failed.length === 1) return `This ${label} task cannot run yet: ${failed[0]!.detail}`;
+
+  // Collapse the cascade: if the repository is missing, say only that.
+  const root = failed.some((f) => f.requirement === 'repository')
+    ? failed.filter((f) => !CONSEQUENCES_OF_REPOSITORY.includes(f.requirement))
+    : failed;
+
+  if (root.length === 1) return `This ${label} task cannot run yet: ${root[0]!.detail}`;
   return (
-    `This ${label} task cannot run yet. ${failed.length} requirements are unmet: ` +
-    failed.map((f) => f.label.toLowerCase()).join('; ') +
+    `This ${label} task cannot run yet. ${root.length} requirements are unmet: ` +
+    root.map((f) => f.label.toLowerCase()).join('; ') +
     '.'
   );
 }

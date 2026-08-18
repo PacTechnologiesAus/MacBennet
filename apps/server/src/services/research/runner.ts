@@ -310,8 +310,20 @@ export async function performResearchStep(
 
   // --- Artefacts -----------------------------------------------------------
 
+  /*
+   * Artefacts are accepted on ANY step, not only the one the loop labelled
+   * "finalise".
+   *
+   * The loop decides when to PROMPT for a write-up; it does not get to discard
+   * one the model volunteered earlier. Throwing away a finished report because
+   * it arrived a step ahead of schedule would spend a model call and produce
+   * nothing, and would then loop on to spend several more.
+   *
+   * This lets a run finish sooner. It cannot let one run longer: the step and
+   * tool-call ceilings are enforced above, before the model is asked anything.
+   */
   let artefactsCreated = 0;
-  if (finalising) {
+  {
     for (const content of output.artefacts.slice(0, RESEARCH_LIMITS.maxArtefactsPerRun)) {
       const withFindings: ArtefactContent = {
         ...content,
@@ -392,7 +404,20 @@ export async function performResearchStep(
     await appendSystemLog(db, runId, output.narrative.slice(0, 2000));
   }
 
-  return summarise(next, finalising ? { action: 'stop', reason: decision.reason, limitReached: false } : decision, artefactsCreated, output.blockerProposed, finalising);
+  /*
+   * Done when the loop said to finalise, or when the model has produced
+   * deliverables and stopped asking for sources. The second condition is what
+   * makes an early write-up terminate the run rather than merely be kept.
+   */
+  const done = finalising || (artefactsCreated > 0 && output.toolCalls.length === 0);
+
+  return summarise(
+    next,
+    done ? { action: 'stop', reason: decision.reason, limitReached: false } : decision,
+    artefactsCreated,
+    output.blockerProposed,
+    done,
+  );
 }
 
 const summarise = (
@@ -546,19 +571,25 @@ async function loadStepState(runId: string): Promise<{
   }
 
   const state = researchStateSchema.parse(row.state ?? {});
-  const lastResults = state.toolResults.slice(-RESEARCH_LIMITS.maxToolCallsPerStep);
 
   return {
     plan: researchPlanSchema.parse(row.plan),
     state,
     context: await loadRunContext(runId, db),
     /*
-     * "The model asked for nothing" is inferred from the last step's tool
-     * results rather than from a flag the model sets, for the same reason the
-     * step ceiling is: a loop whose exit condition the model controls exits when
-     * the model is confused as readily as when it is finished.
+     * "The model asked for nothing last step."
+     *
+     * Read from a recorded COUNT of what was requested, not from what came
+     * back. A step whose every tool was refused still asked for something, and
+     * treating that as satisfaction would end a run early exactly when its
+     * sources were being denied — the worst possible moment to stop and write
+     * up, because the write-up would then describe an absence of evidence as an
+     * absence of facts.
+     *
+     * Note this still is not the model DECIDING to stop: it only lets the
+     * scheduler skip pointless gather steps. The ceilings are unaffected.
      */
-    modelSatisfied: state.stepsTaken > 0 && lastResults.length === 0,
+    modelSatisfied: state.stepsTaken > 0 && state.lastRequestedToolCount === 0,
   };
 }
 

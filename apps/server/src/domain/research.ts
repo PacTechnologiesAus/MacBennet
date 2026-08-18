@@ -278,6 +278,7 @@ export function accumulate(
     findings: dedupeFindings([...state.findings, ...classified]),
     unknowns: Array.from(new Set([...state.unknowns, ...output.unknowns])).slice(0, 100),
     toolResults: state.toolResults,
+    lastRequestedToolCount: output.toolCalls.length,
   };
 }
 

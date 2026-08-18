@@ -47,7 +47,7 @@ import { nextCutoffAfter } from '../domain/overnight.js';
 import { getSettings, toCutoffConfig, type Settings } from './settings.js';
 import { recordedSpendForWindow } from './budget.js';
 import { record, SYSTEM_ACTOR, type Actor } from './audit.js';
-import { requireActiveRevision } from './company-context/service.js';
+import { companyContextSatisfied, requireActiveRevision } from './company-context/service.js';
 import { reasoningProviderAvailable } from './model/provider.js';
 import { recordContextBinding } from './company-context/bindings.js';
 import { isWorkerLive } from './workers.js';
@@ -250,6 +250,8 @@ export interface CandidateContext {
  */
 interface ShiftCapabilities {
   reasoningModelAvailable: boolean;
+  /** False only when company context is enabled and cannot be read. */
+  companyContextSatisfied: boolean;
   /** Which work capabilities a live, idle, sandbox-ready worker advertises. */
   workerCapabilities: Set<WorkCapability>;
 }
@@ -283,6 +285,7 @@ async function shiftCapabilities(settings: Settings, handle: DbHandle = db): Pro
 
   return {
     reasoningModelAvailable: settings.generalWorkEnabled ? await reasoningProviderAvailable() : false,
+    companyContextSatisfied: await companyContextSatisfied(),
     workerCapabilities: capabilities,
   };
 }
@@ -492,7 +495,7 @@ async function collectMondayCandidates(
         hasMondayItem: true,
         hasBrief: Boolean(brief),
         hasReasoningModel: capabilities.reasoningModelAvailable,
-        hasCompanyContext: true,
+        hasCompanyContext: capabilities.companyContextSatisfied,
         codingAgentEnabled: settings.codingAgentEnabled,
         projectCapabilities,
         allowedTaskKinds,
@@ -734,7 +737,7 @@ async function collectDirectCandidates(
         hasMondayItem: false,
         hasBrief: Boolean(brief),
         hasReasoningModel: capabilities.reasoningModelAvailable,
-        hasCompanyContext: true,
+        hasCompanyContext: capabilities.companyContextSatisfied,
         codingAgentEnabled: settings.codingAgentEnabled,
         projectCapabilities,
         allowedTaskKinds,

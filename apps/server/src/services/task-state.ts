@@ -26,6 +26,7 @@ import { capabilityForTaskKind } from '@mac/protocol';
 import { getSettings } from './settings.js';
 import { isWorkerLive } from './workers.js';
 import { reasoningProviderAvailable } from './model/provider.js';
+import { companyContextSatisfied } from './company-context/service.js';
 import { countArtefactsForTask } from './artefacts.js';
 
 /**
@@ -104,7 +105,10 @@ export async function taskExecutionState(
       hasMondayItem: Boolean(task.mondayItemId),
       hasBrief: Boolean(brief),
       hasReasoningModel: reasoningModelAvailable,
-      hasCompanyContext: settings.companyContextEnabled,
+      // Satisfied when the deployment does not use company context at all, or
+      // when it does and the context is readable. Only "enabled but unreadable"
+      // blocks — see `companyContextSatisfied`.
+      hasCompanyContext: await companyContextSatisfied(),
       codingAgentEnabled: settings.codingAgentEnabled,
       projectCapabilities: capabilities,
       allowedTaskKinds,

@@ -74,7 +74,24 @@ const CUES: Array<{ kind: TaskKind; weight: number; patterns: RegExp[] }> = [
   {
     kind: 'documentation',
     weight: 0.85,
-    patterns: [/\bdocument\w*/i, /\bwrite (up|a|the)\b/i, /\bdraft\b/i, /\bspecification\b/i, /\bhandbook\b/i, /\bguide\b/i],
+    /*
+     * Verb-led, deliberately.
+     *
+     * A bare "document-anything" pattern matched "Document Controller" - a noun phrase naming
+     * a THING - and turned the real acceptance task, "Investigate PAC Project
+     * Registry, Document Controller & Sales Engineer", into a near-tie between
+     * investigation and documentation. What a piece of work is ABOUT is not a
+     * statement about what kind of work it is.
+     */
+    patterns: [
+      /\bdocument (the|a|an|our|this|these)\b/i,
+      /\bdocumentation (for|of|on)\b/i,
+      /\bwrite (up|a|an|the)\b/i,
+      /\bdraft\b/i,
+      /\bspecification\b/i,
+      /\bhandbook\b/i,
+      /\bwrite[^.]{0,20}\bguide\b/i,
+    ],
   },
   {
     kind: 'administrative',
@@ -104,8 +121,17 @@ export function classifyTask(input: { title: string; description?: string | null
       const inBody = pattern.exec(body);
       if (!inTitle && !inBody) continue;
 
-      // Title cues count double: that is where the verb lives.
-      const score = cue.weight * (inTitle ? 2 : 1);
+      /*
+       * Three tiers, because position carries real information.
+       *
+       * A title that OPENS with the cue is somebody stating the verb first —
+       * "Investigate X", "Scope Y" — and that is the strongest signal available.
+       * Elsewhere in the title is next. In the description it is weakest,
+       * because a description names the subject matter and a subject is not a
+       * statement about what kind of work it is.
+       */
+      const leading = inTitle !== null && inTitle.index <= 2;
+      const score = cue.weight * (leading ? 3 : inTitle ? 2 : 1);
       scores.set(cue.kind, (scores.get(cue.kind) ?? 0) + score);
       const matched = (inTitle ?? inBody)![0];
       if (!signals.includes(matched)) signals.push(matched);

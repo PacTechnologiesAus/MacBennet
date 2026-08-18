@@ -124,7 +124,14 @@ export const researchStepOutputSchema = z.object({
   findings: z.array(findingSchema).max(50).default([]),
   /** Free-text account of the step, shown as run progress. */
   narrative: z.string().max(4000).default(''),
-  /** Deliverables. Only read on a `finalise` step. */
+  /**
+   * Deliverables.
+   *
+   * Accepted on ANY step. The loop decides when to PROMPT for a write-up, but
+   * discarding one the model volunteered a step early would spend a call and
+   * produce nothing. It cannot make a run longer — the ceilings are enforced
+   * before the model is asked anything.
+   */
   artefacts: z.array(artefactContentSchema).max(10).default([]),
   /** Things the model could not establish. Reported, never filled in. */
   unknowns: z.array(z.string().min(1).max(1000)).max(40).default([]),
@@ -187,6 +194,15 @@ export const researchStateSchema = z.object({
   findings: z.array(findingSchema).max(400).default([]),
   unknowns: z.array(z.string().max(1000)).max(100).default([]),
   toolResults: z.array(researchToolResultSchema).max(200).default([]),
+  /**
+   * How many tools the PREVIOUS step asked for.
+   *
+   * Recorded rather than inferred from `toolResults`, because a step whose
+   * every tool was REFUSED still asked for something — and inferring "the model
+   * is satisfied" from an empty result list would end a run early precisely
+   * when its sources were being denied, which is the worst moment to stop.
+   */
+  lastRequestedToolCount: z.number().int().min(0).default(0),
 });
 export type ResearchState = z.infer<typeof researchStateSchema>;
 

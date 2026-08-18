@@ -58,12 +58,26 @@ export async function runGeneralTaskJob(
   const deadline = Date.now() + general.maxMinutes * 60_000;
   const assignmentDeadline = assignment.deadlineAt ? Date.parse(assignment.deadlineAt) : Number.POSITIVE_INFINITY;
 
+  /*
+   * TWO counters, and the local one bounds the loop.
+   *
+   * `iterations` counts what THIS worker has done; `steps` is what the control
+   * plane reports. Looping on the reported figure alone was a real bug: a
+   * control plane whose counter stalls — a persistence failure, a bug in the
+   * step handler — would keep answering "step 1 of 8, not done" and the worker
+   * would call it forever, burning model spend until something else killed it.
+   *
+   * The worker is the component holding the lease and the wall clock, so it is
+   * the one that must be able to stop on its own account.
+   */
+  let iterations = 0;
   let steps = 0;
   let artefacts = 0;
   let lastNarrative = '';
   let blocker: string | null = null;
 
-  while (steps < general.maxSteps) {
+  while (iterations < general.maxSteps) {
+    iterations += 1;
     if (ctx.signal.aborted) throw new JobCancelledError();
 
     if (Date.now() >= deadline) {

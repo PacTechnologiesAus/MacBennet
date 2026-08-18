@@ -440,6 +440,30 @@ export async function requireActiveRevision(reason: string): Promise<CompanyCont
   );
 }
 
+/**
+ * Whether company context is a BLOCKER for starting work right now.
+ *
+ * Three-way, and the middle case is the one that matters:
+ *
+ *   * disabled for this deployment  -> not a blocker. Sprint 3.2 is optional,
+ *     and a deployment that never adopted it must not find every research task
+ *     refused for want of a document set it does not have.
+ *   * enabled and usable            -> not a blocker.
+ *   * enabled and NOT usable        -> a blocker. This is the Sprint 3.2 rule:
+ *     if PAC policy is supposed to govern the work and cannot be read, Mac does
+ *     not work ungrounded.
+ *
+ * Reads the cached status row rather than refreshing, because this is called on
+ * page loads and on every scheduling tick. `requireActiveRevision` remains the
+ * authority at the moment work actually starts.
+ */
+export async function companyContextSatisfied(): Promise<boolean> {
+  const settings = await getSettings();
+  if (!settings.companyContextEnabled) return true;
+  const row = await statusRow();
+  return (USABLE_COMPANY_CONTEXT_STATUSES as readonly string[]).includes(row.status);
+}
+
 /** The compact reference embedded in DTOs. */
 export const toContextRef = (row: CompanyContextRevisionRow): CompanyContextRef => ({
   revisionId: row.id,
