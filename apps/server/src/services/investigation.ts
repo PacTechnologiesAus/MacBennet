@@ -43,6 +43,8 @@ export interface InvestigationContext {
   projectId: string;
   runId?: string | null;
   discoverySessionId?: string | null;
+  /** Sprint 3.3: the brief whose gap this receipt belongs to, when discovery ran it. */
+  briefId?: string | null;
   /**
    * Sprint 3.2: the company context revision this work is BOUND to.
    *
@@ -331,6 +333,7 @@ async function persistInvestigation(
   await db.transaction(async (tx) => {
     await tx.insert(discoveryInvestigations).values({
       discoverySessionId: context.discoverySessionId ?? null,
+      briefId: context.briefId ?? null,
       runId: context.runId ?? null,
       taskId: context.taskId,
       projectId: context.projectId,

@@ -56,6 +56,12 @@ export interface Settings {
   companyContextAllowCached: boolean;
   companyContextMinRefreshSeconds: number;
   companyContextMaxStaleHours: number;
+  // --- Sprint 3.3 ---
+  generalWorkEnabled: boolean;
+  maxResearchSteps: number;
+  maxResearchToolCalls: number;
+  externalResearchEnabled: boolean;
+  allowedResearchDomains: string[];
   updatedAt: Date;
 }
 
@@ -101,6 +107,11 @@ export async function getSettings(handle: DbHandle = db): Promise<Settings> {
     companyContextAllowCached: row.companyContextAllowCached,
     companyContextMinRefreshSeconds: row.companyContextMinRefreshSeconds,
     companyContextMaxStaleHours: row.companyContextMaxStaleHours,
+    generalWorkEnabled: row.generalWorkEnabled,
+    maxResearchSteps: row.maxResearchSteps,
+    maxResearchToolCalls: row.maxResearchToolCalls,
+    externalResearchEnabled: row.externalResearchEnabled,
+    allowedResearchDomains: asStringArray(row.allowedResearchDomains),
     updatedAt: row.updatedAt,
   };
 }
@@ -152,6 +163,11 @@ export const toSettingsDto = (s: Settings): SettingsDto => ({
   companyContextAllowCached: s.companyContextAllowCached,
   companyContextMinRefreshSeconds: s.companyContextMinRefreshSeconds,
   companyContextMaxStaleHours: s.companyContextMaxStaleHours,
+  generalWorkEnabled: s.generalWorkEnabled,
+  maxResearchSteps: s.maxResearchSteps,
+  maxResearchToolCalls: s.maxResearchToolCalls,
+  externalResearchEnabled: s.externalResearchEnabled,
+  allowedResearchDomains: s.allowedResearchDomains,
   updatedAt: s.updatedAt.toISOString(),
 });
 
@@ -289,6 +305,16 @@ export async function updateSettings(
         }),
         ...(patch.companyContextMaxStaleHours !== undefined && {
           companyContextMaxStaleHours: patch.companyContextMaxStaleHours,
+        }),
+        // --- Sprint 3.3 ---
+        ...(patch.generalWorkEnabled !== undefined && { generalWorkEnabled: patch.generalWorkEnabled }),
+        ...(patch.maxResearchSteps !== undefined && { maxResearchSteps: patch.maxResearchSteps }),
+        ...(patch.maxResearchToolCalls !== undefined && { maxResearchToolCalls: patch.maxResearchToolCalls }),
+        ...(patch.externalResearchEnabled !== undefined && {
+          externalResearchEnabled: patch.externalResearchEnabled,
+        }),
+        ...(patch.allowedResearchDomains !== undefined && {
+          allowedResearchDomains: patch.allowedResearchDomains,
         }),
         updatedAt: new Date(),
         updatedBy: actor.id,

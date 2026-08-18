@@ -1,10 +1,12 @@
 import type {
+  CandidateSource,
   EffortEstimate,
   EligibilityVerdict,
   NightStopReason,
   SafeStartVerdict,
   SchedulingRationale,
   SkipReason,
+  TaskKind,
   UsageSource,
 } from '@mac/protocol';
 import { safeToStart, type SafeStartPolicy } from './effort.js';
@@ -41,6 +43,21 @@ export interface NightCandidate {
   projectName: string;
   eligibility: EligibilityVerdict;
   effort: EffortEstimate;
+  /**
+   * Sprint 3.3: which queue this came from.
+   *
+   * Both queues feed ONE ordered list and one scheduler — Sprint 3.3 section 5
+   * is explicit that there must be no second scheduler and no fake monday rows.
+   * The source is recorded rather than inferred because it is a tiebreak input
+   * (see `orderCandidates`) and because a reader of the decision record needs to
+   * see which rule applied.
+   *
+   * Optional so that a caller written before Sprint 3.3 still compiles; absent
+   * is treated as `monday`, which is what such a caller meant.
+   */
+  source?: CandidateSource;
+  /** Sprint 3.3: what kind of work, which decides how it is executed. */
+  taskKind?: TaskKind;
 }
 
 export interface CurrentWork {
@@ -100,7 +117,10 @@ interface SkipRecord {
   title: string;
   reason: SkipReason;
   detail: string;
+  source?: CandidateSource;
 }
+
+const sourceOf = (candidate: NightCandidate): CandidateSource => candidate.source ?? 'monday';
 
 export function decideNextAction(state: NightState): NightDecision {
   const remainingMinutes = Math.floor((state.cutoffAt.getTime() - state.now.getTime()) / 60_000);
@@ -213,6 +233,7 @@ export function decideNextAction(state: NightState): NightDecision {
         title: candidate.title,
         reason: 'not_eligible',
         detail: candidate.eligibility.summary,
+        source: sourceOf(candidate),
       });
       continue;
     }
@@ -250,6 +271,7 @@ export function decideNextAction(state: NightState): NightDecision {
         title: candidate.title,
         reason: 'insufficient_time',
         detail: verdict.reason,
+        source: sourceOf(candidate),
       });
       continue;
     }
@@ -263,6 +285,7 @@ export function decideNextAction(state: NightState): NightDecision {
         title: rest.title,
         reason: 'lower_priority',
         detail: `Ranked below "${candidate.title}".`,
+        source: sourceOf(rest),
       });
     }
 
@@ -272,7 +295,8 @@ export function decideNextAction(state: NightState): NightDecision {
       safeStart: verdict,
       rationale: rationale(
         'start',
-        `Selected "${candidate.title}" (${candidate.projectName}). ${verdict.reason} ` +
+        `Selected "${candidate.title}" (${candidate.projectName}), a ${candidate.taskKind ?? 'coding'} task from the ` +
+          `${sourceOf(candidate)} queue. ${verdict.reason} ` +
           `Effort: ${candidate.effort.sizeClass}. Eligibility: all ${candidate.eligibility.checks.length} checks passed.`,
         skipped,
       ),
@@ -306,9 +330,25 @@ export function orderCandidates(candidates: NightCandidate[], currentProjectId: 
     if (a.eligibility.priorityRank !== b.eligibility.priorityRank) {
       return a.eligibility.priorityRank - b.eligibility.priorityRank;
     }
+    /*
+     * Sprint 3.3: the documented tiebreak between the two queues.
+     *
+     * DIRECT WORK WINS A TIE. Spec section 8 gives direct instructions the
+     * highest priority, and a direct task is one a human handed Mac personally
+     * rather than one he found on a board — so when priority, project and due
+     * date all agree, the personal instruction is the one that was meant.
+     *
+     * It is only a TIEBREAK. A high-priority monday item still outranks a
+     * normal-priority direct task, because commercial priority is a human
+     * judgement about importance and the source of a task is not.
+     */
+    const aSource = sourceOf(a) === 'direct' ? 0 : 1;
+    const bSource = sourceOf(b) === 'direct' ? 0 : 1;
+    if (aSource !== bSource) return aSource - bSource;
+
     // Stable and deterministic: two runs of the scheduler on the same data must
     // pick the same task, or the decision record means nothing.
-    return (a.mondayItemId ?? a.title).localeCompare(b.mondayItemId ?? b.title);
+    return (a.mondayItemId ?? a.taskId ?? a.title).localeCompare(b.mondayItemId ?? b.taskId ?? b.title);
   });
 }
 

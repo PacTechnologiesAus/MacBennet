@@ -216,6 +216,21 @@ const handlers: Record<JobKind, JobHandler> = {
     const { runRepoInspectJob } = await import('./repo-inspect.js');
     return runRepoInspectJob(assignment, ctx, { client });
   },
+
+  /**
+   * Sprint 3.3's general job.
+   *
+   * Note what it does NOT call: `requireRepositoryContext`. That single
+   * difference is most of this sprint — general work needs a brief and a
+   * control-plane client, and needs no repository, no worktree and no clone.
+   */
+  async general_task(_params, ctx) {
+    if (!ctx.assignment || !ctx.client) {
+      throw new Error('The "general_task" job requires a run assignment and a control-plane client.');
+    }
+    const { runGeneralTaskJob } = await import('./general-task.js');
+    return runGeneralTaskJob(ctx.assignment, ctx, { client: ctx.client });
+  },
 };
 
 /**

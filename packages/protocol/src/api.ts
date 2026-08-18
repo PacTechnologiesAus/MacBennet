@@ -25,6 +25,10 @@ import {
   worktreeStatusSchema,
 } from './enums.js';
 import { agentAnswerDecisionSchema, agentSessionStateSchema, codingAgentProviderSchema } from './coding-agent.js';
+// --- Sprint 3.3 ---
+import { taskKindSchema, type ExecutionRequirement, type TaskKind, type TaskOrigin } from './task-model.js';
+import { projectCapabilitySchema, type ProjectCapability } from './project-capabilities.js';
+import { artefactContentSchema } from './artefacts.js';
 import { evidenceRefSchema, groundednessSchema, investigationResultSchema } from './evidence.js';
 import { sandboxKindSchema, sandboxNetworkModeSchema } from './sandbox.js';
 import { mondayStatusLabelsSchema, mondayWriteKindSchema, mondayWriteStatusSchema } from './monday.js';
@@ -37,6 +41,7 @@ import {
   nightStopReasonSchema,
   runSelectionSourceSchema,
   schedulingRationaleSchema,
+  type EligibilityVerdict,
 } from './night.js';
 import { emailAddressSchema, emailDeliveryKindSchema, emailDeliveryStatusSchema, mailProviderSchema } from './mail.js';
 import { modelProviderSchema } from './model.js';
@@ -115,6 +120,10 @@ export interface ProjectDto {
    */
   nightShiftApproved: boolean;
   nightShiftApprovedAt: string | null;
+  /** Sprint 3.3: what this project HAS. A statement of fact. */
+  capabilities: ProjectCapability[];
+  /** Sprint 3.3: what a human has ALLOWED here. Empty means nothing yet. */
+  allowedTaskKinds: TaskKind[];
   createdAt: string;
   updatedAt: string;
 }
@@ -126,7 +135,24 @@ export const createTaskRequestSchema = z.object({
   title: z.string().min(1).max(200),
   description: z.string().max(20000).optional(),
   priority: taskPrioritySchema.default('normal'),
-  confidence: confidenceSchema.nullable().optional(),
+  /**
+   * Sprint 3.3: what kind of work this is.
+   *
+   * Optional, and NOT defaulted to `coding` at the API. A task created without
+   * one is unclassified until discovery proposes a kind, which is honest: the
+   * person filling in a form has often not decided, and a silent default of
+   * `coding` is how research work ended up needing a repository.
+   */
+  taskKind: taskKindSchema.optional(),
+  /**
+   * Sprint 3.3: renamed from `confidence` (reconciliation drift D-7).
+   *
+   * The REQUESTER's sense of how well-specified their own request is. It has
+   * never gated execution and now cannot be mistaken for the number that does:
+   * Mac's understanding confidence is derived through discovery and lives on
+   * the handoff brief.
+   */
+  userInitialConfidence: confidenceSchema.nullable().optional(),
 });
 export type CreateTaskRequest = z.infer<typeof createTaskRequestSchema>;
 
@@ -135,7 +161,8 @@ export const updateTaskRequestSchema = z.object({
   description: z.string().max(20000).optional(),
   status: taskStatusSchema.optional(),
   priority: taskPrioritySchema.optional(),
-  confidence: confidenceSchema.nullable().optional(),
+  taskKind: taskKindSchema.optional(),
+  userInitialConfidence: confidenceSchema.nullable().optional(),
 });
 export type UpdateTaskRequest = z.infer<typeof updateTaskRequestSchema>;
 
@@ -147,10 +174,68 @@ export interface TaskDto {
   description: string | null;
   status: z.infer<typeof taskStatusSchema>;
   priority: z.infer<typeof taskPrioritySchema>;
-  confidence: number | null;
+  /** Sprint 3.3: what kind of work. Never conflate with the job kind. */
+  taskKind: TaskKind;
+  /** Sprint 3.3: `direct` (Mac's own UI) or `monday` (mirrored from a board). */
+  origin: TaskOrigin;
+  /** Sprint 3.3: the requester's own estimate. NEVER an execution gate. */
+  userInitialConfidence: number | null;
+  /** Mac's DERIVED understanding confidence, from the latest handoff brief. */
+  understandingConfidence: number | null;
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * Everything the Task Detail screen needs to explain itself (Sprint 3.3 §26).
+ *
+ * Assembled server-side rather than by the UI stitching four endpoints
+ * together, because "why can this task not run?" must have exactly one answer
+ * and that answer must be the same one the scheduler would give.
+ */
+export interface TaskExecutionStateDto {
+  taskKind: TaskKind;
+  origin: TaskOrigin;
+  /** What this task needs before it can execute, derived from kind and origin. */
+  requirements: Array<{
+    requirement: ExecutionRequirement;
+    label: string;
+    satisfied: boolean;
+    detail: string;
+  }>;
+  projectCapabilities: ProjectCapability[];
+  allowedTaskKinds: TaskKind[];
+  discovery: {
+    sessionId: string | null;
+    status: string | null;
+    briefId: string | null;
+    /** True when there is no session yet, so the UI can offer Start Discovery. */
+    canStart: boolean;
+  };
+  understandingConfidence: number | null;
+  /** The same verdict the night scheduler computes. Null when not yet evaluable. */
+  eligibility: EligibilityVerdict | null;
+  /** One sentence a human can act on. Empty when the task is ready. */
+  blockerSummary: string;
+  artefactCount: number;
+}
+
+// --- Artefacts -------------------------------------------------------------
+
+export const createArtefactRequestSchema = z.object({
+  taskId: z.string().uuid(),
+  runId: z.string().uuid().nullable().optional(),
+  content: artefactContentSchema,
+});
+export type CreateArtefactRequest = z.infer<typeof createArtefactRequestSchema>;
+
+// --- Project capabilities --------------------------------------------------
+
+export const updateProjectCapabilitiesRequestSchema = z.object({
+  capabilities: z.array(projectCapabilitySchema).max(16).optional(),
+  allowedTaskKinds: z.array(taskKindSchema).max(16).optional(),
+});
+export type UpdateProjectCapabilitiesRequest = z.infer<typeof updateProjectCapabilitiesRequestSchema>;
 
 // --- Runs ------------------------------------------------------------------
 
@@ -355,6 +440,12 @@ export const updateSettingsRequestSchema = z
     maxQuestionsPerRun: z.number().int().min(0).max(200).optional(),
     /** Confidence at or above which Mac answers a question rather than assuming. */
     answerConfidenceThreshold: confidenceSchema.optional(),
+    // --- Sprint 3.3 ---
+    generalWorkEnabled: z.boolean().optional(),
+    maxResearchSteps: z.number().int().min(1).max(12).optional(),
+    maxResearchToolCalls: z.number().int().min(1).max(200).optional(),
+    externalResearchEnabled: z.boolean().optional(),
+    allowedResearchDomains: z.array(z.string().min(1).max(253)).max(100).optional(),
 
     // --- Sprint 3 ---
     /** When true, a coding run is not dispatched to a worker without a sandbox. */
@@ -425,6 +516,12 @@ export interface SettingsDto {
   companyContextAllowCached: boolean;
   companyContextMinRefreshSeconds: number;
   companyContextMaxStaleHours: number;
+  // --- Sprint 3.3 ---
+  generalWorkEnabled: boolean;
+  maxResearchSteps: number;
+  maxResearchToolCalls: number;
+  externalResearchEnabled: boolean;
+  allowedResearchDomains: string[];
   updatedAt: string;
 }
 

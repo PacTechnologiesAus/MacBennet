@@ -9,7 +9,14 @@ import type {
   RunStatus,
   StopReason,
 } from '@mac/protocol';
-import { PRIORITY_RANK, isTerminalRunStatus, requiresApprovedRepository, shortSha } from '@mac/protocol';
+import {
+  isGeneralJobKind,
+  isTerminalRunStatus,
+  MODEL_PROVIDER_REQUIRED,
+  PRIORITY_RANK,
+  requiresApprovedRepository,
+  shortSha,
+} from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
 import {
   approvals,
@@ -594,6 +601,38 @@ export async function leaseNextRun(
       }
     }
 
+    /*
+     * Sprint 3.3: the general assignment, built the same way and for the same
+     * reason as the coding one.
+     *
+     * The worker is handed an objective and a step ceiling — never a prompt,
+     * never a tool, never a credential. Failing here rather than mid-run means a
+     * missing brief or an absent reasoning provider stops the run at the moment
+     * a human is watching, not three steps into a night.
+     */
+    let general: RunAssignment['general'] = null;
+    if (isGeneralJobKind(candidate.jobKind)) {
+      try {
+        const { buildGeneralAssignment } = await import('./general-runs.js');
+        general = await buildGeneralAssignment(tx, candidate);
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        await transition(tx, {
+          runId: candidate.id,
+          to: code === MODEL_PROVIDER_REQUIRED ? 'stopped_by_guardrail' : 'failed',
+          actor: SYSTEM_ACTOR,
+          eventType: code === MODEL_PROVIDER_REQUIRED ? 'run.stopped_by_guardrail' : 'run.failed',
+          patch: {
+            stopReason: code === MODEL_PROVIDER_REQUIRED ? 'model_provider_required' : 'worker_error',
+            completedAt: new Date(),
+          },
+          metadata: { reason: (err as Error).message },
+        });
+        await appendSystemLog(tx, candidate.id, `Dispatch refused: ${(err as Error).message}`);
+        return null;
+      }
+    }
+
     // Validation point 3 of 3 on the server side (the worker checks again).
     const job = checkJobAllowed(candidate.jobKind, candidate.jobParams);
     if (!job.ok) {
@@ -695,6 +734,7 @@ export async function leaseNextRun(
       leaseExpiresAt: leaseExpiresAt.toISOString(),
       attempt: updated.attempt,
       coding,
+      general,
     } satisfies RunAssignment;
   });
 }

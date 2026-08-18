@@ -36,6 +36,20 @@ export const ELIGIBILITY_CODES = [
   'no_active_run',
   'not_previously_blocked',
   'task_type_allowed',
+  // --- Sprint 3.3 ---
+  //
+  // Sprint 3 wrote thirteen checks that all assumed a monday board and a
+  // repository. These four are the ones a DIRECT, NON-CODING task actually
+  // needs, and the board and repository checks above became conditional rather
+  // than being deleted — monday-backed coding work still has to pass them.
+  /** The project has explicitly allowed this kind of work. */
+  'task_kind_permitted',
+  /** A live worker advertises the capability this task kind needs. */
+  'worker_capability_available',
+  /** A real reasoning-model provider is configured, when the work needs one. */
+  'reasoning_model_available',
+  /** The project holds every resource this task's requirements name. */
+  'project_capabilities_sufficient',
 ] as const;
 export const eligibilityCodeSchema = z.enum(ELIGIBILITY_CODES);
 export type EligibilityCode = z.infer<typeof eligibilityCodeSchema>;
@@ -76,7 +90,23 @@ export const ELIGIBILITY_LABELS: Record<EligibilityCode, string> = {
   no_active_run: 'Not already in flight or attempted tonight',
   not_previously_blocked: 'Not blocked earlier tonight',
   task_type_allowed: 'Task type is within the configured allowlist',
+  task_kind_permitted: 'Project permits this kind of work',
+  worker_capability_available: 'A worker with the required capability is online',
+  reasoning_model_available: 'A reasoning-model provider is configured',
+  project_capabilities_sufficient: 'Project has the resources this work requires',
 };
+
+/**
+ * Where a night-shift candidate came from (Sprint 3.3 section 4, section 5).
+ *
+ * Both sources feed ONE ordered candidate list and one scheduler. The reason
+ * this is recorded rather than inferred is precedence: when a direct task and a
+ * monday item tie on every other key, the tiebreak has to be deterministic and
+ * a reader of the decision record has to be able to see which rule applied.
+ */
+export const CANDIDATE_SOURCES = ['direct', 'monday'] as const;
+export const candidateSourceSchema = z.enum(CANDIDATE_SOURCES);
+export type CandidateSource = z.infer<typeof candidateSourceSchema>;
 
 // ---------------------------------------------------------------------------
 // Effort and safe start
@@ -142,6 +172,8 @@ export const NIGHT_STOP_REASONS = [
   'stopped_by_user',
   'worker_unavailable',
   'sandbox_unavailable',
+  /** Sprint 3.3: general work was selected and no reasoning provider is configured. */
+  'model_provider_required',
 ] as const;
 export const nightStopReasonSchema = z.enum(NIGHT_STOP_REASONS);
 export type NightStopReason = z.infer<typeof nightStopReasonSchema>;
@@ -160,6 +192,8 @@ export const SKIP_REASONS = [
   'worker_busy',
   'budget',
   'usage_threshold',
+  /** Sprint 3.3: no online worker advertises the capability this task needs. */
+  'no_capable_worker',
 ] as const;
 export const skipReasonSchema = z.enum(SKIP_REASONS);
 export type SkipReason = z.infer<typeof skipReasonSchema>;
@@ -180,6 +214,8 @@ export const schedulingRationaleSchema = z.object({
         title: z.string().max(300),
         reason: skipReasonSchema,
         detail: z.string().max(600),
+        /** Sprint 3.3: direct or monday. Absent on records written before it existed. */
+        source: candidateSourceSchema.optional(),
       }),
     )
     .max(100)

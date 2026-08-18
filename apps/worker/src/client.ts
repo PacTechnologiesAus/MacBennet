@@ -18,6 +18,7 @@ import {
   type AskQuestionResponse,
   type ContextSnapshotRequest,
   type ContextSnapshotResponse,
+  type ResearchStepResponse,
   type GitViolationReportRequest,
   type GitViolationReportResponse,
   type PullRequestReportRequest,
@@ -105,7 +106,7 @@ export class ControlPlaneClient {
   private async request<T>(
     path: string,
     body: unknown,
-    opts: { token?: string; timeoutMs?: number; retry?: boolean; attempts?: number } = {},
+    opts: { token?: string; timeoutMs?: number; retry?: boolean; attempts?: number; signal?: AbortSignal } = {},
   ): Promise<T> {
     const token = opts.token ?? this.token;
     if (!token) throw new Error('No credential available for the control plane.');
@@ -117,6 +118,15 @@ export class ControlPlaneClient {
       const controller = new AbortController();
       // The lease long-polls for up to 25s; other calls should fail fast.
       const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
+      /*
+       * Sprint 3.3: a cancelled run must abort the request in flight.
+       *
+       * A research step can run for minutes, and without this an operator's stop
+       * would be honoured only after the step returned — which is indefinitely,
+       * from their point of view.
+       */
+      const onAbort = () => controller.abort();
+      opts.signal?.addEventListener('abort', onAbort, { once: true });
 
       try {
         const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -147,6 +157,7 @@ export class ControlPlaneClient {
         lastError = err;
       } finally {
         clearTimeout(timer);
+        opts.signal?.removeEventListener('abort', onAbort);
       }
 
       if (attempt < attempts) {
@@ -277,6 +288,22 @@ export class ControlPlaneClient {
     return this.request<ContextSnapshotResponse>(`/api/worker/runs/${runId}/context-snapshot`, body, {
       timeoutMs: 30_000,
     });
+  }
+
+  /**
+   * Sprint 3.3: ask the control plane to perform one reasoning step.
+   *
+   * The generous timeout is the point of the method. A research step is a model
+   * call plus up to six source lookups, so it is minutes rather than seconds —
+   * and the worker keeps heartbeating throughout, which is what stops a long but
+   * healthy step being mistaken for a stalled run.
+   */
+  performResearchStep(runId: string, signal?: AbortSignal): Promise<ResearchStepResponse> {
+    return this.request<ResearchStepResponse>(
+      `/api/worker/runs/${runId}/research-step`,
+      {},
+      { timeoutMs: 300_000, ...(signal ? { signal } : {}) },
+    );
   }
 }
 

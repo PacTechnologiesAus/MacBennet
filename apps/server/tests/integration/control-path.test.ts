@@ -68,20 +68,26 @@ describe('projects', () => {
 });
 
 describe('tasks', () => {
-  it('creates a task with priority and confidence', async () => {
+  it("creates a task with priority and the requester's own initial confidence", async () => {
     const response = await api().post('/api/tasks', {
       projectId,
       title: 'Add multi-device selection',
       description: 'The screen currently accepts one device.',
       priority: 'high',
-      confidence: 0.75,
+      // Sprint 3.3 renamed this from `confidence` (reconciliation drift D-7).
+      // Two different numbers were sharing one word: what the REQUESTER thinks,
+      // and what MAC derived through discovery. Only the second gates execution.
+      userInitialConfidence: 0.75,
     });
     expect(response.statusCode).toBe(201);
 
     const task = response.json().task;
     expect(task.status).toBe('draft');
     expect(task.priority).toBe('high');
-    expect(task.confidence).toBe(0.75);
+    expect(task.userInitialConfidence).toBe(0.75);
+    // Nothing has been discovered yet, so Mac has no understanding confidence —
+    // and it must be null rather than borrowing the requester's number.
+    expect(task.understandingConfidence).toBeNull();
 
     const events = await queryAuditEvents({ taskId: task.id, limit: 10, offset: 0 });
     expect(events.map((e) => e.eventType)).toContain('task.created');
@@ -166,6 +172,9 @@ describe('run creation', () => {
       // allowlist: their parameters are identifiers the control plane resolves,
       // never a command, a script, a path or an argument list.
       'claude_code', 'repo_inspect',
+      // Sprint 3.3. Also a closed allowlist: it names a brief id and a task
+      // kind, and carries no prompt, no tool, no URL and no credential.
+      'general_task',
     ]);
     // The protocol still has no field in which a command could be expressed.
     expect(kinds.some((k: string) => /shell|exec|command|bash/.test(k))).toBe(false);

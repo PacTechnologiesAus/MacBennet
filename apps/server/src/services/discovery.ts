@@ -9,13 +9,16 @@ import {
   type HandoffBriefContent,
   type ModelBriefStructure,
   type ProjectContextSnapshot,
+  type CompletenessDimension,
+  type TaskKind,
 } from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
 import { discoverySessions, handoffBriefs, projects, tasks } from '../db/schema.js';
 import type { DiscoverySessionRow } from '../db/schema.js';
 import { AppError } from '../http/errors.js';
 import { analyseGaps } from '../domain/gap-analysis.js';
-import { briefDto, createBrief, requireBriefRow } from './briefs.js';
+import { classifyTask } from '../domain/task-classification.js';
+import { briefDto, createBrief, mergeContextIntoBrief, requireBriefRow } from './briefs.js';
 import { record, type Actor } from './audit.js';
 import { getSettings } from './settings.js';
 import { structureBriefWithModel } from './model/resolvers.js';
@@ -23,6 +26,7 @@ import { contextRefFor, requireActiveRevision } from './company-context/service.
 import { revisionById } from './company-context/loader.js';
 import { selectCompanyContext } from './company-context/selection.js';
 import { recordContextBinding } from './company-context/bindings.js';
+import { runInvestigation } from './investigation.js';
 
 /**
  * Discovery (Sprint 2 §5, spec §4).
@@ -40,6 +44,16 @@ import { recordContextBinding } from './company-context/bindings.js';
  * runs, the inspected context is available to mark dimensions as discoverable,
  * and a discoverable dimension is never put to a person.
  */
+
+/**
+ * How sure the classifier must be before it changes a task's kind.
+ *
+ * Comfortably above the 0.2 that `classifyTask` returns when nothing matched,
+ * and above the confidence a two-way tie produces. A reclassification is
+ * invisible to whoever wrote the title, so it should happen only when the text
+ * genuinely says so.
+ */
+const CLASSIFY_THRESHOLD = 0.6;
 
 const asMessages = (value: unknown): DiscoveryMessageDto[] =>
   Array.isArray(value) ? (value as DiscoveryMessageDto[]) : [];
@@ -128,22 +142,41 @@ export async function startDiscovery(
     if (!project.isActive) throw AppError.conflict('PROJECT_INACTIVE', 'That project is not active.');
 
     let taskId = input.taskId;
+    let taskKind: TaskKind = 'coding';
+
     if (!taskId) {
       if (!input.title) {
         throw AppError.badRequest('TASK_REQUIRED', 'Supply either an existing taskId or a title for a new task.');
       }
+      /*
+       * The same confidence threshold used when reclassifying an existing task.
+       *
+       * Applying the classifier's answer unconditionally here was a real bug:
+       * a title with no recognisable verb scores 0.2, and taking that as a
+       * classification silently turned ordinary coding work into research —
+       * which then demanded a reasoning model and refused to run.
+       */
+      const proposed = classifyTask({ title: input.title });
       const [task] = await tx
         .insert(tasks)
-        .values({ projectId: input.projectId, title: input.title, status: 'draft', createdBy: actor.id })
+        .values({
+          projectId: input.projectId,
+          title: input.title,
+          status: 'draft',
+          ...(proposed.confidence >= CLASSIFY_THRESHOLD ? { taskKind: proposed.kind } : {}),
+          origin: 'direct',
+          createdBy: actor.id,
+        })
         .returning();
       if (!task) throw new AppError(500, 'TASK_CREATE_FAILED', 'Could not create the task.');
       taskId = task.id;
+      taskKind = proposed.kind;
 
       await record(tx, {
         actor,
         eventType: 'task.created',
         context: { projectId: input.projectId, taskId },
-        metadata: { title: input.title, via: 'discovery' },
+        metadata: { title: input.title, via: 'discovery', taskKind: proposed.kind },
       });
     } else {
       const [task] = await tx.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
@@ -151,7 +184,46 @@ export async function startDiscovery(
       if (task.projectId !== input.projectId) {
         throw AppError.badRequest('TASK_PROJECT_MISMATCH', 'That task does not belong to the selected project.');
       }
+      taskKind = task.taskKind as TaskKind;
+
+      /*
+       * Sprint 3.3: Mac proposes a task kind when starting discovery on a task
+       * that was never classified.
+       *
+       * Only when the task still carries the migration default AND the text
+       * clearly says otherwise. A kind a human chose is never overwritten, and
+       * an ambiguous title is left alone — reclassifying on a weak signal would
+       * be worse than not reclassifying at all, because the change is invisible
+       * to whoever wrote the title.
+       *
+       * The threshold is 0.6: comfortably above `classifyTask`'s 0.2 "nothing
+       * matched" floor, and above the confidence a two-way tie produces.
+       */
+      if (task.taskKind === 'coding') {
+        const proposed = classifyTask({ title: task.title, description: task.description });
+        if (proposed.kind !== 'coding' && proposed.confidence >= CLASSIFY_THRESHOLD) {
+          await tx.update(tasks).set({ taskKind: proposed.kind, updatedAt: new Date() }).where(eq(tasks.id, taskId));
+          taskKind = proposed.kind;
+
+          await record(tx, {
+            actor,
+            eventType: 'task.kind_changed',
+            context: { projectId: input.projectId, taskId },
+            metadata: {
+              from: task.taskKind,
+              to: proposed.kind,
+              confidence: proposed.confidence,
+              // The words that decided it, so a human can disagree with
+              // something specific rather than with "the classifier".
+              signals: proposed.signals,
+              by: 'discovery classifier',
+            },
+          });
+        }
+      }
     }
+
+    void taskKind;
 
     const [row] = await tx
       .insert(discoverySessions)
@@ -340,7 +412,7 @@ export async function generateBrief(
   input: { overrides?: Partial<HandoffBriefContent> },
   actor: Actor,
 ): Promise<{ session: DiscoverySessionDto; brief: Awaited<ReturnType<typeof briefDto>> }> {
-  return db.transaction(async (tx) => {
+  const created = await db.transaction(async (tx) => {
     const session = await requireSessionRow(sessionId, tx);
     const [task] = await tx.select().from(tasks).where(eq(tasks.id, session.taskId)).limit(1);
     if (!task) throw AppError.notFound('Task');
@@ -438,27 +510,79 @@ export async function generateBrief(
       ...(input.overrides ?? {}),
     });
 
+    return { content, conversation, snapshot, messages, session, task };
+  });
+
+  /*
+   * Step D½ — investigate before asking (Sprint 3.3 §9).
+   *
+   * ---------------------------------------------------------------------------
+   * THE GAP THIS CLOSES
+   *
+   * Spec §4 Phase D says Mac "should avoid asking questions whose answers can be
+   * obtained by inspecting the repository or connected systems", and Sprint 3.2
+   * made PAC company context a connected system. But company context reached
+   * discovery only as grounding vocabulary for the model structurer, while the
+   * machinery that would CONSULT it — `runInvestigation`, whose second source
+   * class is literally `company_context` — was called only from supervision,
+   * during coding runs (reconciliation drift D-6).
+   *
+   * So Mac could, at discovery time, ask a human a question PAC's own approved
+   * documents answered, with no receipt showing he had looked.
+   *
+   * This runs BETWEEN the two transactions, and both facts about its position
+   * matter:
+   *
+   *   * AFTER the structuring, because there is nothing to investigate until
+   *     there is a structured brief to find gaps in;
+   *   * BEFORE the brief is stored, so its understanding confidence is computed
+   *     ONCE, with investigation already counted. Recomputing afterwards would
+   *     emit two `brief.confidence_calculated` events for one brief and leave a
+   *     window in which the stored number — the one every execution gate reads —
+   *     was already stale.
+   *
+   * Outside a transaction because each investigation reads the company mirror
+   * and writes its own receipt; nesting that inside a long-held transaction
+   * would hold a pool connection across network I/O.
+   * ---------------------------------------------------------------------------
+   */
+  const taskKind = created.task.taskKind as TaskKind;
+  const investigated = await investigateOutstandingGaps({
+    content: created.content,
+    session: created.session,
+    snapshot: created.snapshot,
+    taskKind,
+    actor,
+  });
+
+  // Step E: create the brief with everything known, then pick the ONE next
+  // question from what is STILL outstanding after Mac has done his own reading.
+  return db.transaction(async (tx) => {
     const brief = await createBrief(
       {
-        taskId: session.taskId,
-        projectId: session.projectId,
-        content,
-        sourceConversation: conversation,
-        contextSummary: session.contextSummary,
-        contextSnapshot: snapshot,
+        taskId: created.session.taskId,
+        projectId: created.session.projectId,
+        content: created.content,
+        sourceConversation: created.conversation,
+        contextSummary: created.session.contextSummary,
+        contextSnapshot: created.snapshot,
         // The SESSION's revision, not whatever is active now: a brief belongs to
         // the discovery that produced it, and a company commit landing between
         // the conversation and the structuring must not silently re-govern it.
-        companyContextRevisionId: session.companyContextRevisionId,
+        companyContextRevisionId: created.session.companyContextRevisionId,
+        taskKind,
+        investigated,
       },
       actor,
       tx,
     );
 
-    // Step E: pick the ONE next question. Never a batch.
-    const analysis = analyseGaps(brief.content, snapshot);
+    const analysis = analyseGaps(mergeContextIntoBrief(created.content, created.snapshot), created.snapshot, {
+      taskKind,
+      investigated,
+    });
     const next = analysis.nextQuestion;
-    const updatedMessages = [...messages];
+    const updatedMessages = [...created.messages];
 
     if (next) {
       updatedMessages.push({
@@ -486,14 +610,88 @@ export async function generateBrief(
       await record(tx, {
         actor,
         eventType: 'discovery.question_asked',
-        context: { projectId: session.projectId, taskId: session.taskId },
-        metadata: { discoverySessionId: sessionId, dimension: next.dimension, question: next.question },
+        context: { projectId: created.session.projectId, taskId: created.session.taskId },
+        metadata: {
+          discoverySessionId: sessionId,
+          dimension: next.dimension,
+          question: next.question,
+          // Proof, in the trail, that the question survived Mac's own research.
+          dimensionsResolvedByInvestigation: Object.keys(investigated),
+        },
       });
     }
 
     return { session: await discoverySessionDto(row, tx), brief };
   });
 }
+
+/**
+ * Investigates each outstanding dimension, and records what was consulted.
+ *
+ * Returns a map of dimension → the sources that resolved it, which
+ * `analyseGaps` credits at `INVESTIGATED_DIMENSION_WEIGHT` (0.75) — more than
+ * "the answer is findable" (0.5), less than "the human told me" (1.0).
+ *
+ * Bounded to the four heaviest gaps. An investigation costs real work, and
+ * exhaustively researching a brief that is mostly empty would spend a minute to
+ * discover what one question would settle in ten seconds.
+ */
+async function investigateOutstandingGaps(input: {
+  content: HandoffBriefContent;
+  session: DiscoverySessionRow;
+  snapshot: ProjectContextSnapshot | null;
+  taskKind: TaskKind;
+  actor: Actor;
+}): Promise<Partial<Record<CompletenessDimension, string[]>>> {
+  /*
+   * Analysed against exactly the content `createBrief` will store.
+   *
+   * `mergeContextIntoBrief` is shared with `createBrief` for this reason: two
+   * slightly different merges would have Mac investigating a dimension the
+   * repository had already answered, which wastes a step and then appears in
+   * the receipt as diligence.
+   */
+  const merged = mergeContextIntoBrief(input.content, input.snapshot);
+  const firstPass = analyseGaps(merged, input.snapshot, { taskKind: input.taskKind });
+  if (firstPass.outstanding.length === 0) return {};
+
+  const settings = await getSettings();
+  const resolved: Partial<Record<CompletenessDimension, string[]>> = {};
+
+  for (const gap of firstPass.outstanding.slice(0, 4)) {
+    const result = await runInvestigation(
+      {
+        taskId: input.session.taskId,
+        projectId: input.session.projectId,
+        discoverySessionId: input.session.id,
+        /*
+         * No brief id: the brief does not exist yet, and that ordering is
+         * deliberate (see above). The receipt is still linked to the task and
+         * the discovery session, which is what a reader follows.
+         */
+        briefId: null,
+        companyContextRevisionId: input.session.companyContextRevisionId,
+        companyContextQuery: `${merged.title} ${gap.question}`,
+        subjectKind: 'dimension',
+        subject: gap.question,
+        contextText: merged.userObjective.slice(0, 1000),
+        resolveThreshold: settings.answerConfidenceThreshold,
+        // The model may only PHRASE an answer the deterministic layer already
+        // grounded. Whether the gap is resolved, and how confidently, is never
+        // its decision.
+        allowModel: settings.modelAssistEnabled,
+      },
+      input.actor,
+    ).catch(() => null);
+
+    if (result?.resolved && result.evidence.length > 0) {
+      resolved[gap.dimension] = result.evidence.map((e) => e.ref);
+    }
+  }
+
+  return resolved;
+}
+
 
 /**
  * Turns free-flow prose into the structured fields.

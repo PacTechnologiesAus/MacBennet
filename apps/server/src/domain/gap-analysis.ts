@@ -1,10 +1,13 @@
 import {
+  applicableDimensions,
   COMPLETENESS_DIMENSIONS,
   DIMENSION_QUESTIONS,
   DIMENSION_WEIGHTS,
+  INVESTIGATED_DIMENSION_WEIGHT,
   type CompletenessDimension,
   type HandoffBriefContent,
   type ProjectContextSnapshot,
+  type TaskKind,
 } from '@mac/protocol';
 
 /**
@@ -31,8 +34,35 @@ export interface DimensionAssessment {
   weight: number;
   /** Non-empty when the repository can answer this, so Mac must not ask. */
   discoverableFrom: string[];
+  /**
+   * Sprint 3.3: non-empty when Mac ACTUALLY WENT AND FOUND OUT.
+   *
+   * Distinct from `discoverableFrom`, which only says an answer exists
+   * somewhere. Sprint 3 already priced the difference at
+   * `INVESTIGATED_DIMENSION_WEIGHT` (0.75 vs 0.5): having gone and looked is
+   * worth more than the answer being findable, and less than being told.
+   */
+  investigatedFrom: string[];
   question: string;
 }
+
+/**
+ * Sprint 3.3: how a dimension is worded for work that is not about code.
+ *
+ * The Sprint 2 wording assumes an existing system being changed — "What does
+ * the system do at the moment in this area?" is not a question a scoping task
+ * has an answer to. Asking a badly-fitting question is worse than asking none:
+ * the human answers the question they were asked, and the brief records it
+ * under a heading that means something else.
+ */
+const GENERAL_DIMENSION_QUESTIONS: Partial<Record<CompletenessDimension, string>> = {
+  problem: 'What question are we actually trying to answer, and what goes wrong if we do not?',
+  user_outcome: 'Who needs this, and what decision will they make with it?',
+  current_behaviour: 'What is the current situation, as far as you know it?',
+  desired_behaviour: 'What should the finished work tell us or produce?',
+  constraints: 'Are there constraints on this — sources I must or must not use, time, sensitivity?',
+  acceptance_criteria: 'What must the result contain for you to consider this done?',
+};
 
 export interface GapAnalysis {
   assessments: DimensionAssessment[];
@@ -132,37 +162,86 @@ function discoverableFrom(
  * Dimensions are asked about in descending weight order, so if the human
  * answers only one question it is the one that unblocks the most.
  */
+export interface GapAnalysisOptions {
+  /**
+   * Sprint 3.3: which dimensions apply at all.
+   *
+   * Defaults to `coding`, so every pre-3.3 caller gets exactly the Sprint 2
+   * behaviour. For general work the code-specific dimensions are dropped and
+   * the remaining weights are RENORMALISED — see below, which is the part that
+   * matters.
+   */
+  taskKind?: TaskKind;
+  /**
+   * Dimensions Mac resolved by investigation, and what he consulted.
+   *
+   * Sprint 3.3 section 9: company context, project memory and prior runs are
+   * investigation SOURCES during discovery, not merely model grounding, and a
+   * dimension one of them resolved must not be put to a human.
+   */
+  investigated?: Partial<Record<CompletenessDimension, string[]>>;
+}
+
 export function analyseGaps(
   brief: HandoffBriefContent,
   context: ProjectContextSnapshot | null = null,
+  options: GapAnalysisOptions = {},
 ): GapAnalysis {
-  const assessments: DimensionAssessment[] = COMPLETENESS_DIMENSIONS.map((dimension) => {
+  const taskKind: TaskKind = options.taskKind ?? 'coding';
+  const dimensions = applicableDimensions(taskKind, COMPLETENESS_DIMENSIONS);
+  const investigated = options.investigated ?? {};
+
+  /*
+   * Renormalisation, and why it is not a fudge.
+   *
+   * `DIMENSION_WEIGHTS` sums to 1.0 across all ten dimensions. Drop the four
+   * that do not apply to research and the maximum achievable score becomes 0.72
+   * — so a perfectly-understood research task would be scored 72% and refused
+   * autonomy for failing to describe its testing strategy and the code it must
+   * not change. That is reconciliation drift D-12, and it would silently
+   * mis-gate every non-coding task.
+   *
+   * Renormalising over the applicable subset asks the right question: of the
+   * things that matter FOR THIS KIND OF WORK, how much do we understand?
+   */
+  const totalWeight = dimensions.reduce((sum, d) => sum + DIMENSION_WEIGHTS[d], 0) || 1;
+  const scale = 1 / totalWeight;
+
+  const generalWork = taskKind !== 'coding';
+
+  const assessments: DimensionAssessment[] = dimensions.map((dimension) => {
     const satisfied = evaluate(brief, dimension);
+    const investigatedFrom = satisfied ? [] : (investigated[dimension] ?? []);
     return {
       dimension,
       satisfied,
-      weight: DIMENSION_WEIGHTS[dimension],
+      weight: Math.round(DIMENSION_WEIGHTS[dimension] * scale * 1000) / 1000,
       discoverableFrom: satisfied ? [] : discoverableFrom(dimension, context),
-      question: DIMENSION_QUESTIONS[dimension],
+      investigatedFrom,
+      question: (generalWork ? GENERAL_DIMENSION_QUESTIONS[dimension] : undefined) ?? DIMENSION_QUESTIONS[dimension],
     };
   });
 
   /*
-   * A dimension the repository can answer counts as PARTIALLY satisfied.
+   * Credit, in three tiers, ordered by how much the evidence is actually worth.
    *
-   * Not fully: Mac inferring the testing convention from the repository is
-   * genuinely weaker evidence than the human stating it, and pretending
-   * otherwise would let confidence reach the autonomous band on inference
-   * alone. Half credit reflects that honestly.
+   *   told         1.00  the human said it
+   *   investigated 0.75  Mac went and found it, from a recorded source
+   *   discoverable 0.50  the answer exists somewhere and Mac has not read it
+   *
+   * The gap between the last two is the whole reason Sprint 3 introduced
+   * `INVESTIGATED_DIMENSION_WEIGHT`: "findable" and "found" are different
+   * claims, and only one of them has a receipt.
    */
   const confidence = assessments.reduce((total, a) => {
     if (a.satisfied) return total + a.weight;
+    if (a.investigatedFrom.length > 0) return total + a.weight * INVESTIGATED_DIMENSION_WEIGHT;
     if (a.discoverableFrom.length > 0) return total + a.weight * 0.5;
     return total;
   }, 0);
 
   const outstanding = assessments
-    .filter((a) => !a.satisfied && a.discoverableFrom.length === 0)
+    .filter((a) => !a.satisfied && a.discoverableFrom.length === 0 && a.investigatedFrom.length === 0)
     .sort((a, b) => b.weight - a.weight);
 
   return {

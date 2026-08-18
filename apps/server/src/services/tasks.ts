@@ -1,13 +1,17 @@
 import { desc, eq, sql } from 'drizzle-orm';
-import type { CreateTaskRequest, TaskDto, UpdateTaskRequest } from '@mac/protocol';
-import { db } from '../db/client.js';
-import { projects, tasks } from '../db/schema.js';
+import type { CreateTaskRequest, TaskDto, TaskKind, TaskOrigin, UpdateTaskRequest } from '@mac/protocol';
+import { db, type DbHandle } from '../db/client.js';
+import { handoffBriefs, projects, tasks } from '../db/schema.js';
 import type { TaskRow } from '../db/schema.js';
 import { AppError } from '../http/errors.js';
 import { parseConfidence } from '../domain/confidence.js';
 import { record, type Actor } from './audit.js';
 
-export const toTaskDto = (row: TaskRow, projectName?: string): TaskDto => ({
+export const toTaskDto = (
+  row: TaskRow,
+  projectName?: string,
+  understandingConfidence: number | null = null,
+): TaskDto => ({
   id: row.id,
   projectId: row.projectId,
   ...(projectName !== undefined && { projectName }),
@@ -15,10 +19,56 @@ export const toTaskDto = (row: TaskRow, projectName?: string): TaskDto => ({
   description: row.description,
   status: row.status as TaskDto['status'],
   priority: row.priority as TaskDto['priority'],
-  confidence: parseConfidence(row.confidence),
+  taskKind: row.taskKind as TaskKind,
+  origin: row.origin as TaskOrigin,
+  /*
+   * Sprint 3.3: two confidences, and they are not interchangeable.
+   *
+   * `userInitialConfidence` is what the REQUESTER typed. `understandingConfidence`
+   * is what MAC derived through discovery, read from the latest handoff brief,
+   * and is the only one any execution gate consults. Sharing one word for both
+   * is reconciliation drift D-7; sharing one field would have been worse.
+   */
+  userInitialConfidence: parseConfidence(row.userInitialConfidence),
+  understandingConfidence,
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
 });
+
+/** The latest brief confidence for many tasks at once. */
+async function latestBriefConfidences(
+  taskIds: string[],
+  handle: DbHandle = db,
+): Promise<Map<string, number | null>> {
+  const out = new Map<string, number | null>();
+  if (taskIds.length === 0) return out;
+
+  const rows = await handle.execute<{ task_id: string; confidence: string | null }>(sql`
+    SELECT DISTINCT ON (task_id) task_id, confidence
+    FROM handoff_briefs
+    WHERE task_id IN (${sql.join(taskIds.map((id) => sql`${id}::uuid`), sql`, `)})
+    ORDER BY task_id, version DESC
+  `);
+
+  for (const row of rows as unknown as Array<{ task_id: string; confidence: string | null }>) {
+    out.set(row.task_id, parseConfidence(row.confidence));
+  }
+  return out;
+}
+
+/** Mac's derived understanding confidence, from the latest brief version. */
+export async function understandingConfidenceFor(
+  taskId: string,
+  handle: DbHandle = db,
+): Promise<number | null> {
+  const [brief] = await handle
+    .select({ confidence: handoffBriefs.confidence })
+    .from(handoffBriefs)
+    .where(eq(handoffBriefs.taskId, taskId))
+    .orderBy(desc(handoffBriefs.version))
+    .limit(1);
+  return brief ? parseConfidence(brief.confidence) : null;
+}
 
 export async function listTasks(filter: { projectId?: string } = {}): Promise<TaskDto[]> {
   const rows = await db
@@ -27,7 +77,15 @@ export async function listTasks(filter: { projectId?: string } = {}): Promise<Ta
     .innerJoin(projects, eq(projects.id, tasks.projectId))
     .where(filter.projectId ? eq(tasks.projectId, filter.projectId) : undefined)
     .orderBy(desc(tasks.createdAt));
-  return rows.map((r) => toTaskDto(r.task, r.projectName));
+  /*
+   * One query for every task's understanding confidence, not one per task.
+   *
+   * DISTINCT ON gives the highest brief version per task in a single pass;
+   * looping `understandingConfidenceFor` here would be an N+1 on the list view
+   * that grows with the backlog.
+   */
+  const confidences = await latestBriefConfidences(rows.map((r) => r.task.id));
+  return rows.map((r) => toTaskDto(r.task, r.projectName, confidences.get(r.task.id) ?? null));
 }
 
 export async function getTask(id: string): Promise<TaskDto> {
@@ -38,7 +96,7 @@ export async function getTask(id: string): Promise<TaskDto> {
     .where(eq(tasks.id, id))
     .limit(1);
   if (!row) throw AppError.notFound('Task');
-  return toTaskDto(row.task, row.projectName);
+  return toTaskDto(row.task, row.projectName, await understandingConfidenceFor(id));
 }
 
 export async function createTask(input: CreateTaskRequest, actor: Actor): Promise<TaskDto> {
@@ -61,7 +119,19 @@ export async function createTask(input: CreateTaskRequest, actor: Actor): Promis
         title,
         description: input.description?.trim() || null,
         priority: input.priority,
-        confidence: input.confidence === null || input.confidence === undefined ? null : input.confidence.toFixed(3),
+        /*
+         * Unclassified tasks default to `coding` at the column level only for
+         * schema compatibility. When the requester did not choose a kind, that
+         * is recorded honestly and discovery proposes one — a silent default of
+         * `coding` is how research work came to need a repository.
+         */
+        ...(input.taskKind ? { taskKind: input.taskKind } : {}),
+        /** Direct: created in Mac's own UI. monday-mirrored tasks set this themselves. */
+        origin: 'direct',
+        userInitialConfidence:
+          input.userInitialConfidence === null || input.userInitialConfidence === undefined
+            ? null
+            : input.userInitialConfidence.toFixed(3),
         createdBy: actor.id,
       })
       .returning();
@@ -71,7 +141,13 @@ export async function createTask(input: CreateTaskRequest, actor: Actor): Promis
       actor,
       eventType: 'task.created',
       context: { projectId: input.projectId, taskId: row.id },
-      metadata: { title: row.title, priority: row.priority, confidence: parseConfidence(row.confidence) },
+      metadata: {
+        title: row.title,
+        priority: row.priority,
+        taskKind: row.taskKind,
+        origin: row.origin,
+        userInitialConfidence: parseConfidence(row.userInitialConfidence),
+      },
     });
 
     return toTaskDto(row, project.name);
@@ -90,8 +166,10 @@ export async function updateTask(id: string, patch: UpdateTaskRequest, actor: Ac
         ...(patch.description !== undefined && { description: patch.description.trim() || null }),
         ...(patch.status !== undefined && { status: patch.status }),
         ...(patch.priority !== undefined && { priority: patch.priority }),
-        ...(patch.confidence !== undefined && {
-          confidence: patch.confidence === null ? null : patch.confidence.toFixed(3),
+        ...(patch.taskKind !== undefined && { taskKind: patch.taskKind }),
+        ...(patch.userInitialConfidence !== undefined && {
+          userInitialConfidence:
+            patch.userInitialConfidence === null ? null : patch.userInitialConfidence.toFixed(3),
         }),
         updatedAt: new Date(),
       })
@@ -100,7 +178,7 @@ export async function updateTask(id: string, patch: UpdateTaskRequest, actor: Ac
     if (!row) throw AppError.notFound('Task');
 
     const changes: Record<string, { from: unknown; to: unknown }> = {};
-    for (const key of ['title', 'description', 'status', 'priority', 'confidence'] as const) {
+    for (const key of ['title', 'description', 'status', 'priority', 'taskKind', 'userInitialConfidence'] as const) {
       if (before[key] !== row[key]) changes[key] = { from: before[key], to: row[key] };
     }
 

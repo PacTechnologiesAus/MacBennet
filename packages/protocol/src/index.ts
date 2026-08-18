@@ -13,5 +13,10 @@ export * from './mail.js';
 export * from './model.js';
 // --- Sprint 3.2 ---
 export * from './company-context.js';
+// --- Sprint 3.3 ---
+export * from './task-model.js';
+export * from './project-capabilities.js';
+export * from './artefacts.js';
+export * from './research.js';
 export * from './worker-protocol.js';
 export * from './api.js';

@@ -116,6 +116,18 @@ export type LeaseRequest = z.infer<typeof leaseRequestSchema>;
  * name and a brief. That is why the worker can execute a coding session without
  * the protocol ever carrying a command or a filesystem path from a user.
  */
+export const generalAssignmentSchema = z.object({
+  /** What kind of work. The worker uses it only for log wording. */
+  taskKind: z.enum(['research', 'analysis', 'investigation', 'scoping', 'documentation', 'administrative']),
+  /** Ceiling the worker enforces locally, in addition to the server's own. */
+  maxSteps: z.number().int().min(1).max(12),
+  maxMinutes: z.number().int().min(1).max(720),
+  /** The objective, for the run log. Not a prompt: the plan lives server-side. */
+  objective: z.string().max(4000),
+  deliverables: z.array(z.string().max(600)).max(20).default([]),
+});
+export type GeneralAssignment = z.infer<typeof generalAssignmentSchema>;
+
 export const codingAssignmentSchema = z.object({
   repositoryId: z.string().uuid(),
   repositoryName: z.string(),
@@ -163,6 +175,8 @@ export const runAssignmentSchema = z.object({
   attempt: z.number().int().min(1),
   /** Present only for repository jobs. Built server-side; never client-supplied. */
   coding: codingAssignmentSchema.nullable().default(null),
+  /** Sprint 3.3: present only for general (non-coding) jobs. Also server-built. */
+  general: generalAssignmentSchema.nullable().default(null),
 });
 export type RunAssignment = z.infer<typeof runAssignmentSchema>;
 
@@ -433,6 +447,49 @@ export type ContextSnapshotRequest = z.infer<typeof contextSnapshotRequestSchema
 
 export const contextSnapshotResponseSchema = withControl({ accepted: z.literal(true) });
 export type ContextSnapshotResponse = z.infer<typeof contextSnapshotResponseSchema>;
+
+// --- General (non-coding) work, Sprint 3.3 ---------------------------------
+//
+// The worker DRIVES a general run and the control plane PERFORMS each reasoning
+// step. Read the two schemas below with that split in mind, and note what the
+// worker never receives:
+//
+//   * no model API key, and no provider name it could redirect;
+//   * no company-context documents, and no path to the mirror;
+//   * no project memory, no monday token, no other project's data;
+//   * no prompt, and no tool it could call directly.
+//
+// It sends "do the next step" and gets back progress. Every credential and every
+// data scope stays in the control plane, which is what Sprint 3.3 section 29
+// requires — a research capability must not become a way to hand the VM the keys
+// to everything Mac can read.
+
+
+export const researchStepRequestSchema = z.object({}).strict();
+export type ResearchStepRequest = z.infer<typeof researchStepRequestSchema>;
+
+/**
+ * What one step produced.
+ *
+ * Counts and a narrative, never content. A worker that logged the findings
+ * themselves would be writing PAC policy excerpts into a VM's log file, and the
+ * whole point of keeping reasoning in the control plane is that they never get
+ * there.
+ */
+export const researchStepResponseSchema = withControl({
+  stage: z.string().max(40),
+  stepsTaken: z.number().int().min(0),
+  toolCallsMade: z.number().int().min(0),
+  narrative: z.string().max(4000),
+  findingsSoFar: z.number().int().min(0),
+  sourcesSoFar: z.number().int().min(0),
+  artefactsCreated: z.number().int().min(0),
+  done: z.boolean(),
+  limitReached: z.boolean(),
+  blockerProposed: z.string().max(1000).nullable(),
+  percent: z.number().int().min(0).max(100),
+});
+export type ResearchStepResponse = z.infer<typeof researchStepResponseSchema>;
 
 // --- Sprint 3: credential rotation and sandbox attestation ------------------
 
