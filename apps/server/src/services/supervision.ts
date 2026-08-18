@@ -21,6 +21,7 @@ import { record, type Actor } from './audit.js';
 import { toQuestionDto } from './coding-sessions.js';
 import { runInvestigation as investigation_ } from './investigation.js';
 import { consultedSources } from '../domain/investigation.js';
+import { contextRefFor } from './company-context/service.js';
 
 /**
  * Question-and-answer supervision (Sprint 2 §8).
@@ -140,7 +141,7 @@ export async function answerAgentQuestion(
         risk: 'medium',
       });
 
-      await finaliseQuestion(tx, questionRow.id, answer, 'medium');
+      await finaliseQuestion(tx, questionRow.id, answer, 'medium', context.companyContextRevisionId);
       await recordDecisionAudit(tx, actor, context, runId, input.questionId, answer, 'medium');
       return { answer, questionId: questionRow.id, blockerId, assumptionId: null };
     }
@@ -184,12 +185,23 @@ export async function answerAgentQuestion(
         contextText: input.context,
         resolveThreshold: settings.answerConfidenceThreshold,
         allowModel: settings.modelAssistEnabled,
+        /*
+         * Sprint 3.2: PAC company context becomes a seventh evidence source.
+         *
+         * The REVISION comes from the run, and the selection query is the
+         * agent's own question, so Mac answers "may I deploy this to the
+         * customer's line?" out of AUTHORITY.md rather than out of whatever a
+         * model believes about deployment in general.
+         */
+        companyContextRevisionId: context.companyContextRevisionId,
+        companyContextQuery: [input.question, input.context ?? ''].join('\n').trim(),
       },
       actor,
     ).catch(() => null);
 
     const evidence = investigation?.evidence ?? [];
     const sourcesChecked = investigation ? consultedSources(investigation.checked) : [];
+    const companyContextRef = await contextRefFor(context.companyContextRevisionId, tx);
 
     /*
      * The better-grounded of the two answers wins — but only for the WORDING
@@ -226,6 +238,9 @@ export async function answerAgentQuestion(
       reasoningSummary: summariseReasoning(result.reasoning, investigation),
       modelAssisted: investigation?.modelAssisted ?? false,
       sourcesChecked,
+      // Named on the answer the coding agent receives, so the agent is told
+      // which company context its instruction was decided under.
+      companyContext: companyContextRef,
     });
 
     // --- 3. Persist the consequences ---------------------------------------
@@ -270,7 +285,7 @@ export async function answerAgentQuestion(
       });
     }
 
-    await finaliseQuestion(tx, questionRow.id, answer, result.risk);
+    await finaliseQuestion(tx, questionRow.id, answer, result.risk, context.companyContextRevisionId);
     await recordDecisionAudit(tx, actor, context, runId, input.questionId, answer, result.risk);
 
     await appendSystemLog(
@@ -307,10 +322,12 @@ async function finaliseQuestion(
   questionId: string,
   answer: AgentAnswer,
   risk: string,
+  companyContextRevisionId: string | null = null,
 ): Promise<void> {
   await tx
     .update(agentQuestions)
     .set({
+      companyContextRevisionId,
       answer: answer.answer,
       decision: answer.decision,
       confidence: answer.confidence.toFixed(3),
@@ -359,6 +376,9 @@ async function recordDecisionAudit(
       evidence: answer.evidence.map((e) => `${e.kind}:${e.ref}`),
       sourcesChecked: answer.sourcesChecked,
       modelAssisted: answer.modelAssisted,
+      // Sprint 3.2: which PAC company context governed this decision.
+      companyContextSha: answer.companyContext?.commitSha ?? null,
+      companyContextVersion: answer.companyContext?.contextVersion ?? null,
     },
   });
 }
@@ -371,6 +391,15 @@ interface RunSupervisionContext {
   repositoryContext: ProjectContextSnapshot | null;
   approvedScope: string | null;
   agentSessionId: string | null;
+  /**
+   * Sprint 3.2: the company context THIS RUN is pinned to.
+   *
+   * Read from the run row, never from the active pointer. A PAC policy commit
+   * landing at 02:14 must not appear to have governed a decision Mac made at
+   * 02:00, and reading the run's own binding is what makes that true rather
+   * than merely intended (Sprint 3.2 section 9.3).
+   */
+  companyContextRevisionId: string | null;
 }
 
 /**
@@ -387,6 +416,7 @@ async function loadRunContext(tx: DbHandle, runId: string): Promise<RunSupervisi
       projectId: tasks.projectId,
       briefId: runs.handoffBriefId,
       approvedScope: runs.approvedScope,
+      companyContextRevisionId: runs.companyContextRevisionId,
     })
     .from(runs)
     .innerJoin(tasks, eq(tasks.id, runs.taskId))
@@ -423,6 +453,7 @@ async function loadRunContext(tx: DbHandle, runId: string): Promise<RunSupervisi
     repositoryContext: discovery?.snapshot ? projectContextSnapshotSchema.parse(discovery.snapshot) : null,
     approvedScope: row.approvedScope,
     agentSessionId: session?.id ?? null,
+    companyContextRevisionId: row.companyContextRevisionId,
   };
 }
 

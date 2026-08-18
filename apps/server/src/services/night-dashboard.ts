@@ -7,6 +7,7 @@ import { nextCutoffAfter } from '../domain/overnight.js';
 import { getBudgetStatus } from './budget.js';
 import { listWorkers } from './workers.js';
 import { toRunDto } from './runs.js';
+import { contextRefFor } from './company-context/service.js';
 import {
   buildNightQueue,
   getActiveShift,
@@ -78,6 +79,10 @@ export async function buildNightShiftDashboard(now = new Date()): Promise<NightS
         taskTitle: activeRunRow.taskTitle,
         projectId: activeRunRow.projectId,
         projectName: activeRunRow.projectName,
+        // The night dashboard is where an operator watches an autonomous run, so
+        // it is the last place that should show a blank where the governing
+        // company context ought to be.
+        companyContext: await contextRefFor(activeRunRow.run.companyContextRevisionId),
       })
     : null;
 

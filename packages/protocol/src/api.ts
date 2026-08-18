@@ -40,6 +40,7 @@ import {
 } from './night.js';
 import { emailAddressSchema, emailDeliveryKindSchema, emailDeliveryStatusSchema, mailProviderSchema } from './mail.js';
 import { modelProviderSchema } from './model.js';
+import type { CompanyContextRef } from './company-context.js';
 
 /**
  * Request and response contracts for the human-facing API.
@@ -205,6 +206,14 @@ export interface RunDto {
   stopReason: z.infer<typeof stopReasonSchema> | null;
   startedAt: string | null;
   completedAt: string | null;
+  /**
+   * Sprint 3.2: the PAC company context revision that governed this work.
+   *
+   * Null when company context is not part of this deployment. Never changes once
+   * set - a database trigger refuses to move it - so a historical record stays
+   * attributable to the policy actually in force at the time.
+   */
+  companyContext: CompanyContextRef | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -572,6 +581,14 @@ export interface DiscoverySessionDto {
   briefId: string | null;
   /** The single next question Mac wants answered. One at a time, per spec §4. */
   pendingQuestion: { id: string; question: string; dimension: string } | null;
+  /**
+   * Sprint 3.2: the PAC company context revision that governed this work.
+   *
+   * Null when company context is not part of this deployment. Never changes once
+   * set - a database trigger refuses to move it - so a historical record stays
+   * attributable to the policy actually in force at the time.
+   */
+  companyContext: CompanyContextRef | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -621,6 +638,14 @@ export interface BriefDto {
     message: string;
   };
   contextSummary: string | null;
+  /**
+   * Sprint 3.2: the PAC company context revision that governed this work.
+   *
+   * Null when company context is not part of this deployment. Never changes once
+   * set - a database trigger refuses to move it - so a historical record stays
+   * attributable to the policy actually in force at the time.
+   */
+  companyContext: CompanyContextRef | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -673,6 +698,14 @@ export interface AgentQuestionDto {
   groundedness: z.infer<typeof groundednessSchema>;
   modelAssisted: boolean;
   sourcesChecked: string[];
+  /**
+   * Sprint 3.2: the PAC company context revision that governed this work.
+   *
+   * Null when company context is not part of this deployment. Never changes once
+   * set - a database trigger refuses to move it - so a historical record stays
+   * attributable to the policy actually in force at the time.
+   */
+  companyContext: CompanyContextRef | null;
 }
 
 export interface RunAssumptionDto {
@@ -1154,4 +1187,13 @@ export interface DashboardDto {
   };
   budget: BudgetStatusDto;
   settings: SettingsDto;
+  /** Compact company-context summary for the sidebar indicator. */
+  companyContext: {
+    enabled: boolean;
+    status: string;
+    shortSha: string | null;
+    contextVersion: string | null;
+    cached: boolean;
+    stale: boolean;
+  };
 }

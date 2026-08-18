@@ -19,6 +19,8 @@ import { briefDto, createBrief, requireBriefRow } from './briefs.js';
 import { record, type Actor } from './audit.js';
 import { getSettings } from './settings.js';
 import { structureBriefWithModel } from './model/resolvers.js';
+import { contextRefFor, requireActiveRevision } from './company-context/service.js';
+import { recordContextBinding } from './company-context/bindings.js';
 
 /**
  * Discovery (Sprint 2 §5, spec §4).
@@ -63,6 +65,7 @@ export async function discoverySessionDto(
     contextInspectedAt: row.contextInspectedAt?.toISOString() ?? null,
     briefId: row.briefId,
     pendingQuestion: (row.pendingQuestion as DiscoverySessionDto['pendingQuestion']) ?? null,
+    companyContext: await contextRefFor(row.companyContextRevisionId, handle),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -106,6 +109,17 @@ export async function startDiscovery(
   input: { projectId: string; taskId?: string; title?: string },
   actor: Actor,
 ): Promise<DiscoverySessionDto> {
+  /*
+   * Sprint 3.2 section 9.2: a new discovery session is exactly the moment to
+   * check for newer approved company context.
+   *
+   * Resolved before the transaction opens - it may talk to GitHub, and holding
+   * a database connection across a network round trip is pointless. Throws when
+   * company context is required but unavailable, so a discovery session can
+   * never be started with PAC policy silently absent.
+   */
+  const companyContext = await requireActiveRevision('discovery.start');
+
   return db.transaction(async (tx) => {
     const [project] = await tx.select().from(projects).where(eq(projects.id, input.projectId)).limit(1);
     if (!project) throw AppError.notFound('Project');
@@ -139,7 +153,14 @@ export async function startDiscovery(
 
     const [row] = await tx
       .insert(discoverySessions)
-      .values({ projectId: input.projectId, taskId, status: 'open', messages: [], createdBy: actor.id })
+      .values({
+        projectId: input.projectId,
+        taskId,
+        status: 'open',
+        messages: [],
+        companyContextRevisionId: companyContext?.id ?? null,
+        createdBy: actor.id,
+      })
       .returning();
     if (!row) throw new AppError(500, 'DISCOVERY_CREATE_FAILED', 'Could not start discovery.');
 
@@ -147,7 +168,18 @@ export async function startDiscovery(
       actor,
       eventType: 'discovery.started',
       context: { projectId: input.projectId, taskId },
-      metadata: { discoverySessionId: row.id },
+      metadata: {
+        discoverySessionId: row.id,
+        companyContextSha: companyContext?.commitSha ?? null,
+      },
+    });
+
+    await recordContextBinding(tx, {
+      actor,
+      discoverySessionId: row.id,
+      projectId: input.projectId,
+      taskId,
+      revision: companyContext,
     });
 
     return discoverySessionDto(row, tx);
@@ -383,6 +415,10 @@ export async function generateBrief(
         sourceConversation: conversation,
         contextSummary: session.contextSummary,
         contextSnapshot: snapshot,
+        // The SESSION's revision, not whatever is active now: a brief belongs to
+        // the discovery that produced it, and a company commit landing between
+        // the conversation and the structuring must not silently re-govern it.
+        companyContextRevisionId: session.companyContextRevisionId,
       },
       actor,
       tx,

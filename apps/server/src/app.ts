@@ -14,6 +14,7 @@ import { repositoryRoutes } from './http/routes/repositories.js';
 import { discoveryRoutes } from './http/routes/discovery.js';
 import { workerRoutes } from './http/routes/worker.js';
 import { nightShiftRoutes } from './http/routes/night-shift.js';
+import { companyContextRoutes } from './http/routes/company-context.js';
 import { startSweepers, type Sweepers } from './jobs/sweepers.js';
 
 export interface BuildOptions {
@@ -94,6 +95,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
   await fastify.register(repositoryRoutes);
   await fastify.register(discoveryRoutes);
   await fastify.register(nightShiftRoutes);
+  await fastify.register(companyContextRoutes);
   await fastify.register(workerRoutes, limits);
 
   const sweepers = options.startBackgroundJobs === false ? null : startSweepers(fastify.log);
