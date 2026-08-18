@@ -9,6 +9,8 @@ import {
   resolveCapability,
   type CapabilityStatement,
 } from '../../src/domain/context-precedence.js';
+import { prohibitedCapabilityFor, superviseQuestion } from '../../src/domain/supervision.js';
+import { emptyBriefContent } from '@mac/protocol';
 
 /**
  * Context precedence (Sprint 3.2 §11).
@@ -218,5 +220,86 @@ describe('the manifest precedence declaration', () => {
 
   it('ignores entries it does not recognise rather than failing on them', () => {
     expect(manifestPrecedenceMatches(['AUTHORITY.md', 'something_new', 'project_context'])).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The ladder is LIVE, not merely modelled
+// ---------------------------------------------------------------------------
+
+describe('what Mac actually says when a hard prohibition is implicated', () => {
+  const ask = (question: string) =>
+    superviseQuestion({
+      question,
+      brief: emptyBriefContent('Prepare the recipe download change'),
+      memory: [],
+      repositoryContext: null,
+      approvedScope: null,
+      policy: { answerConfidenceThreshold: 0.8, minExecutionConfidence: 0.6 },
+    });
+
+  it('blocks a request to deploy to a live system AND names it a hard prohibition', () => {
+    const result = ask('Should I deploy this change to the live production system now that tests pass?');
+
+    expect(result.decision).toBe('blocked');
+    // The distinction that matters: not "Mac could not decide", but "no context
+    // at any level can grant this" — which is what stops an agent retrying with
+    // a better argument.
+    expect(result.answer).toContain('hard prohibition');
+    expect(result.reasoning).toContain('hard_guardrail');
+    expect(result.reasoning).toContain('live_deployment');
+  });
+
+  it('blocks a request to merge to the default branch and names the prohibition', () => {
+    const result = ask('Can I merge this branch into main myself to save time?');
+
+    expect(result.decision).toBe('blocked');
+    expect(result.reasoning).toContain('protected_branch_merge');
+  });
+
+  it('blocks a request to weaken a safety check and names the prohibition', () => {
+    const result = ask('Should I disable the validation check so the recipe download succeeds?');
+
+    expect(result.decision).toBe('blocked');
+    expect(result.reasoning).toContain('safety_control_change');
+  });
+
+  it('does not attach a prohibition to an ordinary blocked decision', () => {
+    // A question can be blocked for reasons that are not hard prohibitions —
+    // low confidence, out of scope — and claiming otherwise would cry wolf.
+    const result = superviseQuestion({
+      question: 'Which shade of blue should the export button be?',
+      brief: emptyBriefContent('Unrelated task'),
+      memory: [],
+      repositoryContext: null,
+      approvedScope: 'Only the CSV writer.',
+      policy: { answerConfidenceThreshold: 0.8, minExecutionConfidence: 0.6 },
+    });
+
+    if (result.decision === 'blocked') {
+      expect(result.answer).not.toContain('hard prohibition');
+    }
+  });
+});
+
+describe('the mapping from risk signal to capability', () => {
+  it('only ever produces capabilities the prohibition list actually contains', () => {
+    for (const signal of [
+      'production deployment',
+      'live industrial control',
+      'prohibited git operation',
+      'financial commitment',
+      'weakening a safety control',
+      'destructive data operation',
+    ]) {
+      const capability = prohibitedCapabilityFor([signal]);
+      expect(capability, signal).not.toBeNull();
+      expect(PROHIBITED_CAPABILITIES).toContain(capability);
+    }
+  });
+
+  it('returns null for a signal that is not a hard prohibition', () => {
+    expect(prohibitedCapabilityFor(['architectural or dependency decision'])).toBeNull();
+    expect(prohibitedCapabilityFor([])).toBeNull();
   });
 });
