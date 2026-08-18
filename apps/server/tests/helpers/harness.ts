@@ -6,6 +6,8 @@ import { db, pool } from '../../src/db/client.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { createUser } from '../../src/services/auth.js';
 import type { UserRole } from '@mac/protocol';
+import { resetCompanyContextCache } from '../../src/services/company-context/service.js';
+import { setCompanyContextProvider } from '../../src/services/company-context/provider.js';
 
 /**
  * Integration test harness.
@@ -48,7 +50,10 @@ export async function resetDatabase(): Promise<void> {
       -- Sprint 3. Most are reached by the CASCADE above; naming them keeps the
       -- list a readable inventory of what a test can leave behind.
       worker_tokens, monday_boards, monday_items, monday_writes,
-      night_shifts, night_decisions, discovery_investigations, email_deliveries
+      night_shifts, night_decisions, discovery_investigations, email_deliveries,
+      -- Sprint 3.2. company_context_status is NOT truncated: it is a singleton
+      -- like settings, and its row is restored below.
+      company_context_proposals, company_context_revisions
     RESTART IDENTITY CASCADE
   `);
   /*
@@ -90,9 +95,39 @@ export async function resetDatabase(): Promise<void> {
       mail_provider = 'none',
       model_assist_enabled = false,
       model_provider = 'none',
+      -- Sprint 3.2 defaults. Off, like every other external integration, so a
+      -- test that turns it on cannot leak that into the next file.
+      company_context_enabled = false,
+      company_context_allow_cached = true,
+      company_context_min_refresh_seconds = 60,
+      company_context_max_stale_hours = 168,
       updated_by = NULL
     WHERE id = 1
   `);
+
+  /*
+   * The company-context status singleton.
+   *
+   * `active_revision_id` references `company_context_revisions`, which the
+   * TRUNCATE above clears - so the pointer has to be dropped in the same breath
+   * or the next test starts holding a reference to a revision that no longer
+   * exists.
+   */
+  await db.execute(sql`
+    INSERT INTO company_context_status (id, status) VALUES (1, 'disabled')
+    ON CONFLICT (id) DO UPDATE SET
+      active_revision_id = NULL,
+      status = 'disabled',
+      last_check_at = NULL,
+      last_successful_refresh_at = NULL,
+      last_error = NULL,
+      consecutive_failures = 0
+  `);
+
+  // In-process caches: the document cache and the "when did we last check the
+  // remote" clock would otherwise carry one test's revision into the next.
+  resetCompanyContextCache();
+  setCompanyContextProvider(null);
 }
 
 export interface TestApp {

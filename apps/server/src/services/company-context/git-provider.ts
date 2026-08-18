@@ -75,8 +75,19 @@ export function redactGitError(text: string, token?: string | undefined): string
   if (token && token.length >= 8) out = out.split(token).join('[redacted]');
   // https://user:pass@host and https://token@host alike.
   out = out.replace(/(https?:\/\/)[^\s/@]+@/gi, '$1[redacted]@');
-  // Bare bearer/token headers, should one ever reach stderr.
-  out = out.replace(/\b(authorization|bearer|token|password)\b\s*[:=]\s*\S+/gi, '$1: [redacted]');
+  /*
+   * Authorization-style headers: redact to END OF LINE, not just the next word.
+   *
+   * A narrower pattern that consumed one token was tried first and was wrong:
+   * given `Authorization: Bearer <secret>` it removed the word "Bearer" and left
+   * the secret sitting in the output. The scheme name is never the secret, so
+   * there is nothing after the colon worth keeping.
+   */
+  out = out.replace(/\b(authorization|proxy-authorization)\b\s*[:=].*/gi, '$1: [redacted]');
+  // Bare credential assignments, should one ever reach stderr.
+  out = out.replace(/\b(bearer|token|password|passwd|secret|api[-_]?key)\b\s*[:=]\s*\S+/gi, '$1: [redacted]');
+  // `Bearer <token>` with no key/value separator at all.
+  out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/-]{8,}=*/g, 'Bearer [redacted]');
   // GitHub credential shapes, belt and braces.
   out = out.replace(/\bgh[pousr]_[A-Za-z0-9]{16,}/g, '[redacted]');
   out = out.replace(/\bgithub_pat_[A-Za-z0-9_]{20,}/g, '[redacted]');
@@ -201,6 +212,22 @@ export class GitCompanyContextProvider implements CompanyContextProvider {
     };
   }
 
+  /**
+   * The bare mirror lives in a SUBDIRECTORY of the configured cache directory.
+   *
+   * It did not, at first, and that was a real bug: the askpass helper is written
+   * into the cache directory, so `git clone --mirror <remote> <cacheDir>` found a
+   * non-empty destination and refused. Every authenticated first-time clone
+   * failed - which is to say, every correctly configured PAC deployment, while
+   * the token-less local tests passed happily.
+   *
+   * Separating the two means the cache directory holds Mac's own scaffolding and
+   * the mirror holds nothing but the repository.
+   */
+  get #mirrorDir(): string {
+    return path.join(this.#cacheDir, 'mirror.git');
+  }
+
   // -------------------------------------------------------------------------
   // Credential plumbing
   // -------------------------------------------------------------------------
@@ -228,22 +255,65 @@ export class GitCompanyContextProvider implements CompanyContextProvider {
   }
 
   async #env(): Promise<NodeJS.ProcessEnv> {
+    /*
+     * Built from a named allowlist rather than by spreading process.env: the
+     * control plane's environment holds the database URL, the monday token and
+     * the mailbox secret, and git needs none of them.
+     *
+     * The list is longer than it first looks because git on Windows genuinely
+     * needs it. An earlier, tighter version omitted the proxy and profile
+     * variables and it worked — until it did not, on a host behind a proxy.
+     */
     const env: NodeJS.ProcessEnv = {
-      // Built from a minimal base rather than spreading process.env: the control
-      // plane's environment holds the database URL, the monday token and the
-      // mailbox secret, and git needs none of them.
       PATH: process.env.PATH,
       HOME: process.env.HOME,
+      // Windows: git resolves its own installation, the user's config and the
+      // certificate store through these.
       USERPROFILE: process.env.USERPROFILE,
+      APPDATA: process.env.APPDATA,
+      LOCALAPPDATA: process.env.LOCALAPPDATA,
+      ProgramData: process.env.ProgramData,
+      ProgramFiles: process.env.ProgramFiles,
       SystemRoot: process.env.SystemRoot,
+      SYSTEMDRIVE: process.env.SYSTEMDRIVE,
+      WINDIR: process.env.WINDIR,
+      COMSPEC: process.env.COMSPEC,
+      PATHEXT: process.env.PATHEXT,
       TEMP: process.env.TEMP,
       TMP: process.env.TMP,
+      // A control plane behind a corporate proxy has to be able to say so.
+      HTTP_PROXY: process.env.HTTP_PROXY,
+      HTTPS_PROXY: process.env.HTTPS_PROXY,
+      NO_PROXY: process.env.NO_PROXY,
+      // Custom CA bundles, for a host that terminates TLS internally.
+      GIT_SSL_CAINFO: process.env.GIT_SSL_CAINFO,
+      SSL_CERT_FILE: process.env.SSL_CERT_FILE,
+      SSL_CERT_DIR: process.env.SSL_CERT_DIR,
       // An unattended fetch must fail rather than block on a credential prompt.
       GIT_TERMINAL_PROMPT: '0',
-      GIT_CONFIG_NOSYSTEM: '1',
       // Deterministic output, whatever the host's locale.
       LC_ALL: 'C',
     };
+
+    /*
+     * `GIT_CONFIG_NOSYSTEM` is deliberately NOT set.
+     *
+     * It was, in the first version of this file, on the reasoning that ambient
+     * configuration is a surprise waiting to happen. The live test against
+     * github.com then failed on Windows with
+     * `schannel: CRYPT_E_NO_REVOCATION_CHECK`, and a controlled probe confirmed
+     * that flag was the only cause: the system gitconfig is exactly where the
+     * platform's TLS backend is configured, and discarding it breaks HTTPS.
+     *
+     * The system gitconfig is administrator-controlled and trusted. Excluding it
+     * bought very little — every argv in this file is fixed, so no configuration
+     * could turn a read into a write — and it cost the ability to fetch at all.
+     * The one ambient behaviour genuinely worth suppressing is an interactive
+     * credential helper, and that is handled per-invocation below.
+     */
+    for (const key of Object.keys(env)) {
+      if (env[key] === undefined) delete env[key];
+    }
 
     if (this.#token) {
       env[ASKPASS_ENV_VAR] = this.#token;
@@ -254,7 +324,18 @@ export class GitCompanyContextProvider implements CompanyContextProvider {
   }
 
   async #git(args: string[], cwd?: string): Promise<GitResult> {
-    const result = await this.#runGit(args, {
+    /*
+     * Clear the credential helper chain for this invocation.
+     *
+     * The host's git may be configured with an interactive helper — Git
+     * Credential Manager is the default on Windows — which can raise a GUI
+     * dialog and block a control-plane refresh until the timeout fires.
+     * `GIT_TERMINAL_PROMPT=0` stops console prompting but not that.
+     *
+     * An empty value RESETS the helper list, so the only credential source left
+     * is the askpass helper above, which is the one Mac actually owns.
+     */
+    const result = await this.#runGit(['-c', 'credential.helper=', ...args], {
       ...(cwd ? { cwd } : {}),
       env: await this.#env(),
       timeoutMs: this.#timeoutMs,
@@ -269,7 +350,7 @@ export class GitCompanyContextProvider implements CompanyContextProvider {
   async #cacheExists(): Promise<boolean> {
     try {
       // A mirror is a bare repository: HEAD at the top level, no .git directory.
-      await fs.access(path.join(this.#cacheDir, 'HEAD'));
+      await fs.access(path.join(this.#mirrorDir, 'HEAD'));
       return true;
     } catch {
       return false;
@@ -296,8 +377,8 @@ export class GitCompanyContextProvider implements CompanyContextProvider {
       ? // `remote update --prune` rather than `fetch`: a mirror's refspec already
         // covers every ref, and --prune makes a deleted or rewritten remote branch
         // observable rather than leaving a stale local ref behind.
-        await this.#git(['remote', 'update', '--prune'], this.#cacheDir)
-      : await this.#git(['clone', '--mirror', '--quiet', remote, this.#cacheDir]);
+        await this.#git(['remote', 'update', '--prune'], this.#mirrorDir)
+      : await this.#git(['clone', '--mirror', '--quiet', remote, this.#mirrorDir]);
 
     if (result.code !== 0) {
       return {
@@ -328,13 +409,13 @@ export class GitCompanyContextProvider implements CompanyContextProvider {
     if (!(await this.#cacheExists())) return null;
 
     // In a mirror, remote branches land on refs/heads/*.
-    const sha = await this.#git(['rev-parse', `refs/heads/${this.#ref}`], this.#cacheDir);
+    const sha = await this.#git(['rev-parse', `refs/heads/${this.#ref}`], this.#mirrorDir);
     if (sha.code !== 0) return null;
 
     const commitSha = sha.stdout.trim();
     if (!/^[0-9a-f]{40}$/.test(commitSha)) return null;
 
-    const date = await this.#git(['show', '-s', '--format=%cI', commitSha], this.#cacheDir);
+    const date = await this.#git(['show', '-s', '--format=%cI', commitSha], this.#mirrorDir);
     const committedAt = date.code === 0 ? date.stdout.trim() || null : null;
 
     return { commitSha, ref: this.#ref, committedAt };
@@ -342,7 +423,7 @@ export class GitCompanyContextProvider implements CompanyContextProvider {
 
   async listFiles(commitSha: string): Promise<string[]> {
     assertSha(commitSha);
-    const result = await this.#git(['ls-tree', '-r', '--name-only', commitSha], this.#cacheDir);
+    const result = await this.#git(['ls-tree', '-r', '--name-only', commitSha], this.#mirrorDir);
     if (result.code !== 0) throw new Error(`Could not list company context files: ${result.stderr}`);
     return result.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
   }
@@ -358,7 +439,7 @@ export class GitCompanyContextProvider implements CompanyContextProvider {
      * the boundary where a string becomes a git argument and it costs nothing to
      * make an argument that starts with `-` impossible to interpret as a flag.
      */
-    const result = await this.#git(['show', `${commitSha}:${relativePath}`], this.#cacheDir);
+    const result = await this.#git(['show', `${commitSha}:${relativePath}`], this.#mirrorDir);
     if (result.code !== 0) throw new CompanyDocumentMissing(relativePath, commitSha);
     return result.stdout;
   }
