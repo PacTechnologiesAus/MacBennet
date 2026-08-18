@@ -1,0 +1,50 @@
+# Sprint 3.1 commissioning: a sandbox image that actually carries the coding agent.
+#
+# The stock MAC_SANDBOX_IMAGE (node:22-bookworm-slim) has node and git but no
+# Claude Code, so "the real CLI ran inside the sandbox" could not be attempted
+# with it at all. This image is the minimum that makes the claim testable:
+# the toolchain a JavaScript repository needs, plus the agent itself.
+#
+# Build:
+#   docker build -f scripts/commissioning/Dockerfile.mac-agent -t mac-agent:commissioning .
+#
+# It carries NO credentials. Authentication is supplied at run time by the
+# sandbox plan's credential mount, which is read-only and recorded.
+#
+# ---------------------------------------------------------------------------
+# TLS-inspecting networks
+#
+# The machine this was commissioned on runs AVG Antivirus, which terminates and
+# re-signs every HTTPS connection with a locally generated root. The host trusts
+# it (NODE_EXTRA_CA_CERTS, npm's cafile); a container does not, so `npm install`
+# failed with UNABLE_TO_VERIFY_LEAF_SIGNATURE and, more importantly, so would
+# the agent's own calls to api.anthropic.com once it was running inside.
+#
+# Drop any such root into `scripts/commissioning/ca/` as a `.crt` file and it is
+# trusted at build time and at run time. The directory is gitignored: these
+# certificates are machine-local, and committing one would be committing a
+# statement about somebody's laptop.
+# ---------------------------------------------------------------------------
+
+FROM node:22-bookworm-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates openssl \
+ && rm -rf /var/lib/apt/lists/*
+
+# `ca/` always exists (it holds a .gitkeep), so this COPY is safe on a machine
+# with no interception, where it simply adds nothing.
+COPY scripts/commissioning/ca/ /usr/local/share/ca-certificates/mac-local/
+RUN update-ca-certificates
+
+# npm and node read their own trust store rather than the system one.
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+
+RUN npm install -g @anthropic-ai/claude-code@latest \
+ && claude --version
+
+# The sandbox overrides all of these at run time (--entrypoint '', -w, -e).
+# They are here so the image is usable by hand when diagnosing a failed run.
+ENV CI=1 \
+    GIT_TERMINAL_PROMPT=0 \
+    FORCE_COLOR=0

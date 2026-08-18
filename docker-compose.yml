@@ -1,0 +1,32 @@
+# Local development database only.
+#
+# This file deliberately contains a single service. Sprint 1 has no need for
+# container orchestration: the server, web app and worker all run directly on
+# the developer's machine with `npm run dev`. Only PostgreSQL is containerised,
+# because installing it natively is the one genuinely annoying setup step.
+name: mac-bennett
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: mac-bennett-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mac
+      POSTGRES_PASSWORD: mac_dev_password
+      POSTGRES_DB: mac_bennett
+      # Created alongside the main database by the init script below.
+      MAC_TEST_DB: mac_bennett_test
+    ports:
+      - "5433:5432"
+    volumes:
+      - mac-db-data:/var/lib/postgresql/data
+      - ./scripts/init-test-db.sh:/docker-entrypoint-initdb.d/10-init-test-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mac -d mac_bennett"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  mac-db-data:

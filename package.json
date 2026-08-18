@@ -1,0 +1,39 @@
+{
+  "name": "mac-bennett",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mac Bennett — persistent AI Automation Engineer control plane (Sprint 1)",
+  "type": "module",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:wait": "node scripts/wait-for-db.mjs",
+    "migrate": "npm run migrate -w @mac/server",
+    "seed": "npm run seed -w @mac/server",
+    "setup": "npm install && npm run db:up && npm run db:wait && npm run migrate && npm run seed",
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "npm run dev -w @mac/server",
+    "dev:web": "npm run dev -w @mac/web",
+    "dev:worker": "npm run dev -w @mac/worker",
+    "build": "npm run typecheck && npm run build -w @mac/web",
+    "typecheck": "npm run typecheck -w @mac/protocol && npm run typecheck -w @mac/server && npm run typecheck -w @mac/worker && npm run typecheck -w @mac/web",
+    "test": "npm run test -w @mac/server && npm run test -w @mac/worker",
+    "test:unit": "npm run test:unit -w @mac/server",
+    "test:integration": "npm run test:integration -w @mac/server",
+    "test:e2e": "npm run test:e2e -w @mac/server",
+    "test:worker": "npm run test -w @mac/worker"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8",
+    "tsx": "^4.19.2",
+    "@types/node": "^20.17.9"
+  }
+}
