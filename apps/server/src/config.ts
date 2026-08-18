@@ -1,4 +1,5 @@
 import { config as loadDotenv } from 'dotenv';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -53,6 +54,33 @@ const envSchema = z.object({
 
   /** Base URL used in report links back to the Mac UI. */
   MAC_APP_URL: z.string().default('http://localhost:5173'),
+
+  // --- Sprint 3.2 -----------------------------------------------------------
+  //
+  // The PAC shared company context repository. The URL is configurable, but the
+  // default IS the intended PAC deployment value, so a correct deployment needs
+  // only to supply a read-only token and turn the feature on.
+
+  MAC_COMPANY_CONTEXT_REPO_URL: z
+    .string()
+    .default('https://github.com/PacTechnologiesAus/Company.git'),
+  MAC_COMPANY_CONTEXT_REF: z.string().default('main'),
+  /**
+   * Where the bare mirror lives.
+   *
+   * Outside every coding workspace on purpose (Sprint 3.2 section 5). A default
+   * under the repository root would eventually end up inside a worktree, and a
+   * coding agent that can edit AUTHORITY.md can edit PAC policy.
+   */
+  MAC_COMPANY_CONTEXT_DIR: z
+    .string()
+    .default(path.join(os.homedir(), '.mac-bennett', 'company-context')),
+  /**
+   * A READ-ONLY GitHub token. Never placed in argv or in the remote URL - it is
+   * handed to git through GIT_ASKPASS, in the child process environment only.
+   */
+  MAC_COMPANY_CONTEXT_TOKEN: z.string().optional(),
+  MAC_COMPANY_CONTEXT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600_000).default(60_000),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -119,6 +147,15 @@ export const config = Object.freeze({
   model: {
     apiKey: env.ANTHROPIC_API_KEY,
     name: env.MAC_MODEL_NAME,
+  },
+
+  // --- Sprint 3.2 ---
+  companyContext: {
+    repositoryUrl: env.MAC_COMPANY_CONTEXT_REPO_URL,
+    ref: env.MAC_COMPANY_CONTEXT_REF,
+    cacheDir: env.MAC_COMPANY_CONTEXT_DIR,
+    token: env.MAC_COMPANY_CONTEXT_TOKEN,
+    timeoutMs: env.MAC_COMPANY_CONTEXT_TIMEOUT_MS,
   },
 });
 

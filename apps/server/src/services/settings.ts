@@ -51,6 +51,11 @@ export interface Settings {
   mailProvider: MailProviderName;
   modelAssistEnabled: boolean;
   modelProvider: ModelProviderName;
+  // --- Sprint 3.2 ---
+  companyContextEnabled: boolean;
+  companyContextAllowCached: boolean;
+  companyContextMinRefreshSeconds: number;
+  companyContextMaxStaleHours: number;
   updatedAt: Date;
 }
 
@@ -92,6 +97,10 @@ export async function getSettings(handle: DbHandle = db): Promise<Settings> {
     mailProvider: row.mailProvider as MailProviderName,
     modelAssistEnabled: row.modelAssistEnabled,
     modelProvider: row.modelProvider as ModelProviderName,
+    companyContextEnabled: row.companyContextEnabled,
+    companyContextAllowCached: row.companyContextAllowCached,
+    companyContextMinRefreshSeconds: row.companyContextMinRefreshSeconds,
+    companyContextMaxStaleHours: row.companyContextMaxStaleHours,
     updatedAt: row.updatedAt,
   };
 }
@@ -139,6 +148,10 @@ export const toSettingsDto = (s: Settings): SettingsDto => ({
   mailProvider: s.mailProvider,
   modelAssistEnabled: s.modelAssistEnabled,
   modelProvider: s.modelProvider,
+  companyContextEnabled: s.companyContextEnabled,
+  companyContextAllowCached: s.companyContextAllowCached,
+  companyContextMinRefreshSeconds: s.companyContextMinRefreshSeconds,
+  companyContextMaxStaleHours: s.companyContextMaxStaleHours,
   updatedAt: s.updatedAt.toISOString(),
 });
 
@@ -267,6 +280,16 @@ export async function updateSettings(
         ...(patch.mailProvider !== undefined && { mailProvider: patch.mailProvider }),
         ...(patch.modelAssistEnabled !== undefined && { modelAssistEnabled: patch.modelAssistEnabled }),
         ...(patch.modelProvider !== undefined && { modelProvider: patch.modelProvider }),
+        ...(patch.companyContextEnabled !== undefined && { companyContextEnabled: patch.companyContextEnabled }),
+        ...(patch.companyContextAllowCached !== undefined && {
+          companyContextAllowCached: patch.companyContextAllowCached,
+        }),
+        ...(patch.companyContextMinRefreshSeconds !== undefined && {
+          companyContextMinRefreshSeconds: patch.companyContextMinRefreshSeconds,
+        }),
+        ...(patch.companyContextMaxStaleHours !== undefined && {
+          companyContextMaxStaleHours: patch.companyContextMaxStaleHours,
+        }),
         updatedAt: new Date(),
         updatedBy: actor.id,
       })

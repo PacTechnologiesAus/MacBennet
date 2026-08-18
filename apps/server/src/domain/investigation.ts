@@ -45,6 +45,14 @@ export interface InvestigationSources {
   previousBriefs: Array<{ briefId: string; label: string; text: string }>;
   /** The monday item's description and its update feed. */
   mondayContext: Array<{ ref: string; text: string }>;
+  /**
+   * Sprint 3.2: selected sections of the approved PAC company context, each
+   * `ref` already naming its document AND the commit SHA it came from.
+   *
+   * Supplied by the caller rather than fetched here, because this module stays
+   * pure — it knows nothing about revisions, manifests or Git.
+   */
+  companyContext: Array<{ ref: string; text: string }>;
   approvedScope?: string | null;
 }
 
@@ -59,6 +67,7 @@ export interface InvestigationInput {
 /** Which evidence kind each source class produces. */
 const EVIDENCE_KIND: Record<InvestigationSource, EvidenceKind> = {
   repository: 'repository_fact',
+  company_context: 'company_policy',
   project_memory: 'project_memory',
   task_memory: 'task_memory',
   previous_runs: 'previous_run',
@@ -147,6 +156,24 @@ function candidatesFrom(sources: InvestigationSources): Candidate[] {
         authority: 0.45,
       });
     }
+  }
+
+  /*
+   * Approved PAC company policy.
+   *
+   * Authority 0.9: above project memory (0.8), below task memory's ceiling
+   * (0.9 x confidence, for material about THIS task). Company policy is
+   * authoritative and stable, and it should outrank a project note somebody
+   * recorded eight months ago — but a fact recorded about the task in hand is
+   * still the more specific answer to a question about that task.
+   */
+  for (const entry of sources.companyContext) {
+    candidates.push({
+      source: 'company_context',
+      ref: entry.ref,
+      text: entry.text,
+      authority: 0.9,
+    });
   }
 
   for (const entry of sources.projectMemory) {

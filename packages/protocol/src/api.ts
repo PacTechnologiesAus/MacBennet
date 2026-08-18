@@ -371,6 +371,11 @@ export const updateSettingsRequestSchema = z
     /** Off by default: determinism is the default posture for unattended work. */
     modelAssistEnabled: z.boolean().optional(),
     modelProvider: modelProviderSchema.optional(),
+    // --- Sprint 3.2 ---
+    companyContextEnabled: z.boolean().optional(),
+    companyContextAllowCached: z.boolean().optional(),
+    companyContextMinRefreshSeconds: z.number().int().min(0).max(86_400).optional(),
+    companyContextMaxStaleHours: z.number().int().min(0).max(8760).optional(),
   })
   .strict();
 export type UpdateSettingsRequest = z.infer<typeof updateSettingsRequestSchema>;
@@ -406,6 +411,11 @@ export interface SettingsDto {
   mailProvider: z.infer<typeof mailProviderSchema>;
   modelAssistEnabled: boolean;
   modelProvider: z.infer<typeof modelProviderSchema>;
+  // --- Sprint 3.2 ---
+  companyContextEnabled: boolean;
+  companyContextAllowCached: boolean;
+  companyContextMinRefreshSeconds: number;
+  companyContextMaxStaleHours: number;
   updatedAt: string;
 }
 

@@ -24,6 +24,11 @@ import {
   AUDIT_EVENT_TYPES,
   BRIEF_STATUSES,
   CODING_AGENT_PROVIDERS,
+  COMPANY_CONTEXT_PROVIDER_KINDS,
+  COMPANY_CONTEXT_SOURCES,
+  COMPANY_CONTEXT_STATUSES,
+  COMPANY_CONTEXT_VALIDATION_STATES,
+  COMPANY_PROPOSAL_STATUSES,
   DECISION_RISKS,
   DISCOVERY_STATUSES,
   EMAIL_DELIVERY_KINDS,
@@ -184,6 +189,21 @@ export const settings = pgTable('settings', {
   /** Off by default: determinism is the default posture for unattended work. */
   modelAssistEnabled: boolean('model_assist_enabled').notNull().default(false),
   modelProvider: enumText('model_provider', MODEL_PROVIDERS).notNull().default('none'),
+
+  // --- Sprint 3.2 ---
+  /**
+   * Off by default, like every other integration that reaches a remote service.
+   * With it off, company context is simply absent and nothing fails; with it on,
+   * missing or invalid context FAILS context-dependent work rather than letting
+   * a run look grounded when it is not (Sprint 3.2 §4.1, §10).
+   */
+  companyContextEnabled: boolean('company_context_enabled').notNull().default(false),
+  /** Whether a previously validated revision may be used when GitHub is down. */
+  companyContextAllowCached: boolean('company_context_allow_cached').notNull().default(true),
+  /** Stops a night shift creating fifty runs from making fifty fetches. */
+  companyContextMinRefreshSeconds: integer('company_context_min_refresh_seconds').notNull().default(60),
+  /** Beyond this, cached context is reported as stale. 0 disables the check. */
+  companyContextMaxStaleHours: integer('company_context_max_stale_hours').notNull().default(168),
 
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
@@ -409,9 +429,20 @@ export const runs = pgTable(
      * human can approve a run the scheduler proposed.
      */
     selectedBy: enumText('selected_by', RUN_SELECTION_SOURCES).notNull().default('human'),
+
+    // --- Sprint 3.2 ---
+    /**
+     * The PAC company context that governed this run.
+     *
+     * Immutable once set — enforced by a BEFORE UPDATE trigger, not by
+     * convention — so a newer Company commit appearing mid-run cannot change
+     * what this run was working under (Sprint 3.2 §8.2, §9.3).
+     */
+    companyContextRevisionId: uuid('company_context_revision_id'),
   },
   (t) => ({
     taskIdx: index('runs_task_id_idx').on(t.taskId),
+    companyContextIdx: index('runs_company_context_idx').on(t.companyContextRevisionId),
     nightShiftIdx: index('runs_night_shift_id_idx').on(t.nightShiftId),
     repositoryIdx: index('runs_repository_id_idx').on(t.repositoryId),
     statusIdx: index('runs_status_idx').on(t.status),
@@ -616,12 +647,15 @@ export const handoffBriefs = pgTable(
     /** Provenance only. Never the specification handed to a coding agent. */
     sourceConversation: text('source_conversation').notNull().default(''),
     contextSummary: text('context_summary'),
+    /** Sprint 3.2: which company context this brief was written under. */
+    companyContextRevisionId: uuid('company_context_revision_id'),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     taskIdx: index('handoff_briefs_task_id_idx').on(t.taskId),
+    companyContextIdx: index('handoff_briefs_company_context_idx').on(t.companyContextRevisionId),
     taskVersionIdx: uniqueIndex('handoff_briefs_task_version_key').on(t.taskId, t.version),
   }),
 );
@@ -644,6 +678,8 @@ export const discoverySessions = pgTable(
     briefId: uuid('brief_id').references(() => handoffBriefs.id, { onDelete: 'set null' }),
     /** The single next question. Spec §4: Mac asks one at a time. */
     pendingQuestion: jsonb('pending_question'),
+    /** Sprint 3.2: the company context bound when this session started. */
+    companyContextRevisionId: uuid('company_context_revision_id'),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -651,6 +687,7 @@ export const discoverySessions = pgTable(
   (t) => ({
     taskIdx: index('discovery_sessions_task_id_idx').on(t.taskId),
     projectIdx: index('discovery_sessions_project_id_idx').on(t.projectId),
+    companyContextIdx: index('discovery_sessions_company_context_idx').on(t.companyContextRevisionId),
   }),
 );
 
@@ -738,8 +775,18 @@ export const agentQuestions = pgTable(
      */
     groundedness: enumText('groundedness', GROUNDEDNESS).notNull().default('assumption'),
     modelAssisted: boolean('model_assisted').notNull().default(false),
-    /** Which of the six investigation source classes were consulted. */
+    /** Which investigation source classes were consulted. */
     sourcesChecked: jsonb('sources_checked').notNull().default(sql`'[]'::jsonb`),
+
+    // --- Sprint 3.2 ---
+    /**
+     * The company context this answer was decided under.
+     *
+     * Copied from the RUN, not from whatever is currently active. A commit that
+     * lands at 02:14 must not retroactively appear to have governed a decision
+     * made at 02:00 (Sprint 3.2 §9.3).
+     */
+    companyContextRevisionId: uuid('company_context_revision_id'),
 
     askedAt: timestamp('asked_at', { withTimezone: true }).notNull().defaultNow(),
     answeredAt: timestamp('answered_at', { withTimezone: true }),
@@ -747,6 +794,7 @@ export const agentQuestions = pgTable(
   (t) => ({
     runIdx: index('agent_questions_run_id_idx').on(t.runId),
     externalIdx: uniqueIndex('agent_questions_run_external_key').on(t.runId, t.externalId),
+    companyContextIdx: index('agent_questions_company_context_idx').on(t.companyContextRevisionId),
   }),
 );
 
@@ -1218,6 +1266,119 @@ export const emailDeliveries = pgTable(
   }),
 );
 
+// ---------------------------------------------------------------------------
+// Sprint 3.2 - PAC shared company context
+// ---------------------------------------------------------------------------
+
+/**
+ * Every revision of the PAC company context Mac has loaded, or tried to.
+ *
+ * Failed loads are rows too. "Mac refused to start work at 02:14 and this is the
+ * manifest error that stopped him" is exactly what an operator needs at 08:00,
+ * and it cannot be reconstructed from a log line that has scrolled away.
+ *
+ * Note what is NOT here: document text. The authoritative copy of PAC policy is
+ * the Git repository the humans govern; a second copy in Postgres would be an
+ * un-governed one. What is stored is identity - SHA, version, hashes, and per
+ * document metadata - which is enough to prove which text a run was bound to.
+ */
+export const companyContextRevisions = pgTable(
+  'company_context_revisions',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    /** Credentials already stripped. Never the URL git was actually handed. */
+    repositoryUrl: text('repository_url').notNull(),
+    ref: text('ref').notNull(),
+    commitSha: text('commit_sha').notNull(),
+    commitAuthoredAt: timestamp('commit_authored_at', { withTimezone: true }),
+    contextVersion: text('context_version').notNull().default(''),
+    schemaVersion: integer('schema_version').notNull().default(0),
+    /** The whole parsed manifest, unknown future fields included. */
+    manifest: jsonb('manifest').notNull().default(sql`'{}'::jsonb`),
+    manifestSha256: text('manifest_sha256').notNull().default(''),
+    documentSetSha256: text('document_set_sha256').notNull().default(''),
+    /** `[{path, bytes, sha256, headings}]`. Metadata only. */
+    documents: jsonb('documents').notNull().default(sql`'[]'::jsonb`),
+    validationState: enumText('validation_state', COMPANY_CONTEXT_VALIDATION_STATES).notNull(),
+    validationErrors: jsonb('validation_errors').notNull().default(sql`'[]'::jsonb`),
+    providerKind: enumText('provider_kind', COMPANY_CONTEXT_PROVIDER_KINDS).notNull().default('git'),
+    source: enumText('source', COMPANY_CONTEXT_SOURCES).notNull().default('remote'),
+    loadedAt: timestamp('loaded_at', { withTimezone: true }).notNull().defaultNow(),
+    firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    repoCommitIdx: uniqueIndex('company_context_revisions_repo_commit_key').on(t.repositoryUrl, t.commitSha),
+    commitIdx: index('company_context_revisions_commit_idx').on(t.commitSha),
+    stateIdx: index('company_context_revisions_state_idx').on(t.validationState, t.loadedAt),
+  }),
+);
+
+/**
+ * Singleton (id = 1), enforced by a CHECK, like `settings`.
+ *
+ * Persisted rather than in-memory because "when did Mac last reach the Company
+ * repository?" is asked most often right after a restart - precisely when an
+ * in-memory answer would have just been lost.
+ */
+export const companyContextStatus = pgTable('company_context_status', {
+  id: smallint('id').primaryKey().default(1),
+  activeRevisionId: uuid('active_revision_id').references(() => companyContextRevisions.id, {
+    onDelete: 'restrict',
+  }),
+  status: enumText('status', COMPANY_CONTEXT_STATUSES).notNull().default('disabled'),
+  lastCheckAt: timestamp('last_check_at', { withTimezone: true }),
+  lastSuccessfulRefreshAt: timestamp('last_successful_refresh_at', { withTimezone: true }),
+  /** Already passed through `redactGitError` before it arrives here. */
+  lastError: text('last_error'),
+  consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * A proposed change to PAC company context - the only artefact Mac may produce
+ * about changing it (Sprint 3.2 section 16).
+ *
+ * There is no path from a row here to a commit in the Company repository.
+ * `accepted` records that a person agreed; making the change is that person's
+ * act, outside this system. A CHECK requires a reviewer on any decided row, so
+ * an accepted proposal can never look like one Mac accepted himself.
+ */
+export const companyContextProposals = pgTable(
+  'company_context_proposals',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    targetDocument: text('target_document').notNull(),
+    targetSection: text('target_section'),
+    proposedChange: text('proposed_change').notNull(),
+    reason: text('reason').notNull(),
+    evidence: jsonb('evidence').notNull().default(sql`'[]'::jsonb`),
+    potentialImpact: text('potential_impact'),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    runId: uuid('run_id').references(() => runs.id, { onDelete: 'set null' }),
+    discoverySessionId: uuid('discovery_session_id').references(() => discoverySessions.id, {
+      onDelete: 'set null',
+    }),
+    agent: text('agent').notNull().default('mac'),
+    /** What the document said when Mac suggested changing it. */
+    baseRevisionId: uuid('base_revision_id').references(() => companyContextRevisions.id, {
+      onDelete: 'restrict',
+    }),
+    status: enumText('status', COMPANY_PROPOSAL_STATUSES).notNull().default('proposed'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    reviewedBy: uuid('reviewed_by').references(() => users.id, { onDelete: 'set null' }),
+    reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+    reviewNotes: text('review_notes'),
+  },
+  (t) => ({
+    statusIdx: index('company_context_proposals_status_idx').on(t.status, t.createdAt),
+    baseRevisionIdx: index('company_context_proposals_base_revision_idx').on(t.baseRevisionId),
+    taskIdx: index('company_context_proposals_task_idx').on(t.taskId),
+  }),
+);
+
 export type UserRow = typeof users.$inferSelect;
 export type SessionRow = typeof sessions.$inferSelect;
 export type SettingsRow = typeof settings.$inferSelect;
@@ -1253,6 +1414,10 @@ export type NightShiftRow = typeof nightShifts.$inferSelect;
 export type NightDecisionRow = typeof nightDecisions.$inferSelect;
 export type DiscoveryInvestigationRow = typeof discoveryInvestigations.$inferSelect;
 export type EmailDeliveryRow = typeof emailDeliveries.$inferSelect;
+
+export type CompanyContextRevisionRow = typeof companyContextRevisions.$inferSelect;
+export type CompanyContextStatusRow = typeof companyContextStatus.$inferSelect;
+export type CompanyContextProposalRow = typeof companyContextProposals.$inferSelect;
 
 /**
  * The authoritative list of enum CHECK constraints.
@@ -1310,4 +1475,10 @@ export const ENUM_CHECKS: Array<{ table: string; column: string; values: readonl
   { table: 'repositories', column: 'test_network', values: SANDBOX_NETWORK_MODES },
   { table: 'settings', column: 'mail_provider', values: MAIL_PROVIDERS },
   { table: 'settings', column: 'model_provider', values: MODEL_PROVIDERS },
+  // --- Sprint 3.2 ---
+  { table: 'company_context_revisions', column: 'validation_state', values: COMPANY_CONTEXT_VALIDATION_STATES },
+  { table: 'company_context_revisions', column: 'source', values: COMPANY_CONTEXT_SOURCES },
+  { table: 'company_context_revisions', column: 'provider_kind', values: COMPANY_CONTEXT_PROVIDER_KINDS },
+  { table: 'company_context_status', column: 'status', values: COMPANY_CONTEXT_STATUSES },
+  { table: 'company_context_proposals', column: 'status', values: COMPANY_PROPOSAL_STATUSES },
 ];

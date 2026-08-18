@@ -314,6 +314,22 @@ export const AUDIT_EVENT_TYPES = [
   'model.assisted_discovery',
   'model.assisted_answer',
   'model.output_rejected',
+
+  // --- Sprint 3.2 -----------------------------------------------------------
+  // PAC shared company context. Sprint 3.2 §19 lists the events the trail must
+  // contain; the two beyond that list are events an operator genuinely needs —
+  // a proposal moving status is a governance decision, and a validation failure
+  // is the reason Mac is refusing to work.
+  'company_context.refresh_started',
+  'company_context.refresh_succeeded',
+  'company_context.refresh_failed',
+  'company_context.loaded',
+  'company_context.cached_used',
+  'company_context.validation_failed',
+  'company_context.bound_to_discovery',
+  'company_context.bound_to_run',
+  'company_context.proposal_created',
+  'company_context.proposal_status_changed',
 ] as const;
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);
 export type AuditEventType = z.infer<typeof auditEventTypeSchema>;
