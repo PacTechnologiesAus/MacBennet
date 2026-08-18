@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import type { SandboxPlan } from '@mac/protocol';
 import { makePathMapper, nodeSpawner, type ExecutionSandbox, type SandboxSession, type Spawner } from './index.js';
@@ -136,6 +137,7 @@ export function buildBwrapArgv(plan: SandboxPlan): string[] {
   if (home) argv.push('--dir', home);
 
   for (const mount of plan.mounts) {
+    if (mount.purpose === 'credential') argv.push('--dir', path.dirname(mount.sandboxPath));
     argv.push(mount.mode === 'ro' ? '--ro-bind' : '--bind', mount.hostPath, mount.sandboxPath);
   }
 

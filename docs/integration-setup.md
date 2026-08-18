@@ -51,7 +51,7 @@ each update "posted by Mac" — would be a system that lies politely.
 
 To make Mac appear as himself:
 
-1. invite `mac.bennett@pac-technologies.com.au` as a monday.com user (this
+1. invite `mac.bennet@pac-technologies.com.au` as a monday.com user (this
    consumes a seat, which is a commercial decision, not a technical one);
 2. sign in as Mac and mint the token from **his** profile;
 3. put that token in `MONDAY_API_TOKEN`;
@@ -137,24 +137,37 @@ flow, so there is no signed-in user and no refresh token to babysit.
 3. **Certificates & secrets → New client secret.** Copy the *value* immediately;
    it is never shown again. Note its expiry — a secret that quietly expires
    turns into "the morning report stopped arriving" some months later.
-4. **API permissions → Add a permission → Microsoft Graph → Application
-   permissions → `Mail.Send`.** Then **Grant admin consent**.
-
-   The delegated `Mail.Send` is the wrong one and is the most common mistake
-   here: the token is issued happily and then `sendMail` returns **403**, which
-   reads like a mailbox problem rather than a permission problem.
-
-5. Strongly recommended — scope it to Mac's mailbox alone. `Mail.Send` as an
-   *application* permission otherwise authorises sending as **any** mailbox in
-   the tenant:
+4. In **Enterprise applications**, open the matching application and note its
+   **Object ID**. This is the service-principal object id, not the Object ID on
+   the App registrations page.
+5. In Exchange Online PowerShell, grant `Application Mail.Send` through
+   **Application RBAC**, scoped to Mac's mailbox alone:
 
    ```powershell
-   New-ApplicationAccessPolicy `
+   Connect-ExchangeOnline
+   Set-Mailbox mac.bennet@pac-technologies.com.au -CustomAttribute15 "MacBennettMailer"
+   New-ServicePrincipal `
      -AppId <application-client-id> `
-     -PolicyScopeGroupId mac.bennett@pac-technologies.com.au `
-     -AccessRight RestrictAccess `
-     -Description "Mac Bennett may send only as himself."
+     -ObjectId <enterprise-application-object-id> `
+     -DisplayName "Mac Bennett Mailer"
+   New-ManagementScope `
+     -Name "Mac Bennett Mailbox Only" `
+     -RecipientRestrictionFilter "CustomAttribute15 -eq 'MacBennettMailer'"
+   New-ManagementRoleAssignment `
+     -Name "Mac Bennett Mail.Send" `
+     -App <enterprise-application-object-id> `
+     -Role "Application Mail.Send" `
+     -CustomResourceScope "Mac Bennett Mailbox Only"
+   Test-ServicePrincipalAuthorization `
+     -Identity <enterprise-application-object-id> `
+     -Resource mac.bennet@pac-technologies.com.au
    ```
+
+   The test result must show `Application Mail.Send` with `InScope: True`.
+   Do not also grant an organisation-wide `Mail.Send` application permission
+   in Entra: Entra and Exchange grants are additive, so that would defeat the
+   mailbox-only scope. Application RBAC replaces legacy Application Access
+   Policies for new configurations.
 
 6. Configure:
 
@@ -162,7 +175,7 @@ flow, so there is no signed-in user and no refresh token to babysit.
    MAC_MAIL_TENANT_ID=<directory id>
    MAC_MAIL_CLIENT_ID=<application id>
    MAC_MAIL_CLIENT_SECRET=<secret value>
-   MAC_MAIL_FROM=mac.bennett@pac-technologies.com.au
+   MAC_MAIL_FROM=mac.bennet@pac-technologies.com.au
    ```
 
 7. In **Settings → Reports**, set `mailProvider` to `graph`, add the recipients,
@@ -183,7 +196,7 @@ The display name comes from the mailbox, not from Mac's code. Set it on the
 Exchange mailbox:
 
 ```powershell
-Set-Mailbox mac.bennett@pac-technologies.com.au -DisplayName "Mac Bennett"
+Set-Mailbox mac.bennet@pac-technologies.com.au -DisplayName "Mac Bennet"
 ```
 
 A signature block is deliberately not a feature yet. Sprint 3.1's scope was to

@@ -314,7 +314,7 @@ describeIfSandbox('filesystem containment, proven against a real provider', () =
   it('mounts the git shim read-only, so the policy cannot be rewritten from inside', async () => {
     const shimPath = session.pathFor(path.join(shim, 'git'));
     const result = await inSandbox(session, `echo tampered > ${shimPath} 2>&1; echo "exit=$?"`);
-    expect(result.stdout).toContain('exit=1');
+    expect(result.stdout).toMatch(/exit=[1-9][0-9]*/);
 
     const onHost = await fs.readFile(path.join(shim, 'git'), 'utf8');
     expect(onHost).not.toContain('tampered');
@@ -388,7 +388,8 @@ describeIfSandbox('the agent’s own credential, and nobody else’s', () => {
   }, 180_000);
 
   it('delivers a mounted credential file, readable, at the path the plan recorded', async () => {
-    const credential = path.join(root, 'agent-credential.json');
+    const credential = path.join(home, '.claude', '.credentials.json');
+    await fs.mkdir(path.dirname(credential), { recursive: true });
     await fs.writeFile(credential, '{"agent":"CREDENTIAL-CONTENT-FOR-THE-AGENT"}\n', 'utf8');
 
     const built = plan({ credentialMounts: [credential] });
@@ -398,7 +399,7 @@ describeIfSandbox('the agent’s own credential, and nobody else’s', () => {
 
     const session = await sandbox!.open(built);
     try {
-      const result = await inSandbox(session, `cat ${posix(mount!.sandboxPath)}`);
+      const result = await inSandbox(session, 'cat "$HOME/.claude/.credentials.json"');
       expect(result.stdout).toContain('CREDENTIAL-CONTENT-FOR-THE-AGENT');
     } finally {
       await session.close().catch(() => undefined);

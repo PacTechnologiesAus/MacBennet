@@ -90,7 +90,7 @@ afterAll(async () => {
 describe('git shim — allowed operations pass through to the real git', () => {
   it('runs git status and returns its real output', async () => {
     const result = await runShim(['status', '--porcelain'], repoDir);
-    expect(result.code).toBe(0);
+    expect(result.code, result.stderr).toBe(0);
     expect(result.stderr).not.toContain('REFUSED');
   });
 

@@ -99,11 +99,25 @@ export class DockerSandbox implements ExecutionSandbox {
       pathFor,
       spawner,
       close: async () => {
-        // Anything still running when the session closes is orphaned work with
-        // nobody left to read its output. `--rm` reaps it once it stops.
+        /*
+         * `rm --force`, not `kill`.
+         *
+         * Anything still running when the session closes is orphaned work with
+         * nobody left to read its output, and `--rm` reaps a container once it
+         * STOPS. But a container that never started — a mount the daemon
+         * rejected, a `docker run` aborted before the container ran — sits in
+         * `Created` forever: `--rm` has nothing to reap and `docker kill`
+         * refuses, with the failure swallowed by the `catch` below.
+         *
+         * Sprint 3.1 commissioning found nineteen of them on a development
+         * machine after a day's work, at which point the daemon had slowed
+         * enough to time the conformance suite out. On a VM taking a task a
+         * night this grows without bound. `rm --force` removes a container in
+         * any state, which is what "close this session" was always meant to do.
+         */
         await Promise.all(
           [...containers].map((name) =>
-            execFileAsync(this.binary, ['kill', name], { timeout: 30_000 }).catch(() => undefined),
+            execFileAsync(this.binary, ['rm', '--force', name], { timeout: 30_000 }).catch(() => undefined),
           ),
         );
         containers.clear();

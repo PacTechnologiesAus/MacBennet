@@ -585,6 +585,21 @@ describe('worker authorisation', () => {
 });
 
 describe('completion', () => {
+  it('completes a run after its self-review', async () => {
+    const worker = await registerTestWorker(app);
+    const run = await makeApprovedRun(app, operator, taskId);
+    await lease(worker.token);
+    await db.update(runs).set({ status: 'self_review' }).where(eq(runs.id, run.id));
+
+    const response = await asWorker(app, worker.token).post(`/api/worker/runs/${run.id}/complete`, {
+      outcome: 'succeeded',
+      summary: 'Reviewed and preserved for human attention.',
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().runStatus).toBe('completed');
+  });
+
   it('completes a run and frees the worker', async () => {
     const worker = await registerTestWorker(app);
     const run = await makeApprovedRun(app, operator, taskId);

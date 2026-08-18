@@ -10,6 +10,7 @@ import {
   formatAnswerForAgent,
   looksLikeQuestion,
   neutralToolName,
+  isRecoverableClaudeFailure,
 } from '../src/coding/claude-code-adapter.js';
 
 /**
@@ -90,7 +91,6 @@ async function run(
   if (options.cancelAfterMs !== undefined) {
     setTimeout(() => {
       controller.abort();
-      void adapter.cancel(handle.sessionId);
     }, options.cancelAfterMs).unref();
   }
 
@@ -120,6 +120,14 @@ describe('session launch and completion', () => {
     expect(result.state).toBe('completed');
     expect(result.summary).toContain('multi-device selection');
     expect(typesOf(events)).toContain('completed');
+
+    // The real stream-json CLI stays alive after `result`. The adapter closes
+    // it once the result has been recorded; that resulting process close must
+    // not manufacture a second, contradictory terminal event.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(typesOf(events).filter((type) => type === 'completed' || type === 'failed' || type === 'cancelled')).toEqual([
+      'completed',
+    ]);
   }, 60_000);
 
   it('reports tool activity in neutral terms, not provider ones', async () => {
@@ -179,6 +187,27 @@ describe('questions and answers', () => {
     const progress = events.filter((e) => e.type === 'progress') as Array<Extract<AgentEvent, { type: 'progress' }>>;
     expect(progress.some((p) => p.message?.includes('out of scope'))).toBe(true);
   }, 60_000);
+
+  it('routes a decision request delivered as a result through Mac and waits for the follow-up result', async () => {
+    const { result, questions, events } = await run('result-question', {
+      answer: (question) => ({
+        questionId: question.questionId,
+        decision: 'blocked',
+        answer: 'Finance must supply the rounding rule; do not guess it.',
+        confidence: 1,
+        reasoning: 'The external rule is absent.',
+        sources: ['brief.acceptanceCriteria'],
+        requiredHuman: true,
+        isAssumption: false,
+      }),
+    });
+
+    expect(questions).toHaveLength(1);
+    expect(questions[0]!.question).toContain('round each line or only the final total');
+    expect(typesOf(events).filter((type) => type === 'question')).toHaveLength(1);
+    expect(result.state).toBe('completed');
+    expect(result.summary).toContain('Stopped without changing the money rule');
+  }, 60_000);
 });
 
 describe('cancellation', () => {
@@ -206,6 +235,18 @@ describe('failure', () => {
     expect(result.state).toBe('failed');
     expect(result.error).toContain('exited with code');
   }, 60_000);
+
+  it('marks a provider 5xx result as recoverable', async () => {
+    const { result, events } = await run('provider-500');
+    expect(result.state).toBe('failed');
+    const failed = events.find((event) => event.type === 'failed');
+    expect(failed).toMatchObject({ type: 'failed', recoverable: true });
+  }, 60_000);
+
+  it('does not classify repository or authentication failures as transient', () => {
+    expect(isRecoverableClaudeFailure('The repository is in a conflicted state.')).toBe(false);
+    expect(isRecoverableClaudeFailure('Authentication failed. Please run claude auth login.')).toBe(false);
+  });
 });
 
 describe('usage, reported honestly (Sprint 2 §16)', () => {
@@ -282,6 +323,11 @@ describe('the pieces that shape what the agent is told', () => {
     expect(looksLikeQuestion('Should the list be sorted alphabetically?')).toBe(true);
     expect(looksLikeQuestion('Which approach do you want here?')).toBe(true);
     expect(looksLikeQuestion('Do you want me to add a migration?')).toBe(true);
+    expect(
+      looksLikeQuestion(
+        'I inspected the repository and I need one decision from you before editing.\n\n## The question\n\nWhich rounding rule applies?',
+      ),
+    ).toBe(true);
 
     expect(looksLikeQuestion('I edited the selector and ran the tests.')).toBe(false);
     // A rhetorical question mark in narration must not stall the session.
@@ -306,6 +352,8 @@ describe('the pieces that shape what the agent is told', () => {
     expect(prompt).toContain('may NEVER merge');
     expect(prompt).toContain('Do not push at all');
     expect(prompt).toContain('Mac pushes the branch himself');
+    expect(prompt).toContain('Never invent an unstated product or business rule');
+    expect(prompt).toContain('mandatory for money, security, access and other irreversible outcomes');
     expect(prompt).toContain('npm test');
 
     // The disciplined workflow the sprint requires.

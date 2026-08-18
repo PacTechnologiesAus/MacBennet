@@ -404,6 +404,17 @@ describe('delivery', () => {
     expect(mail.sent).toHaveLength(1);
   });
 
+  it('allows only one concurrent sweeper to claim and send a delivery', async () => {
+    await queueEmail({ kind: 'morning_report', idempotencyKey: 'concurrent-claim', subject: 's', text: 't' });
+
+    await Promise.all([deliverPendingEmails(), deliverPendingEmails(), deliverPendingEmails()]);
+
+    expect(mail.sent).toHaveLength(1);
+    const [delivery] = await listEmailDeliveries();
+    expect(delivery!.status).toBe('sent');
+    expect(delivery!.attempts).toBe(1);
+  });
+
   it('dead-letters after the attempt budget, and says so in the UI data', async () => {
     mail.failNext = 99;
     await queueEmail({ kind: 'morning_report', idempotencyKey: 'k4', subject: 's', text: 't' });

@@ -152,6 +152,71 @@ describe('git policy — bypassing branch protection', () => {
     expectDenied(['-c', 'credential.helper=evil', 'fetch'], agent(), 'BYPASS_BRANCH_PROTECTION');
   });
 
+  it('allows Claude Code to disable hooks only for read-only inspection', () => {
+    expectAllowed(['-c', 'core.hooksPath=/dev/null', 'remote', 'get-url', 'origin'], agent());
+    expectAllowed(['-c', 'core.hooksPath=/dev/null', 'config', '--get', 'user.email'], agent());
+    expectAllowed([
+      '-c',
+      'core.quotePath=false',
+      '-c',
+      'core.hooksPath=/dev/null',
+      'log',
+      '--since=7.days',
+      '--name-only',
+      '--format=oneline',
+    ], agent());
+    expectAllowed([
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-c',
+      'core.fsmonitor=',
+      '-C',
+      '/tmp/task-worktree',
+      'ls-files',
+      '--error-unmatch',
+      '--',
+      ':(icase).claude/settings.local.json',
+    ], agent());
+    expectAllowed([
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-c',
+      'core.fsmonitor=',
+      '-C',
+      '/tmp/repository',
+      'worktree',
+      'list',
+      '--porcelain',
+    ], agent());
+  });
+
+  it('allows -C only for exact read-only inspection forms', () => {
+    expectAllowed(['-C', '/tmp/task-worktree', 'status', '--short'], agent());
+    expectDenied(['-C', '/tmp/other-repository', 'commit', '-m', 'escape'], agent(), 'UNSAFE_ARGUMENT');
+    expectDenied(['-C', '/tmp/other-repository', 'worktree', 'remove', '/tmp/task'], agent(), 'UNSAFE_ARGUMENT');
+  });
+
+  it('allows Claude Code\'s exact hardened SSH override only while cloning plugins', () => {
+    const safe = 'core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=yes';
+    expectAllowed([
+      '-c',
+      safe,
+      'clone',
+      '--depth',
+      '1',
+      '--no-checkout',
+      '--',
+      'https://github.com/obra/superpowers.git',
+      '/tmp/plugin',
+    ], agent());
+    expectDenied(['-c', safe, 'fetch', 'origin'], agent(), 'BYPASS_BRANCH_PROTECTION');
+    expectDenied(
+      ['-c', 'core.sshCommand=ssh -o StrictHostKeyChecking=no', 'clone', 'https://example.test/repo.git'],
+      agent(),
+      'BYPASS_BRANCH_PROTECTION',
+    );
+  });
+
   it('refuses --receive-pack and --exec', () => {
     expectDenied(['push', '--receive-pack=evil', 'origin', 'mac/247-x'], mac(), 'BYPASS_BRANCH_PROTECTION');
   });

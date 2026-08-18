@@ -174,6 +174,45 @@ async function main() {
     process.exit(1);
   }
 
+  if (scenario === 'provider-500') {
+    emit({
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      session_id: sessionId,
+      result: 'API Error: 500 Internal server error. This is a server-side issue, usually temporary.',
+      ...RESULT_USAGE,
+    });
+    process.exit(1);
+  }
+
+  if (scenario === 'result-question') {
+    const question =
+      'I have inspected the repository and I need one decision from you before editing.\n\n' +
+      '## The question\n\nDoes the external system round each line or only the final total?';
+    emit({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      session_id: sessionId,
+      result: question,
+      ...RESULT_USAGE,
+    });
+
+    // Index 1: the opening brief is message 0; Mac's decision is message 1.
+    const answer = await waitForAnswer(1);
+    const text = answer?.message?.content?.[0]?.text ?? '';
+    emit({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      session_id: sessionId,
+      result: `Stopped without changing the money rule. Received: ${text.slice(0, 160)}`,
+      ...RESULT_USAGE,
+    });
+    process.exit(0);
+  }
+
   emit({
     type: 'result',
     subtype: 'success',

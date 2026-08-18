@@ -120,12 +120,20 @@ export function checkGitCommand(argv: readonly string[], context: GitPolicyConte
   // Global options may appear before the subcommand (`git -c foo=bar push ...`),
   // and `-c` is itself a branch-protection bypass vector.
   let index = 0;
+  let changedDirectory = false;
+  const protectedOverrides: Array<{ setting: string; verdict: GitPolicyVerdict }> = [];
   while (index < argv.length) {
     const arg = argv[index]!;
     if (arg === '-c' || arg === '--config-env') {
       const setting = argv[index + 1] ?? '';
       const bypass = checkConfigOverride(setting);
-      if (bypass) return bypass;
+      if (bypass) protectedOverrides.push({ setting, verdict: bypass });
+      index += 2;
+      continue;
+    }
+    if (arg === '-C') {
+      if (!argv[index + 1]) return deny('UNSAFE_ARGUMENT', 'Global option "-C" requires a directory.');
+      changedDirectory = true;
       index += 2;
       continue;
     }
@@ -144,6 +152,17 @@ export function checkGitCommand(argv: readonly string[], context: GitPolicyConte
   const subcommand = argv[index];
   if (!subcommand) return deny('UNKNOWN_SUBCOMMAND', 'No git subcommand supplied.');
   const rest = argv.slice(index + 1);
+
+  // `-C` retargets Git at a different working tree. Claude Code legitimately
+  // uses it for inspection, but permitting it for a write would let the agent
+  // escape the branch named in the policy context. Keep the exception exact.
+  if (changedDirectory && !isReadOnlyInspection(subcommand, rest)) {
+    return deny('UNSAFE_ARGUMENT', 'Global option "-C" may retarget write-capable Git operations and is not permitted.');
+  }
+
+  for (const override of protectedOverrides) {
+    if (!isPermittedProtectedOverride(override.setting, subcommand, rest)) return override.verdict;
+  }
 
   if (ALWAYS_PROHIBITED_SUBCOMMANDS.has(subcommand)) {
     return deny('REWRITE_SHARED_HISTORY', `"git ${subcommand}" rewrites or destroys history and is never permitted.`);
@@ -415,6 +434,54 @@ function checkConfigOverride(setting: string): GitPolicyVerdict | null {
     );
   }
   return null;
+}
+
+function isPermittedProtectedOverride(setting: string, subcommand: string, args: readonly string[]): boolean {
+  return isReadOnlyHooksOverride(setting, subcommand, args) || isSafeSshCloneOverride(setting, subcommand);
+}
+
+/**
+ * Claude Code adds `core.hooksPath=/dev/null` to its own Git inspection
+ * commands. Hooks cannot affect these exact read-only forms, so refusing them
+ * records a false security incident and makes every real run unreviewable.
+ * Write-capable subcommands (including `git config` without a read flag) remain
+ * prohibited by the ordinary protected-override rule above.
+ */
+function isReadOnlyHooksOverride(setting: string, subcommand: string, args: readonly string[]): boolean {
+  const separator = setting.indexOf('=');
+  const key = (separator === -1 ? setting : setting.slice(0, separator)).toLowerCase();
+  const value = separator === -1 ? '' : setting.slice(separator + 1).toLowerCase();
+  if (key !== 'core.hookspath' || value !== '/dev/null') return false;
+
+  return isReadOnlyInspection(subcommand, args);
+}
+
+/** Exact forms whose execution cannot move refs, write commits, or change configuration. */
+function isReadOnlyInspection(subcommand: string, args: readonly string[]): boolean {
+  if (['log', 'status', 'diff', 'show', 'rev-list', 'rev-parse', 'ls-files'].includes(subcommand)) return true;
+  if (subcommand === 'remote') return args.length === 0 || args[0] === 'get-url';
+  if (subcommand === 'config') {
+    return ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l'].includes(args[0] ?? '');
+  }
+  if (subcommand === 'worktree') return args[0] === 'list';
+  return false;
+}
+
+/**
+ * Claude Code's plugin loader hardens non-interactive clones with this exact
+ * SSH command. It neither redirects SSH nor weakens host verification; both
+ * options make unattended execution safer. Any other core.sshCommand value,
+ * or using this value for a command other than clone, remains prohibited.
+ */
+function isSafeSshCloneOverride(setting: string, subcommand: string): boolean {
+  const separator = setting.indexOf('=');
+  const key = (separator === -1 ? setting : setting.slice(0, separator)).toLowerCase();
+  const value = separator === -1 ? '' : setting.slice(separator + 1);
+  return (
+    key === 'core.sshcommand' &&
+    value === 'ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' &&
+    subcommand === 'clone'
+  );
 }
 
 // ---------------------------------------------------------------------------

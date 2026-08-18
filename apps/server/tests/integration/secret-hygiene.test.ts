@@ -166,7 +166,7 @@ describe('a failed monday write records the failure without the credential', () 
     expect(row!.lastError, 'the failure was not recorded at all').toBeTruthy();
     expect(row!.lastError).not.toContain(MONDAY_TOKEN);
 
-    const events = await queryAuditEvents({ limit: 200, offset: 0 });
+    const events = await queryAuditEvents({ projectId: project.id, limit: 200, offset: 0 });
     const serialised = JSON.stringify(events);
     expect(serialised).not.toContain(MONDAY_TOKEN);
   }, 60_000);
@@ -197,6 +197,7 @@ describe('no credential leaves the control plane over the API', () => {
       name: 'Hygiene board 2',
       statusColumnId: 'status',
       statusLabels: DEFAULT_MONDAY_STATUS_LABELS,
+      startableStatuses: ['Ready for Mac'],
     });
 
     const body = mapped.body;

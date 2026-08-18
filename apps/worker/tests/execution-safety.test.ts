@@ -105,6 +105,13 @@ describe('the project command is an argv array, not a shell command', () => {
 });
 
 describe('running the project test command', () => {
+  it('runs npm directly on the host without requiring a shell', async () => {
+    const result = await runProjectCommand(['npm', '--version'], { cwd: workdir });
+    expect(result.ran).toBe(true);
+    expect(result.exitCode, result.output).toBe(0);
+    expect(result.passed).toBe(true);
+  }, 30_000);
+
   it('reports a passing command', async () => {
     const script = path.join(workdir, 'pass.mjs');
     await fs.writeFile(script, 'console.log("3 tests passed");\nprocess.exit(0);\n', 'utf8');

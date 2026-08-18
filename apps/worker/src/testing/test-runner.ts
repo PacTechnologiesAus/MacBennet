@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import path from 'node:path';
 
 /**
  * Runs a repository's own test or build command.
@@ -70,6 +71,32 @@ const INLINE_PROGRAM_FLAGS: Record<string, string[]> = {
 };
 
 const basename = (executable: string): string => executable.split(/[\\/]/).pop()?.toLowerCase() ?? '';
+
+/**
+ * Windows installs npm/npx as `.cmd` shims, which `spawn(..., shell: false)`
+ * cannot execute. Running npm's JavaScript entrypoint with the already-trusted
+ * Node executable preserves the argv-only boundary without introducing cmd.exe.
+ * Sandboxed commands deliberately skip this translation: their spawner runs
+ * inside Linux, where `npm` is an ordinary executable.
+ */
+function hostCommand(
+  executable: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): { executable: string; args: string[] } {
+  if (process.platform !== 'win32') return { executable, args };
+
+  const command = basename(executable).replace(/\.cmd$/, '');
+  if (command !== 'npm' && command !== 'npx') return { executable, args };
+
+  const configuredNpmCli = env.npm_execpath;
+  const npmCli =
+    configuredNpmCli && path.basename(configuredNpmCli).toLowerCase() === 'npm-cli.js'
+      ? configuredNpmCli
+      : path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  const cli = command === 'npx' ? path.join(path.dirname(npmCli), 'npx-cli.js') : npmCli;
+  return { executable: process.execPath, args: [cli, ...args] };
+}
 
 /** Rejects anything that looks like shell syntax rather than an argv element. */
 export function validateCommandArgv(argv: readonly string[]): { ok: true } | { ok: false; reason: string } {
@@ -152,16 +179,20 @@ export async function runProjectCommand(
   const maxChars = options.maxOutputChars ?? 60_000;
 
   const launch = options.spawner ?? ((exe, argvArgs, spawnOptions) => spawn(exe, [...argvArgs], spawnOptions));
+  const environment = { ...(options.env ?? process.env), CI: '1', FORCE_COLOR: '0' };
+  const command = options.spawner
+    ? { executable: executable!, args }
+    : hostCommand(executable!, args, environment);
 
   return new Promise<CommandResult>((resolve) => {
-    const child = launch(executable!, args, {
+    const child = launch(command.executable, command.args, {
       cwd: options.cwd,
       shell: false,
       windowsHide: true,
       // A new process group, so a timeout kills the whole tree rather than
       // leaving orphaned test workers holding the worktree open.
       detached: process.platform !== 'win32',
-      env: { ...(options.env ?? process.env), CI: '1', FORCE_COLOR: '0' },
+      env: environment,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 

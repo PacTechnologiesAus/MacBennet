@@ -617,11 +617,20 @@ async function startSelectedTask(
       },
     });
 
-    await record(tx, {
+    await transition(tx, {
+      runId: run.id,
+      to: 'ready_for_approval',
+      actor: SYSTEM_ACTOR,
+      eventType: 'run.submitted_for_approval',
+      metadata: { selectedBy: 'night_shift' },
+    });
+    await transition(tx, {
+      runId: run.id,
+      to: 'approved',
       actor: SYSTEM_ACTOR,
       eventType: 'run.auto_approved',
-      context: { runId: run.id, taskId, projectId: task.projectId },
       metadata: {
+        source: 'night_shift_policy',
         nightShiftId: shift.id,
         mondayItemId: context.candidate.mondayItemId,
         confidence,
@@ -637,20 +646,6 @@ async function startSelectedTask(
       metadata: { nightShiftId: shift.id, title: task.title, rationale: rationale.reason },
     });
 
-    await transition(tx, {
-      runId: run.id,
-      to: 'ready_for_approval',
-      actor: SYSTEM_ACTOR,
-      eventType: 'run.submitted_for_approval',
-      metadata: { selectedBy: 'night_shift' },
-    });
-    await transition(tx, {
-      runId: run.id,
-      to: 'approved',
-      actor: SYSTEM_ACTOR,
-      eventType: 'run.approved',
-      metadata: { source: 'night_shift_policy' },
-    });
     await transition(tx, {
       runId: run.id,
       to: 'queued',

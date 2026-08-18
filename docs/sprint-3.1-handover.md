@@ -1,13 +1,104 @@
 # Sprint 3.1 — Handover
 
 **For:** whoever picks this up next
-**Branch:** `sprint-3.1/integration-commissioning` (5 commits, plus uncommitted work — see §3)
+**Branch:** `sprint-3.1/integration-commissioning` (finished by the Sprint 3.1 closure commit)
 **Default branch:** `main` untouched, still at `0fa4ed0`
 **Written:** 2026-08-17, mid-sprint, because the machine ended up in a state I should not fix by guessing.
 
 Read `docs/sprint-3.1-commissioning-report.md` for the findings in full. This document is the
 operational picture: what is done, what is blocked, what to do next, and the things that cost me
 hours so they cost you none.
+
+## Final Linux commissioning update — 2026-08-18
+
+This block is authoritative and supersedes the older continuation and historical next-step sections
+below.
+
+- The Oracle Cloud instance is **Ubuntu 24.04.4 LTS** (despite originally being described as Oracle
+  Linux), with PostgreSQL 16.14, Node 22.23.2, Bubblewrap 0.9.0 and 4 GB swap.
+- Authenticated Claude Code 2.1.233 ran successfully **inside Bubblewrap** with only its own
+  read-only credential mounted at the sandbox `$HOME`.
+- Bubblewrap conformance is **18/18**, the 16 Bash git-shim checks execute on Linux, and real
+  cancellation completes promptly.
+- The final commissioning shift is `e0745e85-9648-40d4-88f8-abb2ffb46d58`. It ran from
+  02:49:20–02:59:19 UTC, completed A and C, routed B's missing finance decision through Mac as
+  `coding_session.blocked`, created no B pull request, continued to C, ended cleanly and produced
+  exactly one morning report.
+- Independent reconciliation completed **before** the standard-suite reset. It found nothing to
+  explain: all 15 monday writes were delivered and monday's own activity log was non-empty; GitHub
+  PR [#11](https://github.com/KasperPac/mac-commissioning-sprint-3-1/pull/11) matched Mac's record;
+  `origin/main` still had one commit; and exactly one report delivery existed.
+- Final Linux standard suites: server **567 passed, 52 skipped**; worker **216 passed, 3 skipped**.
+  All four workspace typechecks pass. The server suite still prints two known non-failing warnings: a
+  missing `await` in `worker-plane.test.ts:295` and pg's concurrent-query deprecation.
+- Defects #16–#24 were found and fixed during Linux commissioning and final email commissioning: portable shell exit semantics,
+  production cancellation wiring, sandbox credential discovery, safe parsing of Git `-C` plus two
+  read-only Claude inspections, provider-5xx recoverability, three reconciliation defects, and a
+  decision request delivered in Claude's `result` being mistaken for completion, and an email outbox
+  race that allowed concurrent sweepers to send the same row twice.
+- Microsoft Graph email is now **fully commissioned**. The mailbox is
+  `mac.bennet@pac-technologies.com.au`; the Entra service principal has Exchange Online
+  `Application Mail.Send` scoped only to that mailbox. Authentication passed and Graph returned 202
+  for a controlled morning-report send, and Kasper confirmed the messages arrived in Outlook with
+  the visible sender name **Mac Bennet**.
+- The first full live-mail attempt exposed stale fixtures and the real concurrent-sweeper defect. It
+  submitted five test messages instead of the two promised by the test comment. No further live sends
+  were made until the delivery row was protected by an atomic compare-and-swap claim. The focused
+  non-sending suite then passed 31/31 on Windows and Linux, including three concurrent sweepers, and
+  one final controlled Graph send passed.
+
+The implementation and report were committed only after the final Linux server and worker suites,
+all four workspace typechecks, the scoped Graph send, and human Outlook verification were green. Do
+not repeat the historical Docker/WSL recovery steps below.
+
+## Continuation update — 2026-08-17 23:15 AEST
+
+This block supersedes the stale operational state in §§2–6 below. Keep the earlier detail as history,
+but do not repeat its Docker recovery steps.
+
+### Current state
+
+- Docker Desktop was recovered without a factory reset or data deletion. `mac-bennett-db` is healthy.
+- Defect #7 is proven against real Claude Code: the adapter settles on `result`; the run no longer
+  waits for the idle timeout.
+- Defect #8 is proven: Docker conformance is 18/18 and no Mac sandbox containers remain afterwards.
+- A real night completed Task A and Task C twice, updated monday, ran real repository tests and opened
+  PRs. The latest immutable shift id is `0f861e39-0663-4faa-93c3-8e2b7360c8fb`.
+- The work found seven further application/policy defects: duplicate terminal events, Windows npm
+  spawning, read-only Git false positives, oversized completion summaries, duplicate approval audit
+  semantics, provider-error credential redaction, and Claude plugin-clone false positives. All have
+  fixes and regressions; the final plugin-clone change still needs a real-agent rerun.
+- Full server suite: **564 passed**, 53 opt-in tests skipped.
+- Worker on Windows: **197 passed**. The remaining 15 failures are all `git-shim.test.ts` because this
+  host has no general WSL distro with `/bin/bash`; the error is
+  `execvpe(/bin/bash) failed: No such file or directory`.
+- All four workspace typechecks pass.
+- The Oracle Linux VM now exists and is the next execution environment.
+
+### Important correction to the original Task B expectation
+
+Task B never reached the real agent. Its conversational brief scored 0.58, below the immutable 0.60
+execution floor, so every night safely skipped it. The fixture now states the known scope and
+must-not-change constraints without supplying the missing finance rounding decision. The
+commissioning test now requires a real `coding_session.blocked`, no Task B PR, and continuation to
+Task C. This strengthened path is unverified until the VM run.
+
+### Do next, in this order
+
+1. Clone or copy this branch and its uncommitted changes to the Oracle Linux VM.
+2. Install/configure Node 20+, Git, GitHub CLI, PostgreSQL 16 and bubblewrap.
+3. Configure a mountable Claude credential on the VM. Do not paste credentials into chat or commit
+   them.
+4. Run the full standard suite. The 16 Bash git-shim tests should execute normally there.
+5. Run authenticated real Claude inside bubblewrap and the sandbox conformance suite.
+6. Run the strengthened commissioning night. It must exercise A, block B safely, continue to C,
+   produce no false Git violations, and finish its final assertions.
+7. Before any standard suite resets test rows, independently verify monday/GitHub and run
+   `scripts/commissioning/reconcile.mjs`.
+8. Finish the final evidence matrix. Email remains blocked by the missing Entra application.
+
+Do not commit the current working tree merely to make transfer convenient. The report and code are
+intentionally still uncommitted until the Linux proof closes the remaining claims.
 
 ---
 
@@ -32,44 +123,44 @@ exact configuration needed.
 |---|---|
 | monday.com integration | **Proven.** 37 checks against the real API |
 | Real Claude Code, unsandboxed | **Proven.** Opt-in test passed, 367 s |
-| Real Claude Code, *inside* the sandbox | **Blocked.** Cannot be done from a Windows host |
-| Sandbox containment | **Proven.** 18 conformance tests against real Docker, passed today |
-| Email / Microsoft Graph | **Blocked.** No Entra app registration exists |
-| Full commissioning night | **Not yet completed.** Four attempts, each stopped by a different real defect |
-| Standard suite | 723 → **~760** passing. Worker verified at 210; server not re-run since the DB went down |
-| Defects found | 8. Six fixed and committed, two fixed but unverified |
+| Real Claude Code, *inside* the sandbox | **Proven on Ubuntu with Bubblewrap.** |
+| Sandbox containment | **Proven.** 18/18 Bubblewrap conformance plus authenticated real Claude |
+| Email / Microsoft Graph | **Fully proven.** Scoped mailbox auth, Graph acceptance, Outlook receipt and sender name `Mac Bennet` confirmed |
+| Full commissioning night | **Proven.** Final shift and formal reconciliation both exited 0 |
+| Standard suite | Linux server **567 passed**; worker **216 passed**; all workspace typechecks pass |
+| Defects found | 24. All fixed with regressions and proportionate real evidence |
 
 ---
 
-## 3. Uncommitted work — read this before you commit anything
+## 3. Closure changes
 
-Three uncommitted paths. All typecheck; two are **not yet verified against reality**.
+The original three paths expanded into the focused fixes and regressions captured by the Sprint 3.1
+closure commit. Use the final Linux commissioning block above as the authoritative verification
+state.
 
 | File | What it is | Verified? |
 |---|---|---|
-| `apps/worker/src/coding/claude-code-adapter.ts` | **Defect #7 fix.** Settle the session on the CLI's `result` message instead of waiting for the process to exit | Typechecks. All 18 adapter tests pass against the fake CLI. **Never exercised against real Claude Code.** This is the highest-value thing to verify |
-| `apps/worker/src/sandbox/docker.ts` | **Defect #8 fix.** `docker rm --force` instead of `docker kill` when a session closes | Typechecks. **Not verified** — Docker is down |
-| `docs/sprint-3.1-commissioning-report.md` | The report. Sections 1–10 written and accurate | Sections 11–16 (the night, human verification, reconciliation, evidence matrix, the final answer) are **not written**, because the night has not completed |
+| `apps/worker/src/coding/claude-code-adapter.ts` | **Defect #7/#9 fix.** Settle on `result` and emit exactly one terminal outcome | **Verified against real Claude Code** |
+| `apps/worker/src/sandbox/docker.ts` | **Defect #8 fix.** `docker rm --force` instead of `docker kill` when a session closes | **Verified against real Docker; 18/18 and no leaked containers** |
+| `docs/sprint-3.1-commissioning-report.md` | The report | Records the completed Linux, cross-system and real-email evidence |
 
-Commit them when you have verified them, not before.
+They were committed only after the final verification listed above.
 
 ---
 
-## 4. The machine, and what I did to it
+## 4. Historical Docker incident — resolved
 
 **Be honest with the user about this if it comes up. I was not careful enough.**
 
-Docker Desktop will not start. `docker ps` returns `Docker Desktop is unable to start`; the backend
-processes run, but the Linux VM never boots (`%LOCALAPPDATA%\Docker\log\vm\init.log` has had nothing
-new since 09:45). PostgreSQL lived in Docker, so `TEST_DATABASE_URL` (`localhost:5433`) is
-`ECONNREFUSED` and **no integration or e2e test can run**.
+Docker Desktop and PostgreSQL are healthy again. No factory reset or data deletion was used. The
+following is retained as incident history, not as the machine's current state.
 
 How it got there, in order:
 
 1. Mac's Docker sandbox provider leaked containers in `Created` state — `--rm` only reaps a container
    that has *run*, and `docker kill` fails on one that never started, with the failure swallowed by a
    `.catch()`. Twenty-two accumulated over the day. **This is a real defect (#8) and the fix is in the
-   uncommitted `docker.ts`.**
+   then-uncommitted `docker.ts`.**
 2. Each leaked container held a bind mount to a test temp directory that had since been deleted, so
    `docker rm -f` on them hung. The daemon degraded until `docker run alpine echo` took >90 s.
 3. I asked the user, got approval to restart Docker Desktop, and then **restarted it badly**: I killed
@@ -100,8 +191,8 @@ suite genuinely needs Docker, and it already passed today (18/18) with the crede
 | 4 | The agent could not run tests or commit, and never had. `--permission-mode acceptEdits` permits edits and nothing else, and a `-p` session cannot answer a prompt | **Fixed, verified.** Permission now follows containment. Watched the real agent run `npm test` and `git commit` afterwards |
 | 5 | A mistyped tooling or credential path became an empty Docker volume and an agent that could not log in | **Fixed, verified** |
 | 6 | A coding run that is working but quiet is indistinguishable from a hung one — 36 log lines for 15 minutes of real work | **Fixed, verified.** 5-second heartbeat flushes events and moves `updated_at` |
-| 7 | **A successful coding session is recorded as a failure.** The CLI does not exit after `result` in stream-json input mode, so the adapter waited out the full idle timeout and logged `Coding-agent session stalled` | **Fixed, UNVERIFIED.** Uncommitted. This is the one that matters most |
-| 8 | The Docker sandbox leaks containers in `Created` state | **Fixed, UNVERIFIED.** Uncommitted. Docker is down |
+| 7 | **A successful coding session is recorded as a failure.** The CLI does not exit after `result` in stream-json input mode, so the adapter waited out the full idle timeout and logged `Coding-agent session stalled` | **Fixed and verified against the real CLI** |
+| 8 | The Docker sandbox leaks containers in `Created` state | **Fixed and verified against real Docker** |
 
 Defect #7 deserves a note: it survived Sprint 2 because the opt-in real-Claude test asserts
 `expect(['completed', 'failed']).toContain(result.state)` — which accepts the bug as a pass. If you
@@ -109,7 +200,7 @@ touch that test, tighten it.
 
 ---
 
-## 6. What to do next, in order
+## 6. Historical next steps — superseded by the continuation block
 
 1. **Get PostgreSQL back** (see §4). Nothing else can proceed without it.
 2. **Re-run the commissioning night.** It is the centrepiece (§11 of the brief) and has never
@@ -223,10 +314,10 @@ place bubblewrap can finally be exercised, which Sprint 3 left unproven.
 
 The user has chosen the VM. Do not spend more time trying to make this work on Windows.
 
-**Email.** No Entra app registration exists. The live suite is written and gated; the exact Azure
-steps are in `docs/integration-setup.md` §2. The one that catches people: it needs the
-**application** `Mail.Send` permission with admin consent, not the delegated one — the delegated
-grant issues a token happily and then fails at `sendMail` with 403.
+**Email.** Configured on 2026-08-18. The current identifiers and secret are held only in the VM's
+gitignored `.env`; never copy the secret into chat or source control. Exchange Online Application
+RBAC grants `Application Mail.Send` only for `mac.bennet@pac-technologies.com.au`. The exact setup
+and verification steps are in `docs/integration-setup.md` §2.
 
 **Mac's monday identity.** There is no `Mac Bennett` user in the account, so his writes are
 attributed to whoever minted the token — during commissioning, Kasper Simonsen. This cannot be fixed

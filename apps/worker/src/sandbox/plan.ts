@@ -272,6 +272,7 @@ function buildEnvironment(input: SandboxPlanInput, homeInSandbox: string, shimPa
 export function buildSandboxPlan(input: SandboxPlanInput): SandboxPlan {
   const homeDir = input.homeDir ?? os.homedir();
   const identity = input.kind !== 'docker';
+  const homeInSandbox = identity ? path.join(os.tmpdir(), 'mac-sandbox-home') : CONTAINER_PATHS.home;
 
   /*
    * The roots a PROJECT mount must sit inside.
@@ -350,9 +351,17 @@ export function buildSandboxPlan(input: SandboxPlanInput): SandboxPlan {
       allowCredential: true,
       authority: 'operator',
     });
+    const isClaudeCredential =
+      path.basename(resolved) === '.credentials.json' && path.basename(path.dirname(resolved)) === '.claude';
     mounts.push({
       hostPath: resolved,
-      sandboxPath: identity ? resolved : `${CONTAINER_PATHS.credentials}/${index}`,
+      sandboxPath: isClaudeCredential
+        ? identity
+          ? path.join(homeInSandbox, '.claude', '.credentials.json')
+          : `${homeInSandbox}/.claude/.credentials.json`
+        : identity
+          ? resolved
+          : `${CONTAINER_PATHS.credentials}/${index}`,
       mode: 'ro',
       purpose: 'credential',
     });
@@ -367,8 +376,6 @@ export function buildSandboxPlan(input: SandboxPlanInput): SandboxPlan {
       'The sandbox working directory must sit inside a writable mount.',
     );
   }
-
-  const homeInSandbox = identity ? path.join(os.tmpdir(), 'mac-sandbox-home') : CONTAINER_PATHS.home;
 
   return {
     workdir: workdirInSandbox,

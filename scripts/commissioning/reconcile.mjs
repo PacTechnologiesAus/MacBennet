@@ -111,9 +111,9 @@ for (const run of runRows.rows) {
 }
 
 const eventRows = await client.query(
-  `select seq, event_type, metadata, created_at
+  `select seq, event_type, metadata, ts as created_at
      from audit_events
-    where created_at >= $1
+    where ts >= $1
     order by seq`,
   [shift.started_at],
 );
@@ -233,7 +233,9 @@ if (CLONE) {
   const branches = (await git(['branch', '-r', '--format=%(refname:short)']))
     .split('\n')
     .map((b) => b.trim())
-    .filter((b) => b && !b.startsWith('origin/HEAD'));
+    // With --format, Git renders the remote HEAD symref as just `origin` on
+    // some versions rather than `origin/HEAD -> origin/main`.
+    .filter((b) => b && b !== 'origin' && !b.startsWith('origin/HEAD'));
 
   console.log(head('Git'));
   console.log(`  origin/main   ${defaultBranch}  (${mainCount} commit(s))`);
@@ -274,11 +276,22 @@ if (REPO) {
   try {
     const { stdout } = await exec(
       'gh',
-      ['pr', 'list', '--repo', REPO, '--state', 'all', '--json', 'number,title,headRefName,baseRefName,state,mergedAt'],
+      [
+        'pr',
+        'list',
+        '--repo',
+        REPO,
+        '--state',
+        'all',
+        '--json',
+        'number,title,headRefName,baseRefName,state,mergedAt,createdAt',
+      ],
       { windowsHide: true },
     );
-    const prs = JSON.parse(stdout);
-    console.log(head(`Pull requests GitHub actually has (${prs.length})`));
+    const allPrs = JSON.parse(stdout);
+    const shiftStartedAt = new Date(shift.started_at).getTime();
+    const prs = allPrs.filter((pr) => new Date(pr.createdAt).getTime() >= shiftStartedAt);
+    console.log(head(`Pull requests GitHub has for this shift (${prs.length})`));
     for (const pr of prs) {
       console.log(`  #${pr.number}  ${pr.state.padEnd(6)}  ${pr.headRefName} → ${pr.baseRefName}  ${pr.title}`);
       if (pr.mergedAt) {

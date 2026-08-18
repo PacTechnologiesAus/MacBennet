@@ -31,6 +31,8 @@ let worktree: string;
 let shim: string;
 let scratch: string;
 let credentialFile: string;
+let fakeHome: string;
+let claudeCredential: string;
 
 beforeAll(async () => {
   workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'mac-cred-'));
@@ -39,12 +41,16 @@ beforeAll(async () => {
   shim = path.join(workspace, 'shim');
   scratch = path.join(workspace, 'scratch');
   credentialFile = path.join(workspace, 'agent-credentials.json');
+  fakeHome = path.join(workspace, 'fake-home');
+  claudeCredential = path.join(fakeHome, '.claude', '.credentials.json');
 
   await fs.mkdir(path.join(repo, '.git'), { recursive: true });
   await fs.mkdir(worktree, { recursive: true });
   await fs.mkdir(shim, { recursive: true });
   await fs.mkdir(scratch, { recursive: true });
+  await fs.mkdir(path.dirname(claudeCredential), { recursive: true });
   await fs.writeFile(credentialFile, '{"agent":"token"}', 'utf8');
+  await fs.writeFile(claudeCredential, '{"claude":"subscription"}', 'utf8');
 });
 
 afterAll(async () => {
@@ -62,7 +68,7 @@ const plan = (extra: Parameters<typeof buildSandboxPlan>[0] extends infer T ? Pa
     network: 'egress',
     kind: 'docker',
     maxMinutes: 30,
-    homeDir: path.join(workspace, 'fake-home'),
+    homeDir: fakeHome,
     ...extra,
   } as Parameters<typeof buildSandboxPlan>[0]);
 
@@ -178,6 +184,14 @@ describe('credential mounts', () => {
     for (const mount of projectMounts) {
       expect(mount.hostPath).not.toBe(path.dirname(credentialFile));
     }
+  });
+
+  it('places a Claude subscription credential where the sandboxed CLI discovers it', () => {
+    const built = plan({ credentialMounts: [claudeCredential] });
+    const mount = built.mounts.find((entry) => entry.hostPath === claudeCredential);
+
+    expect(mount?.sandboxPath).toBe('/mac/home/.claude/.credentials.json');
+    expect(mount?.mode).toBe('ro');
   });
 
   it('refuses a credential mount that does not exist, rather than mounting an empty directory', () => {

@@ -247,24 +247,35 @@ export class MondayGraphqlClient implements MondayClient {
         // retrying. Getting this wrong means either a stuck outbox or a
         // hammered API.
         const retryable = response.status === 429 || response.status >= 500;
-        throw new MondayApiError(`monday.com returned ${response.status}: ${text.slice(0, 500)}`, retryable, response.status);
+        throw new MondayApiError(
+          this.#redact(`monday.com returned ${response.status}: ${text.slice(0, 500)}`),
+          retryable,
+          response.status,
+        );
       }
 
       const parsed = JSON.parse(text) as { data?: T; errors?: Array<{ message: string }> };
       if (parsed.errors?.length) {
         // GraphQL errors arrive with HTTP 200, so this is the only place a
         // failed mutation can be noticed.
-        throw new MondayApiError(parsed.errors.map((e) => e.message).join('; ').slice(0, 500), false, 200);
+        throw new MondayApiError(this.#redact(parsed.errors.map((e) => e.message).join('; ').slice(0, 500)), false, 200);
       }
       if (!parsed.data) throw new MondayApiError('monday.com returned no data.', true);
       return parsed.data;
     } catch (err) {
       if (err instanceof MondayApiError) throw err;
-      const message = (err as Error).name === 'AbortError' ? 'monday.com timed out.' : (err as Error).message;
+      const message =
+        (err as Error).name === 'AbortError' ? 'monday.com timed out.' : this.#redact((err as Error).message);
       throw new MondayApiError(message, true);
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** Provider responses and transport errors are untrusted and may echo the credential. */
+  #redact(message: string): string {
+    const token = this.#options.token;
+    return token ? message.split(token).join('[REDACTED]') : message;
   }
 
   /** Maps a raw item onto Mac's vocabulary using the configured column map. */

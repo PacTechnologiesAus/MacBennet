@@ -232,6 +232,7 @@ describe('choosing work', () => {
     const events = (await queryAuditEvents({ runId: run!.id, limit: 50, offset: 0 })).map((e) => e.eventType);
     // A machine approval must never be readable as a human one.
     expect(events).toContain('run.auto_approved');
+    expect(events).not.toContain('run.approved');
     expect(events).toContain('night_shift.task_selected');
 
     const approval = (await api(operator).get(`/api/runs/${run!.id}`)).json().approvals[0];

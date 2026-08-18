@@ -6,6 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { codingTaskSchema, handoffBriefContentSchema, type AgentEvent, type CodingTask } from '@mac/protocol';
 import { ClaudeCodeAdapter } from '../src/coding/claude-code-adapter.js';
 import { buildGitShim, readShimViolations, resolveRealGit } from '../src/git/shim.js';
+import { BubblewrapSandbox } from '../src/sandbox/bubblewrap.js';
+import { buildSandboxPlan } from '../src/sandbox/plan.js';
 
 /**
  * OPT-IN: the real, locally authenticated Claude Code CLI.
@@ -26,6 +28,12 @@ import { buildGitShim, readShimViolations, resolveRealGit } from '../src/git/shi
 
 const enabled = process.env.MAC_E2E_REAL_CLAUDE === '1';
 const describeReal = enabled ? describe : describe.skip;
+const credentialMounts = (process.env.MAC_SANDBOX_CREDENTIALS ?? '')
+  .split(/[,;]/)
+  .map((entry) => entry.trim())
+  .filter(Boolean);
+const containedEnabled = enabled && process.platform === 'linux' && credentialMounts.length > 0;
+const describeContained = containedEnabled ? describe : describe.skip;
 
 let worktree: string;
 let shimDir: string;
@@ -147,6 +155,73 @@ describeReal('the real Claude Code CLI', () => {
     const violations = await readShimViolations(path.join(shimDir, 'git-violations.jsonl'));
     for (const violation of violations) {
       expect(violation.code).toBeTruthy();
+    }
+  }, 600_000);
+});
+
+describeContained('the real Claude Code CLI inside Bubblewrap', () => {
+  it('authenticates, edits and commits with the production containment boundary in place', async () => {
+    const scratchDir = path.join(worktree, '.mac-contained-scratch');
+    await fs.mkdir(scratchDir, { recursive: true });
+
+    const plan = buildSandboxPlan({
+      worktreePath: worktree,
+      repositoryGitDir: path.join(worktree, '.git'),
+      repositoryPath: worktree,
+      workspaceRoot: worktree,
+      shimDir,
+      scratchDir,
+      credentialMounts,
+      network: 'egress',
+      kind: 'bubblewrap',
+      maxMinutes: 5,
+    });
+    const session = await new BubblewrapSandbox().open(plan);
+
+    try {
+      const containedTask = codingTaskSchema.parse({
+        ...task(),
+        brief: handoffBriefContentSchema.parse({
+          title: 'Add a contained proof file',
+          userObjective: 'Create CONTAINED.md containing exactly: authenticated inside bubblewrap',
+          desiredBehaviour: 'CONTAINED.md exists with that one line and is committed.',
+          acceptanceCriteria: ['CONTAINED.md contains the required line', 'The file is committed'],
+        }),
+        briefMarkdown:
+          '# Add a contained proof file\n\nCreate `CONTAINED.md` containing exactly the single line ' +
+          '`authenticated inside bubblewrap`, then commit it. Do nothing else.',
+      });
+      const adapter = new ClaudeCodeAdapter({
+        shimBinDir: session.pathFor(shimDir),
+        idleTimeoutMs: 5 * 60_000,
+        model: 'sonnet',
+        contained: true,
+        spawner: session.spawner as never,
+        workdir: session.pathFor(worktree),
+      });
+      const controller = new AbortController();
+      const handle = await adapter.start(containedTask, {
+        onEvent: () => undefined,
+        onQuestion: async (question) => ({
+          questionId: question.questionId,
+          decision: 'answered' as const,
+          answer: 'Create only the file described in the brief and commit it.',
+          confidence: 0.95,
+          reasoning: 'Stated directly in the brief.',
+          sources: ['brief.userObjective'],
+          requiredHuman: false,
+          isAssumption: false,
+        }),
+        signal: controller.signal,
+      });
+
+      const result = await handle.finished;
+      expect(result.state, result.error ?? result.summary).toBe('completed');
+      expect(await fs.readFile(path.join(worktree, 'CONTAINED.md'), 'utf8')).toBe(
+        'authenticated inside bubblewrap\n',
+      );
+    } finally {
+      await session.close();
     }
   }, 600_000);
 });

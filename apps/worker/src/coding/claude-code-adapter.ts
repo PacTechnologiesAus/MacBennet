@@ -362,8 +362,10 @@ export class ClaudeCodeAdapter implements CodingAgent {
 
     const finished = new Promise<AgentSessionResult>((resolve) => {
       let settled = false;
+      let resultMessageSeen = false;
       let summary = '';
       const filesTouched = new Set<string>();
+      const deliveredQuestions = new Set<string>();
       let failure: string | null = null;
       let lastActivityAt = Date.now();
 
@@ -371,8 +373,23 @@ export class ClaudeCodeAdapter implements CodingAgent {
         if (settled) return;
         settled = true;
         clearInterval(idleTimer);
+        context.signal.removeEventListener('abort', onAbort);
         this.sessions.delete(sessionId);
         resolve(result);
+      };
+
+      const onAbort = () => this.terminate(child);
+
+      const askQuestion = async (question: string) => {
+        const text = question.slice(0, 4000);
+        const key = text.trim().replace(/\s+/g, ' ').toLowerCase();
+        if (deliveredQuestions.has(key)) return;
+        deliveredQuestions.add(key);
+
+        const questionId = `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        await emit({ type: 'question', questionId, question: text });
+        const answer = await context.onQuestion({ questionId, question: text });
+        this.sendUserMessage(child, formatAnswerForAgent(answer.answer, answer.decision));
       };
 
       const idleTimer = setInterval(() => {
@@ -398,18 +415,56 @@ export class ClaudeCodeAdapter implements CodingAgent {
 
         const handled = await this.handleMessage(message, {
           emit,
-          context,
           onProviderSession: (id) => {
             providerSessionId = id;
             const session = this.sessions.get(sessionId);
             if (session) session.providerSessionId = id;
           },
           onFile: (file) => filesTouched.add(file),
-          onAnswer: (text) => this.sendUserMessage(child, text),
+          askQuestion,
         });
 
         if (handled.summary) summary = handled.summary;
         if (handled.failure) failure = handled.failure;
+
+        if (handled.finished) {
+          // From this point the protocol, not the process lifecycle, owns the
+          // outcome. Closing stdin or terminating the idle CLI will also fire
+          // `close` (with a null code on Windows); that is cleanup, not a
+          // second terminal result.
+          resultMessageSeen = true;
+
+          // Close stdin so a well-behaved CLI can exit on its own, then settle
+          // on what it actually told us rather than on a process lifecycle it
+          // has no reason to complete.
+          try {
+            child.stdin.end();
+          } catch {
+            // Already closed.
+          }
+
+          const usage = await this.usageSnapshot('after').catch(() => null);
+
+          if (context.signal.aborted) {
+            await emit({ type: 'cancelled', reason: 'Cancelled by the control plane.' });
+            await settle({
+              state: 'cancelled',
+              summary: summary || 'Cancelled part-way through.',
+              filesTouched: [...filesTouched],
+              usage,
+            });
+          } else if (failure) {
+            await emit({ type: 'failed', error: failure, recoverable: isRecoverableClaudeFailure(failure) });
+            await settle({ state: 'failed', summary, error: failure, filesTouched: [...filesTouched], usage });
+          } else {
+            if (!summary) summary = 'The coding agent finished without producing a summary.';
+            await emit({ type: 'completed', summary, filesTouched: [...filesTouched] });
+            await settle({ state: 'completed', summary, filesTouched: [...filesTouched], usage });
+          }
+
+          // The result is recorded; the process is now just holding a socket.
+          this.terminate(child);
+        }
       };
 
       readLines(child.stdout, (line) => void onLine(line));
@@ -421,11 +476,13 @@ export class ClaudeCodeAdapter implements CodingAgent {
       });
 
       child.on('error', (err) => {
+        if (settled || resultMessageSeen) return;
         void emit({ type: 'failed', error: `Could not start the Claude Code CLI: ${err.message}`, recoverable: false });
         void settle({ state: 'failed', summary: '', error: err.message, filesTouched: [...filesTouched], usage: null });
       });
 
       child.on('close', async (code) => {
+        if (settled || resultMessageSeen) return;
         const usage = await this.usageSnapshot('after').catch(() => null);
 
         if (context.signal.aborted) {
@@ -452,7 +509,11 @@ export class ClaudeCodeAdapter implements CodingAgent {
 
       // Kick the session off with the structured brief. Not the raw human
       // conversation — spec §12 is explicit about that.
-      this.sendUserMessage(child, buildInitialPrompt(task, { canRunCommands: permissionMode === 'bypassPermissions' }));
+      if (context.signal.aborted) onAbort();
+      else {
+        context.signal.addEventListener('abort', onAbort, { once: true });
+        this.sendUserMessage(child, buildInitialPrompt(task, { canRunCommands: permissionMode === 'bypassPermissions' }));
+      }
     });
 
     // The handle exposes the provider session id lazily, because `system/init`
@@ -550,12 +611,11 @@ export class ClaudeCodeAdapter implements CodingAgent {
     message: Record<string, unknown>,
     handlers: {
       emit: (event: AgentEventDraft) => Promise<void>;
-      context: CodingAgentContext;
       onProviderSession: (id: string) => void;
       onFile: (file: string) => void;
-      onAnswer: (text: string) => void;
+      askQuestion: (question: string) => Promise<void>;
     },
-  ): Promise<{ summary?: string; failure?: string }> {
+  ): Promise<{ summary?: string; failure?: string; finished?: boolean }> {
     const type = String(message.type ?? '');
 
     if (type === 'system' && message.subtype === 'init') {
@@ -604,10 +664,7 @@ export class ClaudeCodeAdapter implements CodingAgent {
        * proceeds on its own assumption, which the self-review still inspects.
        */
       if (!sawTool && looksLikeQuestion(text)) {
-        const questionId = `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        await handlers.emit({ type: 'question', questionId, question: text.slice(0, 4000) });
-        const answer = await handlers.context.onQuestion({ questionId, question: text.slice(0, 4000) });
-        handlers.onAnswer(formatAnswerForAgent(answer.answer, answer.decision));
+        await handlers.askQuestion(text);
       } else if (text.trim()) {
         await handlers.emit({ type: 'progress', stage: 'working', message: text.slice(0, 2000) });
       }
@@ -619,10 +676,35 @@ export class ClaudeCodeAdapter implements CodingAgent {
       this.lastResultUsage = message;
       const isError = message.is_error === true;
       const text = typeof message.result === 'string' ? message.result : '';
+      /*
+       * `result` IS the end of the session, and saying so is Sprint 3.1's
+       * commissioning defect #7.
+       *
+       * The adapter used to settle only on the child process exiting. With
+       * `--input-format stream-json` the CLI does not exit after a result: it
+       * keeps stdin open and waits for another user message, which Mac has no
+       * reason to send. So a session that had finished its work — committed,
+       * tested, self-reviewed — sat silent until the idle timer fired and was
+       * then recorded as `stalled`, which is to say as a FAILURE. Every real
+       * coding run therefore cost an extra `maxAgentMinutes` of wall clock and
+       * ended with no pull request and a blocker on the board.
+       *
+       * It survived Sprint 2 because the opt-in real-Claude test asserts
+       * `expect(['completed', 'failed']).toContain(result.state)` — which
+       * accepts the bug as a pass.
+       */
       if (isError) {
-        return { failure: text || String(message.subtype ?? 'The coding agent reported an error.') };
+        return { failure: text || String(message.subtype ?? 'The coding agent reported an error.'), finished: true };
       }
-      return { summary: text };
+      // Claude may put a decision request in the turn's `result` rather than
+      // in a standalone assistant event. A result ends that turn, not the
+      // stream-json process: deliver the question to Mac and keep stdin open
+      // for the answer and the next result.
+      if (looksLikeQuestion(text)) {
+        await handlers.askQuestion(text);
+        return {};
+      }
+      return { summary: text, finished: true };
     }
 
     return {};
@@ -642,6 +724,27 @@ export class ClaudeCodeAdapter implements CodingAgent {
       );
     });
   }
+}
+
+/**
+ * Provider and transport failures are worth retrying; repository, auth and
+ * policy failures are not. Claude's result stream currently supplies prose
+ * rather than a structured status code, so keep this deliberately narrow and
+ * cover every accepted form with adapter tests.
+ */
+export function isRecoverableClaudeFailure(message: string): boolean {
+  const text = message.toLowerCase();
+  return (
+    /\bapi error:\s*(?:429|5\d\d)\b/.test(text) ||
+    /\b(?:http|status)(?: code)?\s*(?:429|5\d\d)\b/.test(text) ||
+    text.includes('internal server error') ||
+    text.includes('temporarily unavailable') ||
+    text.includes('service unavailable') ||
+    text.includes('overloaded') ||
+    text.includes('rate limit') ||
+    text.includes('timed out') ||
+    text.includes('connection reset')
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -771,8 +874,12 @@ export function looksLikeQuestion(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed || !trimmed.includes('?')) return false;
   if (trimmed.length > 4000) return false;
-  return /(^|\n)\s*(should|shall|do you|would you|could you|can you|which|what|where|is it|are you|may i|do i|am i|please confirm|let me know)\b/i.test(
-    trimmed,
+  return (
+    /(^|\n)\s*(should|shall|do you|would you|could you|can you|which|what|where|is it|are you|may i|do i|am i|please confirm|let me know)\b/i.test(
+      trimmed,
+    ) ||
+    /\bi (?:need|require) (?:one |a |your )?(?:decision|answer|clarification)\b/i.test(trimmed) ||
+    /(^|\n)\s*#{1,6}\s*(?:the )?question\b/i.test(trimmed)
   );
 }
 
@@ -814,6 +921,9 @@ export function buildInitialPrompt(
     '  outside this session and attempts will be refused and reported.',
     '- Do not push at all. Mac pushes the branch himself after reviewing your work.',
     '- If you need a decision Mac has not covered, ask a direct question and wait. Mac will answer.',
+    '- Never invent an unstated product or business rule from convention. If correctness depends on the',
+    '  behaviour of an external system, policy or example that is absent from the brief and repository,',
+    '  ask before editing. This is mandatory for money, security, access and other irreversible outcomes.',
     '',
   );
 

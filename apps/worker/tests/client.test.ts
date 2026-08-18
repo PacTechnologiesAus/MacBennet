@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { completeRequestSchema, MAX_COMPLETION_SUMMARY_CHARS } from '@mac/protocol';
 import { ControlPlaneClient, ControlPlaneError } from '../src/client.js';
 import { silentLogger } from '../src/logger.js';
 
@@ -104,6 +105,17 @@ describe('retry behaviour', () => {
 
     await expect(client.complete('run-1', { outcome: 'succeeded' })).rejects.toThrow();
     expect(fetchImpl).toHaveBeenCalledTimes(10);
+  });
+
+  it('fits a long agent summary to the completion protocol instead of leaving the run stuck', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { control, runStatus: 'completed' }));
+    const client = makeClient(fetchImpl as unknown as typeof fetch);
+
+    await client.complete('run-1', { outcome: 'succeeded', summary: 'x'.repeat(8_000) });
+
+    const init = fetchImpl.mock.calls[0]![1] as RequestInit;
+    const sent = JSON.parse(String(init.body));
+    expect(completeRequestSchema.parse(sent).summary).toHaveLength(MAX_COMPLETION_SUMMARY_CHARS);
   });
 
   it('does not retry a lease, because the next poll is the retry', async () => {

@@ -211,10 +211,12 @@ export type LogBatchResponse = z.infer<typeof logBatchResponseSchema>;
 
 // --- Completion ------------------------------------------------------------
 
+export const MAX_COMPLETION_SUMMARY_CHARS = 2000;
+
 export const completeRequestSchema = z.object({
   outcome: runOutcomeSchema,
   stopReason: stopReasonSchema.nullable().optional(),
-  summary: z.string().max(2000).optional(),
+  summary: z.string().max(MAX_COMPLETION_SUMMARY_CHARS).optional(),
   /** The worker's confidence in its own result, if it has a basis for one. */
   confidence: z.number().min(0).max(1).nullable().optional(),
   /** Final log sequence the worker emitted, for completeness checking. */

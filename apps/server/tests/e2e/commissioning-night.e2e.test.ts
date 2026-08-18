@@ -36,19 +36,12 @@ import { nightShiftTick, startNightShift, stopNightShift } from '../../src/servi
  *   real git                 clone, worktree, branch, commit, push
  *
  * ---------------------------------------------------------------------------
- * ONE DELIBERATE SUBSTITUTION, AND IT IS RECORDED RATHER THAN HIDDEN
+ * CONTAINMENT MODE IS EXPLICIT, AND RECORDED RATHER THAN HIDDEN
  *
- * `requireSandbox` is OFF, so the real Claude Code CLI runs unconfined.
- *
- * Not because the sandbox does not work — 18 conformance tests run real
- * processes inside a real provider and prove containment, including that the
- * agent's own credential arrives and nobody else's does. It is off because on a
- * WINDOWS host the agent cannot authenticate inside a Linux container: the
- * Claude Code subscription credential is held by the operating system rather
- * than in a mountable file, and the sandbox environment is built from empty by
- * design. `MAC_SANDBOX_AGENT_ENV=ANTHROPIC_API_KEY`, or running commissioning on
- * the Linux VM, closes this. Until one of those happens, "a real authenticated
- * coding agent ran inside the sandbox" is UNPROVEN and must not be claimed.
+ * On Linux, setting `MAC_SANDBOX_PROVIDER=bubblewrap` together with an explicit
+ * `MAC_SANDBOX_CREDENTIALS` mount turns `requireSandbox` ON and runs the real
+ * authenticated agent inside Bubblewrap. Other hosts retain the documented
+ * uncontained commissioning fallback and may not claim contained execution.
  * ---------------------------------------------------------------------------
  *
  * Opt-in, and skipped by default. It writes to a real board, opens real pull
@@ -69,6 +62,11 @@ const TOKEN = process.env.MONDAY_API_TOKEN ?? '';
 const BOARD_ID = process.env.MAC_MONDAY_TEST_BOARD_ID ?? '';
 const REPO_URL = process.env.MAC_COMMISSIONING_REPO ?? '';
 const RECIPIENT = process.env.MAC_COMMISSIONING_RECIPIENT ?? 'kasper.simonsen@pac-technologies.com.au';
+const SANDBOX_CREDENTIALS = (process.env.MAC_SANDBOX_CREDENTIALS ?? '')
+  .split(/[,;]/)
+  .map((entry) => entry.trim())
+  .filter(Boolean);
+const CONTAINED = process.env.MAC_SANDBOX_PROVIDER === 'bubblewrap' && SANDBOX_CREDENTIALS.length > 0;
 const REAL_MAIL = Boolean(
   process.env.MAC_MAIL_TENANT_ID && process.env.MAC_MAIL_CLIENT_ID && process.env.MAC_MAIL_CLIENT_SECRET,
 );
@@ -158,6 +156,16 @@ async function resetBoard(): Promise<void> {
 beforeAll(async () => {
   if (!runnable) return;
 
+  if (CONTAINED) {
+    await Promise.all(SANDBOX_CREDENTIALS.map((credential) => fs.access(credential)));
+    await new Promise<void>((resolve, reject) => {
+      execFile('bwrap', ['--version'], { shell: false, windowsHide: true }, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+  }
+
   const built = await buildApp({ startBackgroundJobs: false, authRateLimitMax: 10_000, registerRateLimitMax: 10_000 });
   app = built.fastify;
   await app.listen({ port: 0, host: '127.0.0.1' });
@@ -241,9 +249,11 @@ const CONVERSATIONS: Record<'A' | 'B' | 'C', string[]> = {
   B: [
     'Finance are complaining that our invoice totals do not match their system. It is a cent here and there, but it is money so it matters.',
     'The totals come out of invoiceTotal in src/money.js. It just sums floats at the moment.',
+    'I want invoiceTotal to produce the same final total as the finance system.',
     'It is done when our totals agree with the finance system for the same inputs.',
     'Add tests for whatever you do.',
-    'This is a small change to one function, it is not an architectural thing.',
+    'The affected module is src/money.js; keep this as a small change to that one function.',
+    'Do not change individual line amounts, rates, the function signature, or its callers.',
     'It is important - finance have asked twice now.',
   ],
   C: [
@@ -299,9 +309,9 @@ async function idleWorker(): Promise<void> {
       version: '0.1.0',
       platform: process.platform,
       protocolVersion: 1,
-      // Honest: this host has no sandbox in the loop for the coding run, and
-      // `requireSandbox` is off for the reason given in the file header.
-      sandbox: { kind: 'none', available: false, version: null, detail: 'Commissioning host: see file header.' },
+      sandbox: CONTAINED
+        ? { kind: 'bubblewrap', available: true, version: null, detail: 'Commissioning host Bubblewrap preflight.' }
+        : { kind: 'none', available: false, version: null, detail: 'Commissioning host: see file header.' },
     },
   });
   const token = registered.json().workerToken as string;
@@ -326,19 +336,11 @@ async function runOneTaskOnAWorker(runId: string): Promise<string> {
       workspace: path.join(tempDir, 'workspace'),
       heartbeatSeconds: 30,
       logLevel: 'silent',
-      /*
-       * No sandbox, and the agent may still run commands. See the header for
-       * why there is no sandbox; this flag is the other half.
-       *
-       * `--permission-mode acceptEdits` refuses every command, so an
-       * uncontained agent cannot run the tests, cannot commit, and — as
-       * commissioning's first real run demonstrated — spends its budget
-       * discovering that and then reports a blocker no human can clear. On a
-       * host that can contain the agent, containment grants this implicitly and
-       * this flag is not set. Here it is set deliberately, and the run log says
-       * so in as many words.
-       */
-      sandbox: defaultSandboxConfig({ allowUncontainedCommands: true }),
+      // Containment grants command execution. The explicit uncontained flag is
+      // retained only for the documented Windows commissioning fallback.
+      sandbox: CONTAINED
+        ? defaultSandboxConfig({ provider: 'bubblewrap', credentialMounts: SANDBOX_CREDENTIALS })
+        : defaultSandboxConfig({ allowUncontainedCommands: true }),
     },
     logger: silentLogger,
     maxRuns: 1,
@@ -373,9 +375,7 @@ describe.skipIf(!runnable)('Sprint 3.1: a commissioning night against real exter
         mailProvider: REAL_MAIL ? 'graph' : 'fake',
         reportRecipients: [RECIPIENT],
         allowedRecipientDomains: ['pac-technologies.com.au'],
-        // See the header: the real CLI cannot authenticate inside a Linux
-        // container from a Windows host.
-        requireSandbox: false,
+        requireSandbox: CONTAINED,
         /*
          * Twenty minutes rather than the sixty-minute default.
          *
@@ -544,6 +544,19 @@ describe.skipIf(!runnable)('Sprint 3.1: a commissioning night against real exter
       // Highest priority first: Task A is Critical.
       expect(observed[0]!.item).toBe(itemIds.A);
 
+      // Task B is complete enough to start but contains a financial decision
+      // nobody supplied. The real agent must surface that decision, Mac must
+      // block it, and no pull request may be created for guessed money logic.
+      const blockedTask = observed.find((entry) => entry.item === itemIds.B);
+      expect(blockedTask, 'Task B never reached the real coding agent').toBeDefined();
+      const blockedEvents = await queryAuditEvents({ runId: blockedTask!.run, limit: 200, offset: 0 });
+      const blockedTypes = blockedEvents.map((event) => event.eventType);
+      expect(blockedTypes).toContain('coding_session.blocked');
+      expect(blockedTypes).not.toContain('pull_request.created');
+
+      // Once B is safely blocked, the scheduler must continue to C.
+      expect(observed.map((entry) => entry.item)).toContain(itemIds.C);
+
       // --- The shift ends ----------------------------------------------------
 
       await stopNightShift({ reason: 'Commissioning night complete.' }, SYSTEM_ACTOR);
@@ -599,8 +612,11 @@ describe.skipIf(!runnable)('Sprint 3.1: a commissioning night against real exter
       expect(types).toContain('run.auto_approved');
       // A machine approval must never read as a human one.
       expect(types).not.toContain('run.approved');
-      expect(types).toContain('monday.status_set');
-      expect(types).toContain('night_shift.stopped');
+      expect(types).toContain('monday.status_changed');
+      expect(types).toContain('night_shift.blocker_recorded');
+      expect(types).toContain('monday.blocker_posted');
+      expect(types).toContain('pull_request.created');
+      expect(types).toContain('night_shift.ended');
       expect(types).toContain('report.email_attempted');
 
       // eslint-disable-next-line no-console

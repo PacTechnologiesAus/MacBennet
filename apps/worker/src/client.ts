@@ -1,38 +1,39 @@
-import type {
-  CompleteRequest,
-  CompleteResponse,
-  ControlEnvelope,
-  HeartbeatRequest,
-  HeartbeatResponse,
-  LeaseResponse,
-  LogEntry,
-  LogBatchResponse,
-  ProgressRequest,
-  ProgressResponse,
-  RegisterRequest,
-  RegisterResponse,
-  AgentEventBatchRequest,
-  AgentEventBatchResponse,
-  AskQuestionRequest,
-  AskQuestionResponse,
-  ContextSnapshotRequest,
-  ContextSnapshotResponse,
-  GitViolationReportRequest,
-  GitViolationReportResponse,
-  PullRequestReportRequest,
-  PullRequestReportResponse,
-  ReviewVerdictResponse,
-  RotateTokenRequest,
-  RotateTokenResponse,
-  RunSandboxReportRequest,
-  RunSandboxReportResponse,
-  SandboxAttestationRequest,
-  SandboxAttestationResponse,
-  SubmitReviewRequest,
-  UsageSnapshotRequest,
-  UsageSnapshotResponse,
-  WorktreeReportRequest,
-  WorktreeReportResponse,
+import {
+  MAX_COMPLETION_SUMMARY_CHARS,
+  type CompleteRequest,
+  type CompleteResponse,
+  type ControlEnvelope,
+  type HeartbeatRequest,
+  type HeartbeatResponse,
+  type LeaseResponse,
+  type LogEntry,
+  type LogBatchResponse,
+  type ProgressRequest,
+  type ProgressResponse,
+  type RegisterRequest,
+  type RegisterResponse,
+  type AgentEventBatchRequest,
+  type AgentEventBatchResponse,
+  type AskQuestionRequest,
+  type AskQuestionResponse,
+  type ContextSnapshotRequest,
+  type ContextSnapshotResponse,
+  type GitViolationReportRequest,
+  type GitViolationReportResponse,
+  type PullRequestReportRequest,
+  type PullRequestReportResponse,
+  type ReviewVerdictResponse,
+  type RotateTokenRequest,
+  type RotateTokenResponse,
+  type RunSandboxReportRequest,
+  type RunSandboxReportResponse,
+  type SandboxAttestationRequest,
+  type SandboxAttestationResponse,
+  type SubmitReviewRequest,
+  type UsageSnapshotRequest,
+  type UsageSnapshotResponse,
+  type WorktreeReportRequest,
+  type WorktreeReportResponse,
 } from '@mac/protocol';
 import type { Logger } from './logger.js';
 
@@ -194,7 +195,11 @@ export class ControlPlaneClient {
   complete(runId: string, body: CompleteRequest): Promise<CompleteResponse> {
     // Retried hard: a completion that never lands leaves a run stuck
     // "running" forever, which is the worst state for an operator to inherit.
-    return this.request<CompleteResponse>(`/api/worker/runs/${runId}/complete`, body, { attempts: 10 });
+    const request =
+      body.summary && body.summary.length > MAX_COMPLETION_SUMMARY_CHARS
+        ? { ...body, summary: body.summary.slice(0, MAX_COMPLETION_SUMMARY_CHARS) }
+        : body;
+    return this.request<CompleteResponse>(`/api/worker/runs/${runId}/complete`, request, { attempts: 10 });
   }
 
   // --- Sprint 2: coding sessions -------------------------------------------

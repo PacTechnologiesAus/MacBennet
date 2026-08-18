@@ -246,11 +246,33 @@ export async function deliverPendingEmails(now = new Date(), actor: Actor = SYST
     const attempts = delivery.attempts + 1;
     const recipients = Array.isArray(delivery.recipients) ? (delivery.recipients as string[]) : [];
 
+    /*
+     * Claim with a compare-and-swap, not an unconditional update.
+     *
+     * Several workers can select the same due row before any of them writes.
+     * Only the first update may move the exact status/attempt pair to
+     * `sending`; every loser gets no row back and must not call the provider.
+     */
+    const [claimed] = await db
+      .update(emailDeliveries)
+      .set({
+        status: recipients.length === 0 ? 'dead' : 'sending',
+        attempts,
+        ...(recipients.length === 0 ? { lastError: 'No recipients.' } : {}),
+      })
+      .where(
+        and(
+          eq(emailDeliveries.id, delivery.id),
+          inArray(emailDeliveries.status, ['pending', 'failed']),
+          eq(emailDeliveries.attempts, delivery.attempts),
+          lte(emailDeliveries.nextAttemptAt, now),
+        ),
+      )
+      .returning();
+
+    if (!claimed) continue;
+
     if (recipients.length === 0) {
-      await db
-        .update(emailDeliveries)
-        .set({ status: 'dead', attempts, lastError: 'No recipients.' })
-        .where(eq(emailDeliveries.id, delivery.id));
       outcome.dead += 1;
       continue;
     }
@@ -263,11 +285,6 @@ export async function deliverPendingEmails(now = new Date(), actor: Actor = SYST
      * attempt count is part of the same write, so the retry budget is consumed
      * whether or not the process survives.
      */
-    await db
-      .update(emailDeliveries)
-      .set({ status: 'sending', attempts })
-      .where(eq(emailDeliveries.id, delivery.id));
-
     const result = await provider.send({
       to: recipients,
       subject: delivery.subject,

@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import type { MailProvider, MailSendResult, OutboundMail, OvernightEmailContent } from '@mac/protocol';
 import { asUser, closePool, createAndLogin, resetDatabase, startTestApp, type Session } from '../helpers/harness.js';
 import { db } from '../../src/db/client.js';
-import { emailDeliveries } from '../../src/db/schema.js';
+import { emailDeliveries, nightShifts } from '../../src/db/schema.js';
 import { queryAuditEvents } from '../../src/services/audit-query.js';
-import { GraphMailProvider, setMailProvider } from '../../src/services/mail/provider.js';
+import { FakeMailProvider, GraphMailProvider, setMailProvider } from '../../src/services/mail/provider.js';
 import {
   deliverPendingEmails,
   listEmailDeliveries,
@@ -26,10 +26,9 @@ import {
  *   MAC_MAIL_FROM=...             the mailbox Mac sends from
  *   MAC_MAIL_TEST_RECIPIENT=...   an APPROVED INTERNAL address, nobody external
  *
- * The registration needs the **application** permission `Mail.Send` with admin
- * consent granted — not the delegated one. Client credentials have no signed-in
- * user, so a delegated grant produces a token that authenticates and then fails
- * at `sendMail` with 403, which is a confusing hour for whoever hits it.
+ * The service principal needs Exchange Online Application RBAC role
+ * `Application Mail.Send`, restricted to the commissioning mailbox. Do not add
+ * an unscoped Entra `Mail.Send` grant as well: the grants are additive.
  *
  * Exactly TWO real emails are sent by this file: one morning report, and one
  * that fails on its first attempt and succeeds on retry. Everything else is
@@ -92,7 +91,18 @@ class CountingGraphProvider implements MailProvider {
 let app: FastifyInstance;
 let close: () => Promise<void>;
 let admin: Session;
-let provider: CountingGraphProvider;
+let fakeProvider: FakeMailProvider;
+
+const TEST_SHIFT_IDS = [
+  '33333333-3333-3333-3333-333333333333',
+  '44444444-4444-4444-4444-444444444444',
+  '55555555-5555-5555-5555-555555555555',
+  '66666666-6666-6666-6666-666666666666',
+  '77777777-7777-7777-7777-777777777777',
+  '88888888-8888-8888-8888-888888888888',
+  '99999999-9999-9999-9999-999999999999',
+  'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+];
 
 const content = (nightShiftId: string): OvernightEmailContent => ({
   nightShiftId,
@@ -140,6 +150,14 @@ const content = (nightShiftId: string): OvernightEmailContent => ({
   dashboardUrl: 'http://localhost:5173/runs',
 });
 
+const useRealGraph = (): CountingGraphProvider => {
+  const provider = new CountingGraphProvider(
+    new GraphMailProvider({ tenantId: TENANT, clientId: CLIENT, clientSecret: SECRET, from: FROM }),
+  );
+  setMailProvider(provider);
+  return provider;
+};
+
 beforeAll(async () => {
   if (!runnable) return;
   ({ fastify: app, close } = await startTestApp());
@@ -157,16 +175,22 @@ beforeEach(async () => {
   await resetDatabase();
   admin = await createAndLogin(app, { email: 'admin@pac.test', name: 'Admin', role: 'admin' });
 
-  provider = new CountingGraphProvider(
-    new GraphMailProvider({ tenantId: TENANT, clientId: CLIENT, clientSecret: SECRET, from: FROM }),
-  );
-  setMailProvider(provider);
+  fakeProvider = new FakeMailProvider();
+  setMailProvider(fakeProvider);
 
   await asUser(app, admin).patch('/api/settings', {
     mailProvider: 'graph',
     reportRecipients: [RECIPIENT],
     allowedRecipientDomains: [RECIPIENT.split('@')[1]!],
   });
+
+  await db.insert(nightShifts).values(
+    TEST_SHIFT_IDS.map((id) => ({
+      id,
+      cutoffAt: new Date(Date.now() + 6 * 3_600_000),
+      settingsSnapshot: {},
+    })),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -175,11 +199,13 @@ beforeEach(async () => {
 
 describe.skipIf(!runnable)('the real mailbox', () => {
   it('authenticates against Entra and Graph', async () => {
+    const provider = useRealGraph();
     const availability = await provider.isAvailable();
     expect(availability.available, availability.reason).toBe(true);
   }, 60_000);
 
   it('sends a real morning report, records its status, and audits it', async () => {
+    const provider = useRealGraph();
     const shiftId = '33333333-3333-3333-3333-333333333333';
     const queued = await queueOvernightEmail(shiftId, content(shiftId));
     expect(queued.status).toBe('pending');
@@ -191,6 +217,19 @@ describe.skipIf(!runnable)('the real mailbox', () => {
     const [row] = await db.select().from(emailDeliveries).where(eq(emailDeliveries.id, queued.id));
     expect(row!.status).toBe('sent');
     expect(row!.sentAt).not.toBeNull();
+
+    const sent = provider.accepted[0]!;
+    expect(sent.subject.length).toBeGreaterThan(10);
+    expect(sent.subject.length).toBeLessThan(200);
+    expect(sent.to).toEqual([RECIPIENT]);
+
+    const body = sent.text;
+    expect(body).toMatch(/blocked|blocker/i);
+    expect(body).toMatch(/pull request/i);
+    expect(body).toMatch(/hours/i);
+    expect(body).toContain('https://github.com/');
+    expect(body).toMatch(/NOT money billed|not billed/i);
+    expect(body).not.toMatch(/\bat .*\(.*:\d+:\d+\)/);
 
     /*
      * Graph's sendMail answers 202 with an empty body and no message id, so the
@@ -205,28 +244,6 @@ describe.skipIf(!runnable)('the real mailbox', () => {
     expect(audited).toContain('report.email_delivered');
   }, 180_000);
 
-  it('carries a subject a human can act on, and no log content', async () => {
-    const shiftId = '44444444-4444-4444-4444-444444444444';
-    await queueOvernightEmail(shiftId, content(shiftId));
-    await deliverPendingEmails();
-
-    const sent = provider.accepted[0]!;
-    expect(sent.subject.length).toBeGreaterThan(10);
-    expect(sent.subject.length).toBeLessThan(200);
-    expect(sent.to).toEqual([RECIPIENT]);
-
-    const body = sent.text;
-    // §28: the sections an engineer scans at 08:00.
-    expect(body).toMatch(/blocked|blocker/i);
-    expect(body).toMatch(/pull request/i);
-    expect(body).toMatch(/hours/i);
-    // The links must be links, not internal identifiers.
-    expect(body).toContain('https://github.com/');
-    // Usage must never present an estimate as billed money.
-    expect(body).toMatch(/NOT money billed|not billed/i);
-    // No stack traces, no run logs, no raw JSON dumps.
-    expect(body).not.toMatch(/\bat .*\(.*:\d+:\d+\)/);
-  }, 180_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -235,10 +252,14 @@ describe.skipIf(!runnable)('the real mailbox', () => {
 
 describe.skipIf(!runnable)('recipients', () => {
   it('refuses an address outside the allowed domains, and audits the refusal', async () => {
-    await asUser(app, admin).patch('/api/settings', {
-      reportRecipients: [RECIPIENT, 'someone@customer.example'],
-      allowedRecipientDomains: [RECIPIENT.split('@')[1]!],
-    });
+    // The API already refuses to create this state. Seed it directly to prove
+    // the send path still protects restored or manually edited data.
+    await db.execute(sql`
+      UPDATE settings
+      SET report_recipients = ${JSON.stringify([RECIPIENT, 'someone@customer.example'])}::jsonb,
+          allowed_recipient_domains = ${JSON.stringify([RECIPIENT.split('@')[1]!])}::jsonb
+      WHERE id = 1
+    `);
 
     const resolution = await resolveRecipients();
     expect(resolution.recipients).toEqual([RECIPIENT]);
@@ -253,7 +274,7 @@ describe.skipIf(!runnable)('recipients', () => {
 
   it('is dead on arrival, not pending forever, when nobody is allowed', async () => {
     await asUser(app, admin).patch('/api/settings', {
-      reportRecipients: ['someone@customer.example'],
+      reportRecipients: [],
       allowedRecipientDomains: [RECIPIENT.split('@')[1]!],
     });
 
@@ -262,7 +283,7 @@ describe.skipIf(!runnable)('recipients', () => {
 
     // A configuration problem, visible on the Reports screen as one.
     expect(queued.status).toBe('dead');
-    expect(provider.attempts).toBe(0);
+    expect(fakeProvider.sent).toHaveLength(0);
   }, 120_000);
 
   it('has no code path that could reach an arbitrary address', () => {
@@ -289,6 +310,7 @@ describe.skipIf(!runnable)('exactly once', () => {
   }, 120_000);
 
   it('retries a transient failure and still delivers exactly one email', async () => {
+    const provider = useRealGraph();
     const shiftId = '88888888-8888-8888-8888-888888888888';
     await queueOvernightEmail(shiftId, content(shiftId));
 
@@ -319,7 +341,7 @@ describe.skipIf(!runnable)('exactly once', () => {
     await queueOvernightEmail(shiftId, content(shiftId));
 
     await deliverPendingEmails();
-    expect(provider.accepted).toHaveLength(1);
+    expect(fakeProvider.sent).toHaveLength(1);
 
     // A restarted process, an overlapping scheduler, a nervous operator.
     await deliverPendingEmails();
@@ -327,8 +349,7 @@ describe.skipIf(!runnable)('exactly once', () => {
     await queueOvernightEmail(shiftId, content(shiftId));
     await deliverPendingEmails();
 
-    expect(provider.attempts).toBe(1);
-    expect(provider.accepted).toHaveLength(1);
+    expect(fakeProvider.sent).toHaveLength(1);
   }, 240_000);
 
   it('survives two sweepers racing, because the constraint is in the database', async () => {
@@ -339,7 +360,6 @@ describe.skipIf(!runnable)('exactly once', () => {
     // provider call precisely so this cannot double-send.
     await Promise.all([deliverPendingEmails(), deliverPendingEmails(), deliverPendingEmails()]);
 
-    expect(provider.attempts).toBe(1);
-    expect(provider.accepted).toHaveLength(1);
+    expect(fakeProvider.sent).toHaveLength(1);
   }, 240_000);
 });
