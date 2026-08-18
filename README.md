@@ -40,6 +40,45 @@ in [`docs/sprint-1-design.md`](docs/sprint-1-design.md),
 
 ---
 
+## Sprint 3.2 capabilities
+
+Mac works from PAC Technologies' approved shared company context, and every
+meaningful piece of work records exactly which revision of it applied.
+
+* **Company context provider.** A bare Git mirror of
+  `PacTechnologiesAus/Company`, refreshed with `git remote update` and read with
+  `git show <sha>:<path>`. Because it is a mirror, an old commit's documents stay
+  readable — so "show me the AUTHORITY.md this run worked under" has an answer,
+  not just a SHA in a column.
+* **Manifest-driven loading.** `context.yaml` declares the mandatory document
+  set; Mac does not hardcode it. An unsupported schema version, a malformed
+  manifest, a missing mandatory document or a present-but-empty one is a hard
+  failure with a recorded reason, never a guessed default.
+* **Provenance.** Discovery sessions, handoff briefs, runs and supervised
+  answers each record the company-context revision that governed them. The
+  binding is immutable — a database trigger refuses to move it — so a run that
+  started at 02:00 stays attributable to the policy in force at 02:00 even if
+  PAC revises it at 02:14.
+* **Context selection.** `AUTHORITY.md` is carried in full on every piece of
+  work, deterministically and with no keyword input, so hard authority content
+  cannot be scored away by a task description that never mentions deployment.
+  Task-relevant sections are selected on top of it.
+* **Governance.** Mac may raise a proposal to change company context. He cannot
+  apply one: the provider has no write verb, accepting a proposal produces no
+  commit, and `accepted`/`rejected` require a human actor. Project knowledge
+  never becomes company policy on its own.
+* **Cached and offline behaviour.** When GitHub is unreachable, a previously
+  validated revision may be used if an operator has permitted it — marked
+  `cached` or `stale`, with its exact SHA and the last successful refresh time
+  shown. With no valid revision, context-dependent work is refused rather than
+  run on empty company context.
+* **Forja is a platform, not an agent.** PAC's agent registry models agents and
+  platforms as separate typed collections; `isPacAgent('forja')` is false.
+
+Configure it with `MAC_COMPANY_CONTEXT_*` in `.env` (see `.env.example`) and
+enable `companyContextEnabled` in Settings. It is off by default, like every
+other integration that reaches an external service.
+
 ## Sprint 3 capabilities
 
 | Capability | State |

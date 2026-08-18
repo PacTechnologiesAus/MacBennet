@@ -28,8 +28,12 @@ import type {
   UpdateTaskRequest,
   WorkerDto,
   // --- Sprint 3 ---
+  CompanyContextStatusDto,
+  CompanyProposalDto,
+  CreateCompanyProposalRequest,
   CreateMondayBoardRequest,
   EmailDeliveryDto,
+  UpdateCompanyProposalRequest,
   InvestigationDto,
   MondayBoardDto,
   MondayItemDto,
@@ -217,6 +221,19 @@ export const api = {
 
   // --- Security (Sprint 3) --------------------------------------------------
   security: () => get<{ security: SecurityOverviewDto }>('/api/security'),
+
+  // --- Sprint 3.2: PAC company context ---
+  companyContextStatus: () =>
+    get<{ status: CompanyContextStatusDto }>('/api/company-context/status'),
+  refreshCompanyContext: () =>
+    post<{ status: CompanyContextStatusDto; changed: boolean; error: string | null }>(
+      '/api/company-context/refresh',
+    ),
+  companyProposals: () => get<{ proposals: CompanyProposalDto[] }>('/api/company-context/proposals'),
+  createCompanyProposal: (body: CreateCompanyProposalRequest) =>
+    post<{ proposal: CompanyProposalDto }>('/api/company-context/proposals', body),
+  updateCompanyProposal: (id: string, body: UpdateCompanyProposalRequest) =>
+    patch<{ proposal: CompanyProposalDto }>(`/api/company-context/proposals/${id}`, body),
   rotateWorkerToken: (workerId: string, reason?: string) =>
     post<{ rotationRequested: boolean }>(`/api/workers/${workerId}/rotate`, { reason }),
   revokeWorkerTokens: (workerId: string, reason: string) =>

@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import type { ApprovalDto, AuditEventDto, CurrentUser, RunDto, RunLogDto, SettingsDto } from '@mac/protocol';
 import { isTerminalRunStatus } from '@mac/protocol';
 import { api, ApiError } from '../api.js';
+import { CompanyContextBadge } from './CompanyContext.js';
 import { Alert, ApprovalBadge, Badge, Confidence, Empty, Field, RunStatusBadge, Time, humanise } from '../components/ui.js';
 import { CodingRunPanels } from './CodingRun.js';
 
@@ -124,6 +125,12 @@ export function RunDetail({ user }: { user: CurrentUser }) {
         <div className="actions">
           <RunStatusBadge status={run.status} />
           <ApprovalBadge state={run.approvalState} />
+          {/*
+            Sprint 3.2: which PAC company context governed this run. Sits beside
+            the approval state because they answer the same kind of question —
+            under whose authority did this happen.
+          */}
+          <CompanyContextBadge context={run.companyContext} />
         </div>
       </div>
 
