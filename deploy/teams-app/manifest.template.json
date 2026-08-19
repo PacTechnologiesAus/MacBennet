@@ -1,0 +1,51 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.30/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.30",
+  "version": "1.0.0",
+  "id": "__TEAMS_APP_ID__",
+  "developer": {
+    "name": "PAC Technologies",
+    "websiteUrl": "https://www.pac-technologies.com.au",
+    "privacyUrl": "https://www.pac-technologies.com.au",
+    "termsOfUseUrl": "https://www.pac-technologies.com.au"
+  },
+  "name": {
+    "short": "Mac Bennett",
+    "full": "Mac Bennett — Automation Engineer"
+  },
+  "description": {
+    "short": "PAC's automation engineer. Assign work, answer questions, approve runs.",
+    "full": "Mac Bennett is PAC Technologies' automation engineer. Mac is an application, not a person: messages from Mac are messages from software, and Mac signs substantive replies \"Mac Bennett · Automation Engineer · PAC Technologies\" so that attribution survives a forward.\n\nIn Teams you can give Mac work, answer the clarifying questions Mac asks before starting, approve or reject a run by its reference code, and be told when Mac is blocked. Mac's Teams conversation is the same persistent conversation as the one in Mac's web interface — continuing a thread in either place continues the same work.\n\nWho may assign work and who may approve is configured in Mac by an administrator and is keyed on Microsoft Entra object id. An unrecognised sender may talk to Mac and ask for status, and may not create work or authorise anything."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#1F2A37",
+  "bots": [
+    {
+      "botId": "__BOT_APP_ID__",
+      "scopes": ["personal", "team"],
+      "isNotificationOnly": false,
+      "supportsFiles": false,
+      "commandLists": [
+        {
+          "scope": "personal",
+          "commands": [
+            { "title": "status", "description": "What Mac is working on, and what he is waiting on" },
+            { "title": "approve AP-XXXX", "description": "Approve a request by its reference code" },
+            { "title": "reject AP-XXXX", "description": "Reject a request by its reference code" }
+          ]
+        },
+        {
+          "scope": "team",
+          "commands": [
+            { "title": "status", "description": "What Mac is working on, and what he is waiting on" }
+          ]
+        }
+      ]
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": ["mac.pac-technologies.com.au"]
+}
