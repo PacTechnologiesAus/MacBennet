@@ -11,6 +11,7 @@
     "build": "tsc --noEmit -p tsconfig.json",
     "migrate": "tsx src/db/migrate.ts",
     "seed": "tsx scripts/seed.ts",
+    "set-password": "tsx scripts/set-password.ts",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
