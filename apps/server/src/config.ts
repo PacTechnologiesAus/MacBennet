@@ -78,8 +78,17 @@ const envSchema = z.object({
    * `outline` is small on purpose — it names the documents, it does not write
    * them.
    */
-  MAC_MODEL_STEP_MAX_TOKENS: z.coerce.number().int().min(256).max(64_000).default(3_000),
-  MAC_MODEL_OUTLINE_MAX_TOKENS: z.coerce.number().int().min(256).max(64_000).default(2_000),
+  /*
+   * 3,000 was the value inherited from the scripted-provider era and it is far
+   * too small for a real one. Six of eight steps in the third commissioning run
+   * stopped at exactly 3,000 output tokens, truncated mid-JSON, failed to parse
+   * and contributed NO findings — so the run gathered 28 sources and reached
+   * its write-up with nothing to write about. A step states findings with their
+   * statements, evidence classes, citations and reasoning, plus a narrative;
+   * that is not a 3,000-token reply on a substantial task.
+   */
+  MAC_MODEL_STEP_MAX_TOKENS: z.coerce.number().int().min(256).max(64_000).default(12_000),
+  MAC_MODEL_OUTLINE_MAX_TOKENS: z.coerce.number().int().min(256).max(64_000).default(4_000),
   MAC_MODEL_ARTEFACT_MAX_TOKENS: z.coerce.number().int().min(1_000).max(64_000).default(16_000),
   /**
    * Sprint 3.3: the second real provider.
