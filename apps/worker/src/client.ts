@@ -19,6 +19,8 @@ import {
   type ContextSnapshotRequest,
   type ContextSnapshotResponse,
   type ResearchStepResponse,
+  type AcceptanceReviewRequest,
+  type AcceptanceReviewResponse,
   type GitViolationReportRequest,
   type GitViolationReportResponse,
   type PullRequestReportRequest,
@@ -302,6 +304,33 @@ export class ControlPlaneClient {
     return this.request<ResearchStepResponse>(
       `/api/worker/runs/${runId}/research-step`,
       {},
+      { timeoutMs: 300_000, ...(signal ? { signal } : {}) },
+    );
+  }
+
+  /**
+   * Phase 4: ask the control plane to check the work against its criteria.
+   *
+   * Called before completion is reported, because that is the only moment
+   * remediation is possible — the lease is held and the night has time left.
+   *
+   * `canRemediate` is the worker's own judgement: it holds the wall clock and
+   * the cutoff, so it is the component that knows whether there is time for
+   * another model call. The control plane decides whether remediation is
+   * PERMITTED, and both have to agree.
+   *
+   * The same generous timeout as a research step, for the same reason: a review
+   * with a semantic criterion is a model call, plus a bounded remediation pass
+   * that is one more per unmet criterion.
+   */
+  reviewAcceptance(
+    runId: string,
+    body: AcceptanceReviewRequest,
+    signal?: AbortSignal,
+  ): Promise<AcceptanceReviewResponse> {
+    return this.request<AcceptanceReviewResponse>(
+      `/api/worker/runs/${runId}/acceptance-review`,
+      body,
       { timeoutMs: 300_000, ...(signal ? { signal } : {}) },
     );
   }

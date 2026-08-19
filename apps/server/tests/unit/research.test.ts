@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   emptyBriefContent,
+  makeResearchSource,
   emptyResearchState,
   handoffBriefContentSchema,
   RESEARCH_LIMITS,
@@ -30,13 +31,14 @@ import {
  * something the model is NOT permitted to get away with.
  */
 
-const source = (ref: string, external = false): ResearchSource => ({
-  ref,
-  label: ref,
-  excerpt: 'some retrieved text',
-  retrievedAt: '2026-08-18T02:00:00.000Z',
-  external,
-});
+const source = (ref: string, external = false): ResearchSource =>
+  makeResearchSource({
+    ref,
+    label: ref,
+    excerpt: 'some retrieved text',
+    retrievedAt: '2026-08-18T02:00:00.000Z',
+    external,
+  });
 
 const finding = (overrides: Partial<Finding> = {}): Finding => ({
   statement: 'PAC requires two approvals for a production change.',

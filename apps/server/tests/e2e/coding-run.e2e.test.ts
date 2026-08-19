@@ -403,8 +403,23 @@ describe('Sprint 2 end to end: Mac completes a coding task autonomously', () => 
     });
 
     try {
-      const run = await waitForRun(runId, ['completed', 'failed', 'cancelled']);
+      const run = await waitForRun(runId, ['completed', 'completed_with_gaps', 'failed', 'cancelled']);
       const detail = (await api(operator).get(`/api/runs/${runId}/coding`)).json().detail;
+
+      /*
+       * Phase 4 changed this run's terminal status, and the change is the point.
+       *
+       * The brief carried testing expectations, so acceptance verification
+       * derived a "tests pass" criterion. The tests did not pass. Before Phase
+       * 4 this run reported `completed` — the same shape of misreport the phase
+       * exists to fix, because every list and report reads `status` and none of
+       * them joined to the review that already said the tests had failed.
+       *
+       * Not `failed`: work was produced, the worktree is preserved, and the
+       * commits are worth reading. `completed_with_gaps` is the honest word.
+       */
+      expect(run.status).toBe('completed_with_gaps');
+      expect(run.acceptanceState).toBe('gaps');
 
       expect(detail.review.evidence.tests.passed).toBe(false);
       expect(detail.review.prRecommended).toBe(false);
@@ -424,7 +439,6 @@ describe('Sprint 2 end to end: Mac completes a coding task autonomously', () => 
       expect(report.pullRequestUrl).toBeNull();
       expect(report.pullRequestDeclineReason).toContain('Tests failed');
       expect(report.risk).not.toBe('low');
-      expect(run.status).toBeDefined();
       expect(detailBefore).toBeDefined();
     } finally {
       await handle.stop();

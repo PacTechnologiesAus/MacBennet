@@ -86,8 +86,43 @@ export const researchSourceSchema = z.object({
   retrievedAt: z.string(),
   /** True when it came from outside PAC. Drives evidence classification. */
   external: z.boolean().default(false),
+  // --- Phase 4 -------------------------------------------------------------
+  /**
+   * What KIND of source this is (Part E §18).
+   *
+   * Defaulted rather than required so every existing persisted state parses
+   * unchanged — a run that started before Phase 4 has sources with no class,
+   * and `unknown` is the honest word for them rather than a migration that
+   * guesses.
+   */
+  sourceClass: z.string().max(40).default('unknown'),
+  /** The URL, for external sources. Null for internal ones. */
+  url: z.string().max(2000).nullable().default(null),
+  /** Where the provider gave one. Never invented when it did not. */
+  publishedAt: z.string().max(60).nullable().default(null),
+  /**
+   * Set when the injection scanner matched something in this content.
+   *
+   * Recorded rather than acted on: a page that DISCUSSES prompt injection is
+   * not an attack, and dropping it would lose real evidence to defend against
+   * something the structure already prevents.
+   */
+  injectionSuspected: z.boolean().default(false),
 });
 export type ResearchSource = z.infer<typeof researchSourceSchema>;
+
+/**
+ * Builds a source with the defaults applied.
+ *
+ * Exists so that the internal tools — which have no URL, no publication date
+ * and no injection risk — do not each have to spell out four fields that mean
+ * "not applicable". The schema already carries the defaults; this is the one
+ * place that reads them, so adding a fifth field later does not touch six call
+ * sites.
+ */
+export const makeResearchSource = (
+  input: Pick<ResearchSource, 'ref'> & Partial<ResearchSource>,
+): ResearchSource => researchSourceSchema.parse({ retrievedAt: new Date().toISOString(), ...input });
 
 export const researchToolResultSchema = z.object({
   tool: researchToolSchema,

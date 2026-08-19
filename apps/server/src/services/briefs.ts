@@ -18,6 +18,7 @@ import { adviseExecution, parseConfidence } from '../domain/confidence.js';
 import { analyseGaps, deriveFromContext } from '../domain/gap-analysis.js';
 import { getSettings, toConfidencePolicy } from './settings.js';
 import { record, type Actor } from './audit.js';
+import { deriveCriteriaForBrief } from './acceptance.js';
 import { contextRefFor } from './company-context/service.js';
 
 /**
@@ -252,6 +253,16 @@ export async function createBrief(
         })),
       },
     });
+
+    /*
+     * Phase 4: the brief's own acceptance criteria, derived as it is written.
+     *
+     * Part F §22 asks briefs to EXPOSE machine-checkable criteria, and deriving
+     * them here rather than at approval means a human sees them — and can edit
+     * them — while they still have the chance to disagree. A criterion first
+     * seen at completion is a criterion nobody agreed to.
+     */
+    await deriveCriteriaForBrief(row.id, actor, tx);
 
     return briefDto(row, tx);
   };

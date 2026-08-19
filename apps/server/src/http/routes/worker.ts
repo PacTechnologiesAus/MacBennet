@@ -19,6 +19,7 @@ import {
   worktreeReportRequestSchema,
   ENROLLMENT_TOKEN_PREFIX,
   PROTOCOL_VERSION,
+  acceptanceReviewRequestSchema,
   researchStepRequestSchema,
 } from '@mac/protocol';
 import { AppError } from '../errors.js';
@@ -44,7 +45,15 @@ import { recordPullRequest, submitReview } from '../../services/reviews.js';
 import { recordUsageSnapshot } from '../../services/usage.js';
 import { recordContextSnapshot } from '../../services/discovery.js';
 import { ensureGeneralPlan } from '../../services/general-runs.js';
-import { performResearchStep } from '../../services/research/runner.js';
+import {
+  getRunAcceptance,
+  noteRemediation,
+  remediationAlreadyAttempted,
+  reviewAcceptance,
+} from '../../services/acceptance.js';
+import { performAcceptanceRemediation, performResearchStep } from '../../services/research/runner.js';
+import { tallySources } from '../../services/research/sources.js';
+import { getSettings } from '../../services/settings.js';
 import { recordFetch } from '../../services/repositories.js';
 import { record } from '../../services/audit.js';
 import { db } from '../../db/client.js';
@@ -426,8 +435,81 @@ export async function workerRoutes(
       const control = await buildControlEnvelope(worker.id);
       return reply.send({ control, ...result });
     });
+
+    /**
+     * Phase 4: check the work against the criteria a human approved.
+     *
+     * Called by the worker BEFORE it reports completion, because that is the
+     * only moment remediation is possible — the lease is held, the night has
+     * time left, and the run is not yet terminal.
+     *
+     * `completeRun` performs a deterministic-only review of its own as a
+     * backstop, so a worker that skipped this cannot produce a clean
+     * `completed` for work nobody checked. This endpoint is the full pass:
+     * semantic criteria included, and one bounded remediation attempt.
+     */
+    scope.post('/api/worker/runs/:runId/acceptance-review', async (request, reply) => {
+      const worker = currentWorker(request);
+      const { runId } = request.params as { runId: string };
+      const body = acceptanceReviewRequestSchema.parse(request.body ?? {});
+      await assertRunBelongsToWorker(runId, worker.id, worker.name);
+
+      const actor = workerActor(worker);
+      const settings = await getSettings();
+
+      let review = await reviewAcceptance(runId, { actor });
+
+      /*
+       * ONE remediation attempt, and only when everything agrees it is allowed.
+       *
+       * Three conditions, deliberately: the deployment permits it, the worker
+       * says it has the time, and no attempt has been spent on this run
+       * already. Any one of them missing means the gaps are reported as gaps —
+       * which is a legitimate outcome and the whole reason the state exists.
+       */
+      if (
+        review.state === 'gaps' &&
+        body.canRemediate &&
+        settings.acceptanceRemediationEnabled &&
+        !(await remediationAlreadyAttempted(runId))
+      ) {
+        const outcome = await performAcceptanceRemediation(
+          runId,
+          review.unmet.map((u) => ({ description: u.description, observed: u.observed })),
+          actor,
+        ).catch((err) => ({ artefactsCreated: 0, note: `Remediation failed: ${(err as Error).message}` }));
+
+        await noteRemediation(runId, outcome.note, actor);
+        // Re-checked against the SAME criteria. Remediation earns a pass by
+        // producing the missing work, never by lowering the bar.
+        review = await reviewAcceptance(runId, { actor });
+      }
+
+      const detail = await getRunAcceptance(runId);
+      const control = await buildControlEnvelope(worker.id);
+
+      return reply.send({
+        control,
+        state: review.state,
+        criteriaChecked: review.results.length,
+        unmet: review.unmet.length,
+        artefactsProduced: detail ? countArtefacts(detail) : 0,
+        externalSourcesUsed: (await tallySources(runId)).external,
+        remediationAttempted: review.remediationAttempted,
+        // One line each, never the artefact text: a worker that logged the work
+        // itself would be writing PAC material into a VM's log file.
+        unmetSummary: review.unmet.map((u) => `${u.description} — ${u.observed}`.slice(0, 600)),
+      });
+    });
   });
 }
+
+/** Artefacts counted from the stored review rather than re-queried. */
+const countArtefacts = (review: { results: Array<{ kind: string; observed: string }> }): number => {
+  const counted = review.results.find((r) => r.kind === 'artefact_count');
+  const match = counted ? /^(\d+) artefact/.exec(counted.observed) : null;
+  return match ? Number(match[1]) : 0;
+};
 
 /** Worker-authored audit events carry the worker's NAME, not its uuid. */
 const workerActor = (worker: { id: string; name: string }) =>

@@ -1,5 +1,6 @@
 import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import type {
+  AcceptanceState,
   ApprovalDto,
   CompanyContextRef,
   CreateRunRequest,
@@ -41,6 +42,7 @@ import { requireActiveRevision, toContextRef } from './company-context/service.j
 import { recordContextBinding } from './company-context/bindings.js';
 import { requireTaskWithProject } from './tasks.js';
 import { appendSystemLog } from './logs.js';
+import { freezeCriteriaForRun, reviewAcceptance } from './acceptance.js';
 
 /**
  * The run service owns the control loop.
@@ -439,6 +441,16 @@ export async function approveRun(
       metadata: { overnightDeadlineAt: overnightDeadlineAt?.toISOString() ?? null },
     });
 
+    /*
+     * Phase 4: freeze the brief's acceptance criteria onto the run.
+     *
+     * A COPY, taken at the moment of authorisation. The brief may be revised
+     * while the run is in flight — a normal thing to happen overnight — and the
+     * run must go on being measured against what a person actually approved,
+     * in either direction.
+     */
+    await freezeCriteriaForRun(runId, tx);
+
     await appendSystemLog(tx, runId, `Run approved by ${actor.label} and queued for dispatch.`);
   });
 
@@ -807,6 +819,29 @@ export async function completeRun(
   worker: { id: string; name: string },
   input: { outcome: RunOutcome; stopReason?: StopReason | null; summary?: string; confidence?: number | null },
 ): Promise<RunStatus> {
+  /*
+   * ACCEPTANCE IS CHECKED BEFORE THE RUN IS CLOSED, NOT AFTER.
+   *
+   * Outside the transaction because it reads artefacts, sources and the audit
+   * trail, and — where a semantic criterion exists — may call a model. None of
+   * that belongs inside a lock on the run row.
+   *
+   * Deterministic-only here (`allowModel: false`), because this is the
+   * BACKSTOP. The worker performs the full review while it still holds the
+   * lease, which is the only moment remediation is possible. This second pass
+   * exists so a worker that skipped it — a crash, an old build, a bug — cannot
+   * produce a clean `completed` for work nobody checked.
+   *
+   * Sprint 3.3's rule that a run producing nothing FAILS is untouched: that is
+   * decided on the worker and arrives here as `outcome: failed`.
+   */
+  let acceptanceState: AcceptanceState = 'not_assessed';
+  if (input.outcome === 'succeeded') {
+    acceptanceState = await reviewAcceptance(runId, { allowModel: false })
+      .then((review) => review.state)
+      .catch(() => 'not_assessed' as AcceptanceState);
+  }
+
   return db.transaction(async (tx) => {
     const [run] = await tx.select().from(runs).where(eq(runs.id, runId)).for('update').limit(1);
     if (!run) throw AppError.notFound('Run');
@@ -825,7 +860,23 @@ export async function completeRun(
       input.outcome === 'cancelled' &&
       (run.stopReason === 'overnight_cutoff' || run.stopReason === 'budget_exhausted');
 
-    const target: RunStatus = guardrailStop ? 'stopped_by_guardrail' : OUTCOME_TO_STATUS[input.outcome];
+    /*
+     * A run that delivered, with required criteria unmet, is `completed_with_gaps`.
+     *
+     * Not `completed`, because every list, filter, dashboard tile and report in
+     * this system reads `status` — and commissioning proved what happens when a
+     * shortfall exists only somewhere they do not join to.
+     *
+     * Not `failed`, because work was produced and is worth reading. Filing it
+     * with failures would send somebody looking for a crash that never happened.
+     */
+    const gapped = input.outcome === 'succeeded' && acceptanceState === 'gaps';
+
+    const target: RunStatus = guardrailStop
+      ? 'stopped_by_guardrail'
+      : gapped
+        ? 'completed_with_gaps'
+        : OUTCOME_TO_STATUS[input.outcome];
     const eventType = guardrailStop ? ('run.stopped_by_guardrail' as const) : OUTCOME_TO_EVENT[input.outcome];
 
     // A stop reason already on the row was set by the control plane (an
@@ -833,7 +884,13 @@ export async function completeRun(
     const stopReason: StopReason =
       (run.stopReason as StopReason | null) ??
       input.stopReason ??
-      (input.outcome === 'succeeded' ? 'completed' : input.outcome === 'failed' ? 'failed' : 'cancelled_by_user');
+      (gapped
+        ? 'acceptance_gaps'
+        : input.outcome === 'succeeded'
+          ? 'completed'
+          : input.outcome === 'failed'
+            ? 'failed'
+            : 'cancelled_by_user');
 
     await transition(tx, {
       runId,
@@ -859,9 +916,20 @@ export async function completeRun(
       .set({ status: 'idle', currentRunId: null, updatedAt: new Date() })
       .where(eq(workers.id, worker.id));
 
+    /*
+     * A task whose run fell short is NOT `done`.
+     *
+     * It goes back to `ready`, which is the honest state: the work exists and
+     * is worth reading, and something a person asked for is still missing.
+     * Marking it done would put the shortfall behind the one field most likely
+     * to be the only thing anybody looks at.
+     */
     await tx
       .update(tasks)
-      .set({ status: input.outcome === 'succeeded' ? 'done' : 'blocked', updatedAt: new Date() })
+      .set({
+        status: gapped ? 'ready' : input.outcome === 'succeeded' ? 'done' : 'blocked',
+        updatedAt: new Date(),
+      })
       .where(eq(tasks.id, run.taskId));
 
     return target;

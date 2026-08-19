@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   artefactContentSchema,
   deliverableOutlineSchema,
+  frameUntrusted,
   emptyResearchState,
   handoffBriefContentSchema,
   RESEARCH_LIMITS,
@@ -38,7 +39,9 @@ import { getSettings } from '../settings.js';
 import { requireReasoningProvider } from '../model/provider.js';
 import { createArtefact } from '../artefacts.js';
 import { appendSystemLog } from '../logs.js';
+import { injectionNoteFor, scanForInjection } from '../../domain/injection.js';
 import { projectAllowsExternalResearch, runTool, type ToolContext } from './tools.js';
+import { persistToolSources, searchResultHostsFor } from './sources.js';
 
 /**
  * Executing general work (Sprint 3.3 §13).
@@ -317,6 +320,20 @@ export async function performResearchStep(
       companyContextRevisionId: context.companyContextRevisionId,
       allowedResearchDomains: settings.allowedResearchDomains,
       externalResearchEnabled: settings.externalResearchEnabled,
+      // Phase 4: resolved from settings HERE, so the model cannot name a
+      // provider, widen a result count, or ask to fetch outside the allowlist.
+      webSearchProvider: settings.webSearchProvider,
+      maxWebResults: settings.maxWebResultsPerSearch,
+      allowFetchFromSearchResults: settings.allowFetchFromSearchResults,
+      vendorDomains: settings.allowedResearchDomains,
+      /*
+       * Hosts this run has already seen in its OWN search results.
+       *
+       * Read once per step rather than per call, and read from the persisted
+       * record rather than from the in-memory state, so a run that reconnected
+       * mid-night does not silently lose the widening it had earned.
+       */
+      searchResultHosts: settings.allowFetchFromSearchResults ? await searchResultHostsFor(runId) : [],
     };
 
     for (const call of output.toolCalls.slice(0, RESEARCH_LIMITS.maxToolCallsPerStep)) {
@@ -334,6 +351,10 @@ export async function performResearchStep(
       toolResults.push(result);
       toolCallsMade += 1;
       newSources.push(...result.sources);
+
+      // Provenance into its own table, so `external_sources_used` is a fact a
+      // predicate can check rather than a number parsed out of a blob.
+      await persistToolSources({ runId, taskId: context.taskId, result }, actor);
 
       await record(db, {
         actor,
@@ -521,7 +542,37 @@ function buildPrompt(plan: ResearchPlan, state: ResearchState, decision: LoopDec
     lines.push('  (none yet)');
   } else {
     for (const source of state.sources.slice(0, 60)) {
-      lines.push(`  [${source.ref}] ${source.label}`, `    ${source.excerpt.slice(0, 1200)}`);
+      if (!source.external) {
+        lines.push(`  [${source.ref}] ${source.label}`, `    ${source.excerpt.slice(0, 1200)}`);
+        continue;
+      }
+
+      /*
+       * External content is FRAMED as untrusted (Part E §20).
+       *
+       * This is the third of four defences and not the one the design rests
+       * on — a web page cannot change Mac authority because the protocol has
+       * no field in which an authority change could be expressed, and nothing
+       * parses retrieved text as instructions because there is no code path
+       * that could.
+       *
+       * Framing is worth having anyway because it costs nothing and a model
+       * told plainly that a block is hostile data behaves better than one left
+       * to infer it. `frameUntrusted` strips the delimiter sequence from the
+       * content, so a page cannot close its own quotation and continue as
+       * though it were the system prompt.
+       */
+      lines.push(
+        `  [${source.ref}] ${source.label}${source.injectionSuspected ? ' — FLAGGED' : ''}`,
+        frameUntrusted({
+          label: source.label,
+          url: source.url ?? source.ref,
+          text: source.excerpt.slice(0, 1200),
+        }),
+      );
+      if (source.injectionSuspected) {
+        lines.push(injectionNoteFor(scanForInjection(source.excerpt)));
+      }
     }
   }
   lines.push('');
@@ -857,6 +908,121 @@ export async function recordReasoningUsage(
     model: usage.model,
     metadata: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Remediation
+// ---------------------------------------------------------------------------
+
+const REMEDIATION_SYSTEM = [
+  STEP_SYSTEM,
+  '',
+  'THIS IS A REMEDIATION PASS. The work you produced has been checked against the acceptance criteria a',
+  'human approved, and specific criteria were NOT met. You are being given one chance to produce what is',
+  'missing.',
+  '',
+  'Do not restate what you already delivered, and do not argue that a criterion did not need to be met —',
+  'that is not a thing you can do here. Write the missing deliverable, using the sources and findings you',
+  'already have. If the evidence does not support writing it, say so in `unknowns` and produce nothing;',
+  'an invented document is worse than an acknowledged gap.',
+  '',
+  'Reply with JSON only:',
+  '{"type":string,"title":string,"format":"markdown","body":string,"summary":string,"findings":[...]}',
+].join('\n');
+
+/**
+ * One bounded attempt to fill the gaps (Part F §24.6).
+ *
+ * ---------------------------------------------------------------------------
+ * WHY EXACTLY ONE, AND WHY BEFORE COMPLETION
+ *
+ * Before completion, because that is the only moment the worker still holds the
+ * lease and the night still has time in it. Afterwards the run is terminal and
+ * the honest way to produce a missing deliverable is a new run, which leaves
+ * the record of the shortfall intact.
+ *
+ * Exactly one, because a loop that retries until the criteria pass is a loop
+ * that will eventually produce something shaped like the criterion rather than
+ * something true. The ceiling is what keeps "remediation" from becoming
+ * "generate until the check goes green".
+ * ---------------------------------------------------------------------------
+ */
+export async function performAcceptanceRemediation(
+  runId: string,
+  unmet: ReadonlyArray<{ description: string; observed: string }>,
+  actor: Actor = SYSTEM_ACTOR,
+): Promise<{ artefactsCreated: number; note: string }> {
+  if (unmet.length === 0) return { artefactsCreated: 0, note: 'Nothing was unmet.' };
+
+  const provider = await requireReasoningProvider('Acceptance remediation');
+  const loaded = await loadStepState(runId);
+  const { plan, state, context } = loaded;
+
+  let created = 0;
+  const attempted: string[] = [];
+
+  /*
+   * One call per missing deliverable, not one call for all of them.
+   *
+   * The same lesson the write-up learned the expensive way at commissioning: a
+   * single response is a fixed budget shared between every document, so a long
+   * one starves the rest and truncation costs the whole set instead of one.
+   */
+  for (const gap of unmet.slice(0, RESEARCH_LIMITS.maxArtefactsPerRun)) {
+    attempted.push(gap.description);
+
+    const completion = await provider.complete({
+      system: REMEDIATION_SYSTEM,
+      prompt: [
+        buildPrompt(plan, state, { action: 'finalise', reason: 'Filling an unmet acceptance criterion.' }, context.taskTitle),
+        '',
+        '--- THE CRITERION THAT WAS NOT MET ---',
+        gap.description,
+        `What the check observed: ${gap.observed}`,
+      ].join('\n'),
+      maxTokens: config.model.artefactMaxTokens,
+      expectJson: true,
+    });
+
+    const artefact = parseJsonCandidates(completion.text, artefactContentSchema);
+    await recordReasoningUsage(runId, {
+      provider: provider.name,
+      model: completion.model,
+      inputTokens: completion.usage.inputTokens,
+      outputTokens: completion.usage.outputTokens,
+    });
+
+    if (!artefact) continue;
+
+    await createArtefact(
+      {
+        taskId: context.taskId,
+        runId,
+        content: { ...artefact, findings: artefact.findings.length ? artefact.findings : state.findings },
+        usage: {
+          provider: provider.name,
+          model: completion.model,
+          inputTokens: completion.usage.inputTokens,
+          outputTokens: completion.usage.outputTokens,
+        },
+        companyContextRevisionId: context.companyContextRevisionId,
+      },
+      actor,
+    ).catch(async (err) => {
+      await appendSystemLog(db, runId, `A remediation artefact could not be stored: ${(err as Error).message}`);
+      return null;
+    });
+
+    created += 1;
+  }
+
+  const note =
+    created === 0
+      ? `Attempted ${attempted.length} unmet criterion(s) and produced nothing further. The evidence did not support it.`
+      : `Attempted ${attempted.length} unmet criterion(s) and produced ${created} further deliverable(s).`;
+
+  await appendSystemLog(db, runId, note);
+  return { artefactsCreated: created, note };
 }
 
 /** The stored plan and state, for the UI and the report. */
