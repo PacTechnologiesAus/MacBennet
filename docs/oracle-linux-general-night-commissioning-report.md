@@ -4,7 +4,7 @@
 **Plan:** `docs/oracle-linux-general-night-commissioning.md`
 **Target:** Oracle Cloud VM `mac-bennet-pc`, `161.33.80.88`, ap-melbourne-1
 **Public name:** `mac.pac-technologies.com.au`
-**Started:** 2026-08-18 22:53 UTC · **This revision:** 2026-08-19 03:25 UTC
+**Started:** 2026-08-18 22:53 UTC · **This revision:** 2026-08-19 05:30 UTC
 
 Where this report and the plan disagree, this report wins. Where something was not exercised, it
 says `BLOCKED` or `NOT EXERCISED` and names what is missing rather than implying it passed.
@@ -29,10 +29,12 @@ behaviour as proven.**
 | DNS, OCI ingress, public HTTP | Done, observed from off-host |
 | TLS, HTTPS-only, HSTS, renewal | Done, observed |
 | fail2ban login jail | Done, ban proven into nftables |
-| Reasoning provider | Configured — real API call succeeded; §10.1 validation still to run |
+| Reasoning provider | Commissioned — four real runs, §10.1 exercised (see §13) |
 | Company credential least-privilege | Done — read proven, write refused by two probes |
 | Project night-shift approval | **AWAITING HUMAN** — control now exists, not clicked |
-| Acceptance run | **NOT STARTED** — gated only on the two human approvals |
+| Acceptance run | **Completed on the fourth attempt** — 1 artefact, 8 findings, 0 truncations |
+| Morning report | Delivered, exactly once per shift, sender and idempotency verified |
+| Defects found by commissioning | **10**, all fixed on this branch |
 
 ---
 
@@ -860,3 +862,142 @@ consciously accepted rather than skipped.
 permitted, no brief status was altered, and no database row was mutated to bypass a gate. The
 approval control added in §5.3 was built so a person could perform the grant, not so the machine
 could.
+
+---
+
+## 13. The acceptance run
+
+Four attempts. Three failed, and each failure was a real defect that no test in the repository could
+have caught. They are recorded in order, because the sequence is the evidence: every one of them was
+invisible until a real model was on the other end of the call.
+
+| # | Run | Outcome | Cause | Fix |
+|---|---|---|---|---|
+| 1 | `a31f3bed` | failed | Every model call had a hardcoded 60s ceiling with no configuration path. Six retries, each burning a full minute. | `MAC_MODEL_TIMEOUT_MS`, default 300s |
+| 2 | `b41164ff` | **"succeeded" with 0 artefacts** | The write-up asked for every deliverable in one JSON object; it truncated at 8,000 tokens, parsed to nothing, and the run reported success. | One call per deliverable; `stop_reason` captured; an empty run now fails |
+| 3 | `c3d7c9a9` | failed, 0 findings | Every *step* truncated at 3,000 tokens, so no findings were ever recorded and the write-up had nothing to write about. | Step ceiling 3,000 to 12,000 |
+| 4 | `3b505e16` | **completed** | — | — |
+
+### 13.1 What run 4 produced
+
+```
+steps        8              lookups      25 across 53 sources
+findings     8              artefacts    1  (11,888 characters)
+truncations  0              tokens       74,291 in / 18,214 out
+```
+
+The artefact is a `recommendation` titled "Recommendation: PAC Project Registry, Project Document
+Controller & Sales Engineer — Build Viability and Rough Costs", marked in its own opening as
+"Research/recommendation only — no commitments made, per AUTHORITY.md".
+
+**The task stayed non-implementing.** That is the acceptance criterion the plan's §18.2 named, and
+the one that had already gone wrong once: the classifier previously read "Document Controller" as an
+instruction to write documentation and "Do not implement anything" as evidence *for* coding. It did
+not do so here.
+
+### 13.2 The evidence safeguards, in front of a real model at last
+
+Every finding as stored, with its class, confidence and source count:
+
+```
+pac_fact   0.90   2 sources   The Project Registry is a planned canonical project identity layer...
+pac_fact   0.90   3 sources   The Project Document Controller is a planned specialist agent...
+pac_fact   0.90   3 sources   The Sales Engineer is a planned specialist agent...
+pac_fact   0.85   3 sources   All three are explicitly planned, not built
+pac_fact   0.70   3 sources   ...listed only as Planned
+unknown    0.59   0 sources   No source contains a cost estimate or build effort
+unknown    0.59   3 sources   No PAC company source describes...
+pac_fact   0.85   4 sources   All three described only at a conceptual level
+```
+
+Both `unknown` findings sit at **exactly 0.59** — the ungrounded-confidence cap, firing against a
+real model for the first time. No fabricated citations were recorded. Every `pac_fact` carries
+sources that were actually retrieved.
+
+**It reported what it could not establish rather than filling the gap.** The task asked for "a rough
+cost for each". PAC documentation contains no cost estimates, so Mac produced none and said why. The
+artefact also states plainly that `project_memory_search`, `prior_run_search` and `brief_search`
+returned nothing, "so no prior project history, prior runs, or approved brief content could be
+cited, and I have not assumed any exists."
+
+That is the design working: an honest partial answer instead of a confident invented one.
+
+### 13.3 Two limitations, stated rather than buried
+
+1. **One artefact, where the task description names five.** The description asks for three briefs, a
+   cross-system architecture recommendation and a build order. The handoff brief derived at
+   discovery reduced that to "a written recommendation covering all three, with a rough cost for
+   each", and the run correctly followed the brief. The narrowing happened at discovery, not during
+   execution. Whether that brief is the right brief is a human judgement, and not one this
+   commissioning should make.
+2. **The run is a scoping pass, not the investigation the description asks for.** Eight findings
+   from 53 sources on a question this size is thin. With external research off and no repository,
+   PAC's seven company documents were effectively the only well available.
+
+**What is therefore commissioned** is the general execution path: it runs end to end on real
+infrastructure, against a real model, producing cited and honestly-classified output, and it fails
+loudly when it produces nothing. **What is not claimed** is that this particular deliverable answers
+the question the task asked.
+
+---
+
+## 14. Morning report and mail
+
+Delivered through the real Microsoft Graph path from the VM.
+
+| | |
+|---|---|
+| Sender | `mac.bennet@pac-technologies.com.au` |
+| Recipient | one approved internal address; `allowed_recipient_domains` is `pac-technologies.com.au` |
+| Provider | `graph`, four deliveries, all `sent`, `attempts = 1` each |
+| Provider message id | `null` — Graph returns none. The plan's §12 records this as the correct value, not a failure |
+| Idempotency key | `morning-report:<shiftId>`, one per shift |
+| Audit | `report.email_attempted` 4, `report.email_delivered` 4 |
+
+**Idempotency proven, not assumed.** A forced re-sweep after delivery returned
+`{"sent":0,"failed":0,"dead":0}` and the delivery count stayed at 4. Sprint 3.1 defect 24 —
+concurrent sweepers double-sending — has not regressed.
+
+The report links back to `https://mac.pac-technologies.com.au/night-shift`, which works only because
+of the `MAC_APP_URL` fix in §6.5. Before it, every link in the first real morning report would have
+pointed at a loopback address on a machine the reader is not sitting at.
+
+### 14.1 The email that proves why the empty-run fix mattered
+
+The 05:02 delivery, sent before that fix, was subject-lined:
+
+> **Mac overnight — 1 done (2026-08-19)**
+
+for run 2 — the run that produced **zero artefacts**. A human reading their inbox would have been
+told a night's investigation finished successfully. That is the silent-empty-success failure
+arriving at its actual destination, and it is the argument for the fix in one line.
+
+---
+
+## 15. Defects found by commissioning
+
+Ten, all fixed on this branch. Four were found by reading configuration; six by running the thing.
+
+| # | Defect | Severity |
+|---|---|---|
+| 1 | Login rate limiter fully bypassable via spoofed `X-Forwarded-For` | high |
+| 2 | fail2ban jail read journald, not the nginx log — would never have banned anyone | high |
+| 3 | Conflicting duplicate security headers on `/api` | low |
+| 4 | TLS 1.0/1.1 permitted at socket level | medium |
+| 5 | `WEB_ORIGIN`/`MAC_APP_URL` still loopback — report links unusable | medium |
+| 6 | Worker suite could not pass on a machine with no `.env` in the checkout | medium |
+| 7 | No way to change a password or create a user, anywhere in the product | high |
+| 8 | Every model call capped at 60s, unconfigurable | high |
+| 9 | Write-up truncated, zero artefacts, **reported as success** | high |
+| 10 | Every research step truncated at 3,000 tokens, so no findings | high |
+
+Defects 8, 9 and 10 share one cause worth naming on its own: **every token and timeout number in the
+reasoning path was chosen when the only consumer was `ScriptedModelProvider`**, which answers
+instantly and briefly. The suite could not distinguish a 60-second ceiling from a 300-second one, or
+a 3,000-token reply from a 12,000-token one, because a fixture never needed either. That is less a
+gap in coverage than a class of assumption only a real dependency can falsify — exactly what the
+plan's risk 6 predicted, landing lower in the stack than expected.
+
+The safeguard layer behaved correctly throughout. It refused to salvage structure from truncated
+JSON rather than inventing plausible findings, and once `stop_reason` was captured it diagnosed its
+own failure inside a single run instead of three.
