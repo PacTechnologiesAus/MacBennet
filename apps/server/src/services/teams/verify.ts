@@ -118,6 +118,17 @@ interface KeyCache {
 let cache: KeyCache | null = null;
 
 /**
+ * Set when a test has installed its own key set.
+ *
+ * Without it, the test that asserts an UNKNOWN `kid` is rejected would trigger
+ * the refresh-once path, reach out to Microsoft for real, and replace the
+ * test's key with the production key set — so every subsequent test in the file
+ * would fail with "not published". A suite that quietly depends on the internet
+ * is a suite that fails differently on an aeroplane than in CI.
+ */
+let pinned = false;
+
+/**
  * Cached for an hour, and refreshed once on an unknown `kid`.
  *
  * Microsoft rotates signing keys, and a cache with no refresh path fails closed
@@ -132,6 +143,8 @@ let cache: KeyCache | null = null;
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 async function loadKeys(force = false): Promise<Map<string, JsonWebKey>> {
+  // A pinned cache is never refreshed from the network, whatever `force` says.
+  if (pinned && cache) return cache.keys;
   if (!force && cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) return cache.keys;
 
   const metadataResponse = await fetch(config.teams.openIdMetadataUrl, { signal: AbortSignal.timeout(15_000) });
@@ -157,6 +170,7 @@ async function loadKeys(force = false): Promise<Map<string, JsonWebKey>> {
 /** Test seam. The suite installs a local key set rather than reaching Microsoft. */
 export function __setKeyCacheForTests(keys: Map<string, JsonWebKey> | null): void {
   cache = keys ? { keys, fetchedAt: Date.now() } : null;
+  pinned = keys !== null;
 }
 
 // ---------------------------------------------------------------------------

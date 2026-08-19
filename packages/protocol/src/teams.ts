@@ -195,6 +195,21 @@ export type TeamsCardAction = z.infer<typeof teamsCardActionSchema>;
  * `evil-botframework.com` cannot match `botframework.com`.
  */
 export const TEAMS_SERVICE_HOSTS: readonly string[] = [
+  /*
+   * `smba.trafficmanager.net` is where Teams actually replies.
+   *
+   * This is the host every real Teams activity nominates —
+   * https://smba.trafficmanager.net/amer/, /emea/, /apac/ — and its absence
+   * from the first version of this list meant every genuine message would have
+   * been rejected as "not a Bot Framework service host". Found by the
+   * integration test, which uses the real value rather than a plausible one.
+   *
+   * Deliberately the SPECIFIC host and not `trafficmanager.net`, which is
+   * Azure's shared traffic-manager domain and would admit anybody's endpoint.
+   */
+  'smba.trafficmanager.net',
+  /** Government cloud. */
+  'smba.infra.gov.teams.microsoft.us',
   'botframework.com',
   'botframework.azure.us',
   'skype.com',
