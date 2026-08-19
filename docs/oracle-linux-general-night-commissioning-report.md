@@ -4,7 +4,7 @@
 **Plan:** `docs/oracle-linux-general-night-commissioning.md`
 **Target:** Oracle Cloud VM `mac-bennet-pc`, `161.33.80.88`, ap-melbourne-1
 **Public name:** `mac.pac-technologies.com.au`
-**Started:** 2026-08-18 22:53 UTC · **This revision:** 2026-08-19 02:25 UTC
+**Started:** 2026-08-18 22:53 UTC · **This revision:** 2026-08-19 03:15 UTC
 
 Where this report and the plan disagree, this report wins. Where something was not exercised, it
 says `BLOCKED` or `NOT EXERCISED` and names what is missing rather than implying it passed.
@@ -30,9 +30,9 @@ behaviour as proven.**
 | TLS, HTTPS-only, HSTS, renewal | Done, observed |
 | fail2ban login jail | Done, ban proven into nftables |
 | Reasoning provider | **BLOCKED** — awaiting `ANTHROPIC_API_KEY` |
-| Company credential least-privilege | **BLOCKED** — awaiting fine-grained PAT |
+| Company credential least-privilege | Done — read proven, write refused by two probes |
 | Project night-shift approval | **AWAITING HUMAN** — control now exists, not clicked |
-| Acceptance run | **NOT STARTED** — gated on the three rows above |
+| Acceptance run | **NOT STARTED** — gated on the API key and the two approvals |
 
 ---
 
@@ -505,9 +505,98 @@ Mac needs `Contents: Read`. It holds admin on a private repository. The provider
 no write is *performed* — but "no write capability is required" and "no write capability is held"
 are different claims and only the first was true.
 
-**Status: BLOCKED pending the operator's replacement** — a fine-grained PAT scoped to
-`PacTechnologiesAus/Company` alone with `Contents: Read` and nothing else. The "after" measurement
-will be recorded here using the same method.
+### 7.2 The credential was replaced — measured before and after
+
+The operator created a fine-grained PAT under **Mac's own GitHub identity**, scoped to the Company
+repository with `Contents: Read`. It was installed into `/etc/mac-bennett/control-plane.env`
+(`root:mac`, `0640`) without the value passing through a chat transcript, a shell history or a
+command argument.
+
+| | Before | After |
+|---|---|---|
+| Kind | `gho_` OAuth token, 40 chars | `github_pat_` fine-grained PAT, 93 chars |
+| Identity | `KasperPac` (a person) | **`MacBennetPac`** (Mac's own account, user `318457475`) |
+| `x-oauth-scopes` | `gist, read:org, repo, workflow` | absent — correct for a fine-grained token |
+| Company `admin` | `true` | **`false`** |
+| Company `maintain` | `true` | **`false`** |
+| Company `push` | `true` | **`false`** |
+| Company `pull` | `true` | `true` |
+
+**Read access — proven.** `GET /repos/PacTechnologiesAus/Company` → `200`;
+`GET contents/COMPANY.md` → `200`; `git clone` succeeds and resolves `HEAD` to
+`83ac4a0c03fb882b3b9050f05d718eb2164369db`, containing all seven mandatory documents plus
+`context.yaml` and `README.md`. Refresh through Mac's own API returns `status: fresh`,
+`consecutiveFailures: 0`, revision `valid`. The `company-live` suite passes 6/6 on the new
+credential.
+
+**No write capability — proven by attempting writes, not by reading the permission table.** Two
+independent probes:
+
+```
+PUT /repos/PacTechnologiesAus/Company/contents/.mac-write-probe
+  -> HTTP 403  "Resource not accessible by personal access token"
+git push origin HEAD:refs/heads/mac-write-probe
+  -> remote: Write access to repository not granted.   403
+```
+
+Both refused. Confirmed afterwards that nothing was created: the file path returns `404` and
+`git/refs/heads/mac-write-probe` returns `404`. The probes were deliberately harmless — an empty
+commit and a small file — and neither reached the repository.
+
+**No write capability is required.** The refresh path only ever clones and reads, and it completed
+end to end on a credential that demonstrably cannot write. That is the difference between the two
+claims the plan distinguished: previously only "no write is performed" was true; now "no write
+capability is held" is true as well.
+
+**Scope — narrower than the org.** The token can see exactly two repositories: `Company` (private,
+granted) and `MacBennet` (**public**, and therefore visible to any authenticated token regardless of
+scope). Other private org repositories return `404`. An intermediate probe of mine wrongly read
+`MacBennet` returning `200` as evidence the token was too broad; it is not, and the corrected test
+distinguishes private reachability from public visibility.
+
+**Old credential removed from disk.** Two `control-plane.env` backups still contained the retired
+`gho_` token and were `shred -u`'d. `grep` confirms no `gho_` string remains anywhere under
+`/etc/mac-bennett`. The retired token should still be revoked on GitHub — that is a human action and
+it is listed in §12.
+
+**Leak check on the new value**, re-run with a positive control so the check could be shown capable
+of detecting a present string (a known-present string correctly reported `worktree=2 git-history=2`):
+the new PAT reports `worktree=0 git-history=0` across all 46 commits.
+
+### 7.3 A diagnosis I got wrong, and the failure test it accidentally produced
+
+On first installation the token could not read the repository at all — `404`, and `git clone` failed
+with `403`. I diagnosed this as the PAT having been created with the personal account rather than
+the organisation as its *resource owner*, reasoning from the fact that it could see no private
+repository anywhere.
+
+**That was wrong.** The token had been created correctly against the organisation and was simply
+**pending organisation approval**. Once the operator approved the request, every check above passed
+without the token being changed. The evidence I had was consistent with both explanations and I
+picked one without saying it was a guess.
+
+What that hour did produce, unplanned, is the §19 **company-refresh failure** test on the real path,
+with a genuinely broken credential rather than a simulated one:
+
+```
+status                   cached          <- degraded from "fresh"
+cached                   True
+stale                    False
+allowCached              True
+consecutiveFailures      2
+lastError                remote: Write access to repository not granted. … 403
+revision.commitSha       83ac4a0c…       <- last good revision retained
+revision.validationState valid
+```
+
+and the task's `company_context` requirement remained **satisfied**, because caching is permitted and
+the cache was not yet stale (`company_context_max_stale_hours = 168`).
+
+That is `companyContextSatisfied()`'s three-way rule behaving correctly under real failure: **fresh**
+while the fetch works, **cached** and honest about it when the fetch breaks, and **blocked** only
+once the cache goes stale. Mac degraded visibly instead of pretending, and kept the verbatim git
+error rather than a summarised one. After approval the counter reset to `0` and the status returned
+to `fresh` on its own.
 
 ---
 
@@ -691,7 +780,9 @@ rather than discovered: the investigation will legitimately produce **no** `exte
 2. **A public authentication plane.** Compensated by TLS-only, HSTS, an unspoofable rate limiter
    (§6.1), a working fail2ban jail (§6.2), loopback-only Postgres and control plane, and a rotated
    admin password. The residual exposure is real.
-3. **A non-read-only Company credential.** §7.1, pending replacement.
+3. **The Company credential is now least-privilege** (§7.2) and this risk is closed, with one
+   residual: the retired `gho_` token still exists on GitHub until it is revoked. It is off this
+   machine, but it is not dead.
 4. **The monetary budget cannot see reasoning spend.** Bounded by ceilings; needs a human judgement
    before unattended running.
 5. **A real model has never been through the evidence-classification safeguards.** §8. Finding a
@@ -711,8 +802,29 @@ rather than discovered: the investigation will legitimately produce **no** `exte
   research call.
 * Mail delivery of a real morning report on the real path. Idempotency is covered by the server
   suite against the test database; a real Graph send for the research run is not yet done.
-* Company-refresh failure injection. Deliberately deferred until after the Company credential is
-  replaced, so the two changes to that file cannot collide and be mistaken for each other.
 * The §30 definition-of-done list.
 
 None of these are claimed. This report will be extended, not rewritten, as each is exercised.
+
+---
+
+## 12. Human actions still outstanding
+
+Listed with the screen and the control, so none of them needs guesswork.
+
+| # | Action | Where | Why it is a person's |
+|---|---|---|---|
+| 1 | Provide `ANTHROPIC_API_KEY` | `/etc/mac-bennett/control-plane.env`, then `model_provider = anthropic` | It is a spending decision against a metered account |
+| 2 | Approve `PAC Internal Development` for night shift | `https://mac.pac-technologies.com.au/projects/a67d1055-a5dc-42cc-93b0-2b816c712018` → **Night shift** → *Approve for night shift* | An authority grant: Mac may work here unattended |
+| 3 | Permit `investigation` work | Same page → **Capabilities and permitted work** → tick *Investigation* → **Save** | An authority grant: what kind of work, not just whether |
+| 4 | Revoke the retired `gho_` Company token | GitHub → the account that owns it → Developer settings | It still grants admin on a private repository |
+| 5 | Set or confirm a spending limit on the Anthropic account | Anthropic console | §9.2 — it is the only backstop that actually bounds spend |
+| 6 | Decide whether to buy a `Mac Bennett` monday seat | Commercial | §7B — until then Mac's monday writes carry a person's name |
+
+Items 1–3 gate the acceptance run. Items 4–6 do not, but 5 is the one this report asks to be
+consciously accepted rather than skipped.
+
+**Not done on anyone's behalf, and not worked around:** no project was approved, no task kind was
+permitted, no brief status was altered, and no database row was mutated to bypass a gate. The
+approval control added in §5.3 was built so a person could perform the grant, not so the machine
+could.
