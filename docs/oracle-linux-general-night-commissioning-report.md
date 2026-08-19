@@ -24,6 +24,8 @@ behaviour as proven.**
 | Worker enrolment, heartbeat, rotation, reconnect | Done, observed |
 | Bubblewrap containment | Done, 18/18 against the real provider |
 | Company context | Done, 7/7 documents, `valid`, SHA `83ac4a0` |
+| Test suites on the VM | Done — 805 server, 18 sandbox, 6 company-live, 37 monday-live |
+| Secret leakage | Done — every credential clean across worktree and 43 commits |
 | DNS, OCI ingress, public HTTP | Done, observed from off-host |
 | TLS, HTTPS-only, HSTS, renewal | Done, observed |
 | fail2ban login jail | Done, ban proven into nftables |
@@ -482,6 +484,45 @@ will be claimed until it has.
 
 ---
 
+## 7B. Test suites on the commissioned machine
+
+Run on the VM itself, as the `mac` user, against `mac_bennett_test`. Production `mac_bennett` is
+never pointed at by a test run. Suites run one at a time because 954 MiB does not hold two.
+
+| Suite | Result |
+|---|---|
+| `@mac/server`, full | **805 passed, 59 skipped, 0 failed** (40 files, 13m 41s) |
+| `apps/worker/tests/sandbox-conformance.test.ts` | **18 passed** against real Bubblewrap 0.9.0 |
+| `company-live` (opt-in, real GitHub) | **6 passed** |
+| `monday-commissioning.live` (opt-in, real monday.com) | **37 passed** |
+
+The 59 skips are the opt-in live suites, which are skipped by design in the standard run and were
+then executed deliberately — the two rows beneath.
+
+**Company, live.** Authenticated against the real `PacTechnologiesAus/Company` from this VM, resolved
+`HEAD` of `main` to `83ac4a0c03fb882b3b9050f05d718eb2164369db`, parsed a manifest this build
+understands at `context_version 0.1.0`, and loaded all seven mandatory documents. This proves
+authentication against github.com rather than a `file://` path, which the local-repository tests
+cannot.
+
+**monday.com, live.** Thirty-seven checks against the disposable Sprint 3.1 board `5102345434` and
+its unapproved sibling `5102345613`, covering reads, every write Mac is permitted, the unapproved
+board scoping, and failure classification. No monday item, board or dependency was given to the
+acceptance task; the plan's §16 is explicit that the direct-task case needs none, and none was
+invented.
+
+**The Sprint 3.1 attribution finding is unchanged and still true.** The suite printed:
+
+```
+[identity] Mac's writes are attributed to: Kasper Simonsen (id 61829416)
+```
+
+There is no `Mac Bennett` user in the monday account, so Mac's writes carry the token owner's name.
+That is a commercial decision — a paid seat — not a technical one, and it is outside what this
+commissioning may decide. A test asserts the absence so the claim cannot silently go stale.
+
+---
+
 ## 8A. Secret leakage — verified, and verified again after the first check was worthless
 
 Every credential the system holds was compared, by exact value, against the working tree and against
@@ -578,8 +619,10 @@ rather than discovered: the investigation will legitimately produce **no** `exte
 * Everything in §10.1 of the plan (real-provider validation, including the adversarial input).
 * Failure injection that requires a model: transient provider failure, cancellation of a live
   research call.
-* Mail delivery of a real morning report, and its idempotency on the real path.
-* The monday regression suite.
+* Mail delivery of a real morning report on the real path. Idempotency is covered by the server
+  suite against the test database; a real Graph send for the research run is not yet done.
+* Company-refresh failure injection. Deliberately deferred until after the Company credential is
+  replaced, so the two changes to that file cannot collide and be mistaken for each other.
 * The §30 definition-of-done list.
 
 None of these are claimed. This report will be extended, not rewritten, as each is exercised.
