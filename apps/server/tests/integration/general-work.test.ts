@@ -364,10 +364,18 @@ describe('a general run produces artefacts, evidence and usage', () => {
     await allowResearch(project.id);
     const { runId } = await briefedGeneralRun(project.id);
 
+    /*
+     * The final step is two phases now: an outline naming the deliverables,
+     * then one call per deliverable. See `deliverableOutlineSchema` for why —
+     * a single reply carrying every document truncates and loses all of them.
+     *
+     * The fabricated citation is stated in the OUTLINE, because that is where a
+     * write-up states its findings; the per-document calls write prose.
+     */
     setModelProvider(
       new ScriptedModelProvider([
         JSON.stringify({
-          toolCalls: [],
+          deliverables: [{ type: 'recommendation', title: 'Recommendation', purpose: 'What to build.' }],
           findings: [
             {
               statement: 'PAC mandates a project registry.',
@@ -379,17 +387,15 @@ describe('a general run produces artefacts, evidence and usage', () => {
           ],
           narrative: 'Writing up.',
           unknowns: [],
-          artefacts: [
-            {
-              type: 'recommendation',
-              title: 'Recommendation',
-              format: 'markdown',
-              body: 'Build it.',
-              summary: '',
-              findings: [],
-            },
-          ],
           blockerProposed: null,
+        }),
+        JSON.stringify({
+          type: 'recommendation',
+          title: 'Recommendation',
+          format: 'markdown',
+          body: 'Build it.',
+          summary: '',
+          findings: [],
         }),
       ]),
     );

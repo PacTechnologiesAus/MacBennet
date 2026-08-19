@@ -55,6 +55,7 @@ export class ScriptedModelProvider implements ModelProvider {
       text,
       model: 'scripted',
       usage: { inputTokens: request.prompt.length, outputTokens: text.length },
+      stopReason: 'end_turn',
     };
   }
 }
@@ -122,6 +123,7 @@ export class AnthropicModelProvider implements ModelProvider {
       const parsed = JSON.parse(text) as {
         content?: Array<{ type: string; text?: string }>;
         model?: string;
+        stop_reason?: string;
         usage?: { input_tokens?: number; output_tokens?: number };
       };
 
@@ -135,6 +137,8 @@ export class AnthropicModelProvider implements ModelProvider {
           inputTokens: parsed.usage?.input_tokens ?? null,
           outputTokens: parsed.usage?.output_tokens ?? null,
         },
+        // 'max_tokens' here means truncated, not finished. See ModelCompletionResult.
+        stopReason: parsed.stop_reason ?? null,
       };
     } finally {
       clearTimeout(timer);
@@ -207,7 +211,7 @@ export class OpenAIModelProvider implements ModelProvider {
       if (!response.ok) throw new Error(`Model provider returned ${response.status}: ${text.slice(0, 300)}`);
 
       const parsed = JSON.parse(text) as {
-        choices?: Array<{ message?: { content?: string } }>;
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
         model?: string;
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
@@ -219,6 +223,15 @@ export class OpenAIModelProvider implements ModelProvider {
           inputTokens: parsed.usage?.prompt_tokens ?? null,
           outputTokens: parsed.usage?.completion_tokens ?? null,
         },
+        /*
+         * OpenAI calls it finish_reason and says 'length' where Anthropic says
+         * 'max_tokens'. Normalised to Anthropic's spelling so one caller-side
+         * check covers both providers; anything else is passed through as-is.
+         */
+        stopReason:
+          parsed.choices?.[0]?.finish_reason === 'length'
+            ? 'max_tokens'
+            : (parsed.choices?.[0]?.finish_reason ?? null),
       };
     } finally {
       clearTimeout(timer);

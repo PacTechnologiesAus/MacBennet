@@ -122,12 +122,36 @@ export async function runGeneralTaskJob(
    * finished investigation with nothing in it reads as "looked, found nothing",
    * which is a claim nobody made.
    */
-  const summary =
-    artefacts > 0
-      ? `${general.taskKind} work completed in ${steps} step(s); ${artefacts} artefact(s) produced. ${lastNarrative}`.trim()
-      : `${general.taskKind} work ran for ${steps} step(s) but produced NO artefacts. ${lastNarrative}`.trim();
-
   if (blocker) ctx.log(`Mac believes a human decision is needed: ${blocker}`, 'stderr');
+
+  /*
+   * A run that produced nothing FAILS. It does not complete with a sad sentence.
+   *
+   * This block used to write "produced NO artefacts" into the summary and then
+   * return success. Commissioning showed exactly what that is worth: the first
+   * real run finished 8 steps, 23 lookups across 37 sources and 9 findings, hit
+   * the token ceiling while writing up, produced nothing — and reported
+   * `succeeded`. The prose was honest and every machine-readable signal said the
+   * night had gone fine.
+   *
+   * Unattended at 03:00 that is the worst available outcome, because a morning
+   * report on a "finished" investigation with nothing in it reads as "looked,
+   * found nothing" — a claim nobody made and the evidence model exists to
+   * prevent. A failed run is visible, retryable and true.
+   */
+  if (artefacts === 0) {
+    const detail =
+      `${general.taskKind} work ran for ${steps} step(s) and produced NO artefacts. ` +
+      `${lastNarrative}`.trim();
+    ctx.log(detail, 'stderr');
+    throw new Error(
+      `${detail} A research run that delivers nothing is reported as failed rather than complete, ` +
+        'so it is visible and can be retried.',
+    );
+  }
+
+  const summary =
+    `${general.taskKind} work completed in ${steps} step(s); ${artefacts} artefact(s) produced. ${lastNarrative}`.trim();
   ctx.log(summary);
 
   return { summary: summary.slice(0, 2000) };

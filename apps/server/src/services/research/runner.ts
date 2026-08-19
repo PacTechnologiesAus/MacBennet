@@ -1,5 +1,8 @@
 import { eq } from 'drizzle-orm';
+import { z } from 'zod';
 import {
+  artefactContentSchema,
+  deliverableOutlineSchema,
   emptyResearchState,
   handoffBriefContentSchema,
   RESEARCH_LIMITS,
@@ -7,6 +10,8 @@ import {
   researchStateSchema,
   researchStepOutputSchema,
   type ArtefactContent,
+  type ModelCompletionResult,
+  type ModelProvider,
   type ResearchPlan,
   type ResearchSource,
   type ResearchState,
@@ -14,6 +19,7 @@ import {
   type ResearchToolResult,
   type TaskKind,
 } from '@mac/protocol';
+import { config } from '../../config.js';
 import { db, type DbHandle } from '../../db/client.js';
 import { generalRunState, handoffBriefs, projects, runs, runUsage, tasks } from '../../db/schema.js';
 import { AppError } from '../../http/errors.js';
@@ -178,14 +184,35 @@ const STEP_SYSTEM = [
   'inference, recommendation, assumption, unknown.',
 ].join('\n');
 
-const FINALISE_SYSTEM = [
+/** Phase one of the write-up: name the deliverables, do not write them yet. */
+const OUTLINE_SYSTEM = [
   STEP_SYSTEM,
   '',
   'THIS IS THE FINAL STEP. Do not request any more tools; anything you ask for will be ignored.',
-  'Produce the deliverables named in the plan, in `artefacts`. Each artefact needs:',
-  '  {"type":string,"title":string,"format":"markdown","body":string,"summary":string,"findings":[...]}',
+  '',
+  'Do NOT write the deliverables yet. LIST them. Each will be written separately, by its own',
+  'call, with a full budget to itself — so name every document the plan calls for, without',
+  'worrying about length.',
+  '',
+  'Reply with JSON only:',
+  '{"deliverables":[{"type":string,"title":string,"purpose":string}],',
+  ' "findings":[{"statement":string,"evidenceClass":string,"confidence":number,"sources":[string],"reasoning":string}],',
+  ' "narrative":string,"unknowns":[string],"blockerProposed":string|null}',
+  '',
   'type is one of: investigation_report, engineering_brief, architecture_note, recommendation,',
   'markdown_document, structured_data, diagram_description, task_proposal.',
+  'purpose says what the document is for and what it must cover.',
+].join('\n');
+
+/** Phase two: write exactly one of them. */
+const ARTEFACT_SYSTEM = [
+  STEP_SYSTEM,
+  '',
+  'Write ONE deliverable, named below. Ignore every other document in the plan; they are being',
+  'written separately. Use the whole budget on this one.',
+  '',
+  'Reply with JSON only:',
+  '{"type":string,"title":string,"format":"markdown","body":string,"summary":string,"findings":[...]}',
   '',
   'Write the body for an engineer who will act on it: what you were asked, what you established,',
   'what you could not establish, and what you recommend. Say plainly where the evidence is thin.',
@@ -227,15 +254,28 @@ export async function performResearchStep(
 
   const finalising = decision.action === 'finalise';
 
-  const completion = await provider.complete({
-    system: finalising ? FINALISE_SYSTEM : STEP_SYSTEM,
-    prompt: buildPrompt(plan, state, decision, context.taskTitle),
-    maxTokens: finalising ? 8000 : 3000,
-    expectJson: true,
-    ...(options.signal ? { signal: options.signal } : {}),
-  } as Parameters<typeof provider.complete>[0]);
+  /*
+   * The write-up is produced one deliverable per call. See the note on
+   * `deliverableOutlineSchema` for why: a single response is a fixed budget
+   * shared by every artefact, and truncating it loses all of them rather than
+   * the one that overran. That is not hypothetical — it is what the first real
+   * run on the commissioned VM did.
+   */
+  const writeUp = finalising
+    ? await writeDeliverables(provider, plan, state, decision, context, options.signal)
+    : null;
 
-  const parsed = parseStepOutput(completion.text);
+  const completion: ModelCompletionResult = writeUp
+    ? writeUp
+    : await provider.complete({
+        system: STEP_SYSTEM,
+        prompt: buildPrompt(plan, state, decision, context.taskTitle),
+        maxTokens: config.model.stepMaxTokens,
+        expectJson: true,
+        ...(options.signal ? { signal: options.signal } : {}),
+      } as Parameters<typeof provider.complete>[0]);
+
+  const parsed = writeUp ? writeUp.output : parseStepOutput(completion.text);
 
   /*
    * A model that returned nothing usable does not stop the run.
@@ -245,6 +285,23 @@ export async function performResearchStep(
    * night's work hostage to a single unlucky completion.
    */
   const output: ResearchStepOutput = parsed ?? researchStepOutputSchema.parse({ narrative: '' });
+
+  /*
+   * Truncation is not the same as silence, and must not be reported as it.
+   *
+   * `stop_reason: max_tokens` means we cut the model off mid-sentence. Recording
+   * it distinguishes "the model had nothing to say" from "we did not let it
+   * finish", which is precisely the confusion that made the first real run look
+   * successful while delivering nothing.
+   */
+  if (completion.stopReason === 'max_tokens') {
+    await appendSystemLog(
+      db,
+      runId,
+      'The reasoning model was cut off at the token ceiling before it finished. ' +
+        'What it had written up to that point may be incomplete.',
+    );
+  }
 
   // --- Tools ---------------------------------------------------------------
 
@@ -483,6 +540,132 @@ function buildPrompt(plan: ResearchPlan, state: ResearchState, decision: LoopDec
   }
 
   return lines.join('\n');
+}
+
+/**
+ * The write-up, as one call to outline it and one call per document.
+ *
+ * Returns the same shape a single completion would, so the caller's persistence,
+ * usage accounting and audit path are unchanged — the difference is only in how
+ * many times the model was asked. Usage is summed across every call so the run's
+ * recorded cost stays true.
+ *
+ * A document that fails to parse costs that document. The others still land,
+ * and the count of what was asked for versus what arrived is returned so the
+ * caller can refuse to call a run successful when the two disagree.
+ */
+async function writeDeliverables(
+  provider: ModelProvider,
+  plan: ResearchPlan,
+  state: ResearchState,
+  decision: LoopDecision,
+  context: RunContext,
+  signal: AbortSignal | undefined,
+): Promise<{
+  text: string;
+  model: string;
+  usage: { inputTokens: number | null; outputTokens: number | null };
+  stopReason: string | null;
+  output: ResearchStepOutput;
+  requested: number;
+  written: number;
+}> {
+  const ask = (system: string, prompt: string, maxTokens: number) =>
+    provider.complete({
+      system,
+      prompt,
+      maxTokens,
+      expectJson: true,
+      ...(signal ? { signal } : {}),
+    } as Parameters<typeof provider.complete>[0]);
+
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let truncated = false;
+  let model: string = provider.name;
+
+  const account = (c: { model: string; usage: { inputTokens: number | null; outputTokens: number | null }; stopReason: string | null }) => {
+    inputTokens += c.usage.inputTokens ?? 0;
+    outputTokens += c.usage.outputTokens ?? 0;
+    if (c.stopReason === 'max_tokens') truncated = true;
+    model = c.model;
+  };
+
+  // --- Phase one: what are we writing? --------------------------------------
+  const outlineCompletion = await ask(
+    OUTLINE_SYSTEM,
+    buildPrompt(plan, state, decision, context.taskTitle),
+    config.model.outlineMaxTokens,
+  );
+  account(outlineCompletion);
+
+  const outline = parseJsonCandidates(outlineCompletion.text, deliverableOutlineSchema);
+  if (!outline) {
+    // Nothing to write, and nothing invented. The caller treats a zero-artefact
+    // finalise as a failure rather than a quiet success.
+    return {
+      text: outlineCompletion.text,
+      model,
+      usage: { inputTokens, outputTokens },
+      stopReason: truncated ? 'max_tokens' : outlineCompletion.stopReason,
+      output: researchStepOutputSchema.parse({ narrative: '' }),
+      requested: 0,
+      written: 0,
+    };
+  }
+
+  const wanted = outline.deliverables.slice(0, RESEARCH_LIMITS.maxArtefactsPerRun);
+
+  // --- Phase two: write each one on its own budget --------------------------
+  const artefacts: ArtefactContent[] = [];
+  for (const item of wanted) {
+    const completion = await ask(
+      ARTEFACT_SYSTEM,
+      [
+        buildPrompt(plan, state, decision, context.taskTitle),
+        '',
+        '--- THE ONE DOCUMENT TO WRITE NOW ---',
+        `type: ${item.type}`,
+        `title: ${item.title}`,
+        `purpose: ${item.purpose}`,
+      ].join('\n'),
+      config.model.artefactMaxTokens,
+    );
+    account(completion);
+
+    const artefact = parseJsonCandidates(completion.text, artefactContentSchema);
+    if (artefact) artefacts.push(artefact);
+  }
+
+  return {
+    text: outlineCompletion.text,
+    model,
+    usage: { inputTokens, outputTokens },
+    stopReason: truncated ? 'max_tokens' : null,
+    output: researchStepOutputSchema.parse({
+      narrative: outline.narrative,
+      unknowns: outline.unknowns,
+      blockerProposed: outline.blockerProposed,
+      findings: outline.findings,
+      artefacts,
+    }),
+    requested: wanted.length,
+    written: artefacts.length,
+  };
+}
+
+/** Parse JSON that a model may have wrapped in prose, against a given schema. */
+function parseJsonCandidates<T extends z.ZodTypeAny>(text: string, schema: T): z.infer<T> | null {
+  const candidates = [text, extractBraced(text)].filter((c): c is string => Boolean(c));
+  for (const candidate of candidates) {
+    try {
+      const result = schema.safeParse(JSON.parse(candidate));
+      if (result.success) return result.data;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return null;
 }
 
 function parseStepOutput(text: string): ResearchStepOutput | null {

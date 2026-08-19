@@ -68,6 +68,20 @@ const envSchema = z.object({
    */
   MAC_MODEL_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).default(300_000),
   /**
+   * Output ceilings, per kind of call, replacing two literals in the runner.
+   *
+   * The write-up is produced one document per call, so `artefact` is the budget
+   * for ONE deliverable rather than for all of them at once. That is what makes
+   * a large investigation possible: total output scales with the number of
+   * documents instead of being capped by a single response.
+   *
+   * `outline` is small on purpose — it names the documents, it does not write
+   * them.
+   */
+  MAC_MODEL_STEP_MAX_TOKENS: z.coerce.number().int().min(256).max(64_000).default(3_000),
+  MAC_MODEL_OUTLINE_MAX_TOKENS: z.coerce.number().int().min(256).max(64_000).default(2_000),
+  MAC_MODEL_ARTEFACT_MAX_TOKENS: z.coerce.number().int().min(1_000).max(64_000).default(16_000),
+  /**
    * Sprint 3.3: the second real provider.
    *
    * Spec section 31 requires replaceable model providers, plural. One
@@ -179,6 +193,9 @@ export const config = Object.freeze({
     openaiModel: env.MAC_OPENAI_MODEL_NAME,
     openaiBaseUrl: env.MAC_OPENAI_BASE_URL,
     timeoutMs: env.MAC_MODEL_TIMEOUT_MS,
+    stepMaxTokens: env.MAC_MODEL_STEP_MAX_TOKENS,
+    outlineMaxTokens: env.MAC_MODEL_OUTLINE_MAX_TOKENS,
+    artefactMaxTokens: env.MAC_MODEL_ARTEFACT_MAX_TOKENS,
   },
 
   // --- Sprint 3.3 ---

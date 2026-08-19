@@ -147,6 +147,73 @@ export const researchStepOutputSchema = z.object({
 export type ResearchStepOutput = z.infer<typeof researchStepOutputSchema>;
 
 /**
+ * The write-up phase, split in two.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE FINAL STEP IS NOT ONE CALL
+ *
+ * It used to be. The final step asked for every deliverable — three briefs, an
+ * architecture recommendation and a build order — inside a single JSON object
+ * in a single reply. The first real run on the commissioned VM hit the token
+ * ceiling partway through that object, so the JSON never closed, parsed to
+ * nothing, and the run finished with zero artefacts after 23 lookups across 37
+ * sources. All of it was thrown away because one document ran long.
+ *
+ * That failure mode is structural, not a matter of picking a bigger number: a
+ * single response is a fixed budget shared by every deliverable, so a large
+ * report starves the others, and truncation costs you the whole set rather
+ * than the one that overran.
+ *
+ * So the model first OUTLINES what it will produce — cheap, small, and easy to
+ * parse — and each deliverable is then written by its own call with the full
+ * budget to itself. Total output scales with the number of deliverables, one
+ * long document cannot crowd out the rest, and a failure costs exactly one
+ * artefact instead of everything.
+ * ---------------------------------------------------------------------------
+ */
+export const deliverableOutlineSchema = z.object({
+  /** What the model intends to write, one entry per artefact. */
+  deliverables: z
+    .array(
+      z.object({
+        type: z.string().min(1).max(60),
+        title: z.string().min(1).max(300),
+        /** What this document is for. Passed back when it is written. */
+        purpose: z.string().max(2000).default(''),
+      }),
+    )
+    /*
+     * At least one, and no default.
+     *
+     * The final step exists to produce deliverables, so a reply that names none
+     * has not answered the question — and treating an unrecognised object as
+     * "zero deliverables, nothing to do" is how a truncated or off-shape reply
+     * turns into a silently empty run. Failing to parse is the louder and more
+     * accurate outcome, and the caller reports a run with no artefacts as
+     * failed rather than complete.
+     */
+    .min(1)
+    // Matches RESEARCH_LIMITS.maxArtefactsPerRun, which is declared below this
+    // point and so cannot be referenced here without a temporal-dead-zone error
+    // at module load. The runner slices to the real limit regardless.
+    .max(10),
+  /**
+   * The claims established across the run, stated once at the end.
+   *
+   * These go through the same classification and demotion as findings from any
+   * other step: a citation that was never retrieved is dropped and the claim is
+   * demoted. Leaving this field out of the outline would have quietly removed
+   * the final step's ability to state findings at all, which is most of what a
+   * write-up is for.
+   */
+  findings: z.array(findingSchema).max(50).default([]),
+  narrative: z.string().max(4000).default(''),
+  unknowns: z.array(z.string().min(1).max(1000)).max(40).default([]),
+  blockerProposed: z.string().max(1000).nullable().default(null),
+});
+export type DeliverableOutline = z.infer<typeof deliverableOutlineSchema>;
+
+/**
  * Bounds on the loop.
  *
  * A research run that never terminates is the same operational problem as a
