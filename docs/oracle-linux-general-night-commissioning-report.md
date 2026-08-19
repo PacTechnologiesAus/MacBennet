@@ -4,7 +4,7 @@
 **Plan:** `docs/oracle-linux-general-night-commissioning.md`
 **Target:** Oracle Cloud VM `mac-bennet-pc`, `161.33.80.88`, ap-melbourne-1
 **Public name:** `mac.pac-technologies.com.au`
-**Started:** 2026-08-18 22:53 UTC · **This revision:** 2026-08-19 02:10 UTC
+**Started:** 2026-08-18 22:53 UTC · **This revision:** 2026-08-19 02:25 UTC
 
 Where this report and the plan disagree, this report wins. Where something was not exercised, it
 says `BLOCKED` or `NOT EXERCISED` and names what is missing rather than implying it passed.
@@ -147,7 +147,7 @@ commits the whole `pac-technologies.com.au` domain and is a human decision, not 
 get there and all three are recorded in §6.
 
 **Cookie:** the session cookie is issued `Secure` and `HttpOnly`, observed on a real login over TLS.
-`Secure` comes from `NODE_ENV=production`; see §6.6 for a correction to the plan on this point.
+`Secure` comes from `NODE_ENV=production`; see §6.7 for a correction to the plan on this point.
 
 ---
 
@@ -411,7 +411,37 @@ pointed at a loopback address on a machine the reader is not sitting at.
 **Fixed** to `https://mac.pac-technologies.com.au`. Verified: `access-control-allow-origin:
 https://mac.pac-technologies.com.au`.
 
-### 6.6 Two corrections to the plan itself
+### 6.6 The worker suite could not pass on a correctly configured machine — *test defect, medium*
+
+Four cases in `apps/worker/tests/sandbox-credentials.test.ts` failed on the VM:
+
+```
+Invalid worker configuration:
+  MAC_CONTROL_PLANE_URL: Required
+
+Did you copy .env.example to .env?
+```
+
+Their `withEnv` helper sets only the variables a given case is interested in, then calls
+`loadConfig()`, which validates the **whole** worker environment. `MAC_CONTROL_PLANE_URL` is the one
+variable with no default, and the helper never supplied it — it inherited whatever `dotenv` had
+already loaded from `apps/worker/.env`.
+
+That file exists on every development laptop and **deliberately does not exist on this VM**.
+Configuration arrives from systemd's `EnvironmentFile`, which is precisely what makes "no credential
+is in the checkout" structural here rather than a matter of remembering. So the suite passed
+everywhere it was written and failed on the one machine configured the way the deployment requires.
+
+The first run was also inconclusive in a way worth recording: it was executed with
+`control-plane.env` sourced into the environment, so the failure could plausibly have been my own
+pollution. It was re-run under `env -i` with nothing inherited, and failed identically — which is
+what promoted it from "probably my harness" to a defect.
+
+**Fixed** by having the helper supply the variable and spread the caller's overrides last, so a case
+that wants a different URL still gets one. No worker behaviour changed. Re-run under `env -i` on the
+VM: **226 passed, 4 skipped, 0 failed**.
+
+### 6.7 Two corrections to the plan itself
 
 * The plan said `MAC_ALLOW_INSECURE_HTTP` "stays off in production" as the control over the session
   cookie's `Secure` flag. It is not that. It is a **worker** variable
@@ -492,6 +522,7 @@ never pointed at by a test run. Suites run one at a time because 954 MiB does no
 | Suite | Result |
 |---|---|
 | `@mac/server`, full | **805 passed, 59 skipped, 0 failed** (40 files, 13m 41s) |
+| `@mac/worker`, full | **226 passed, 4 skipped, 0 failed** — after the fix in §6.6 |
 | `apps/worker/tests/sandbox-conformance.test.ts` | **18 passed** against real Bubblewrap 0.9.0 |
 | `company-live` (opt-in, real GitHub) | **6 passed** |
 | `monday-commissioning.live` (opt-in, real monday.com) | **37 passed** |
@@ -584,6 +615,49 @@ Read back from the live database:
 | `nightly_budget_cents` | `5000` — **unchanged**, an existing human-approved limit |
 | `min_execution_confidence` | `0.600` |
 | `require_sandbox` | `true` |
+
+### 9.1 The night window, read back from the running system
+
+No clock was moved and no timezone was misrepresented. The VM's system timezone is `Etc/UTC` and its
+clock is NTP-synchronised; the *application* timezone is `Australia/Sydney`, which is the correct
+separation.
+
+Read live from `/api/night-shift` at 12:18 AEST on 19 August:
+
+```
+macState            = day_mode
+minutesUntilCutoff  = 1181            (19h 41m → 08:00 AEST tomorrow)
+budget.windowStart  = 2026-08-18T22:00:00.000Z
+budget.windowEnd    = 2026-08-19T22:00:00.000Z
+sandboxReadyWorkers = 1
+```
+
+`22:00Z` is `08:00` AEST exactly. The derived window matches the configured cutoff.
+
+DST correctness is proven by `tests/unit/overnight.test.ts`, which passed here and covers the Sydney
+daylight-saving start and end explicitly, including the 23-hour and 25-hour windows either side of
+each transition. A fixed UTC offset would fail those cases.
+
+### 9.2 The budget cannot enforce, and the system says so out loud
+
+The same dashboard read reports:
+
+```
+providerUsageAvailable = false
+costEnforceable        = false
+usageSource            = "unavailable"
+recordedSpendCents     = 0
+```
+
+This is Sprint 3.3 debt item 2, visible in production data rather than inferred from a changelog.
+Reasoning usage is counted in tokens, not money, so `nightly_budget_cents` **cannot stop a research
+shift**. What actually bounds a run is `max_research_steps = 8` and `max_research_tool_calls = 40`,
+plus whatever spending limit is set on the provider account — and that limit is a human setting this
+commissioning cannot make or verify from here.
+
+**This is the one item requiring an explicit human judgement before Mac runs unattended**, and it is
+put plainly rather than buried: the monetary guardrail you can see in the UI is not currently load
+bearing for general work.
 
 **No new spend authority was created.** The nightly budget was not raised. The honest limitation
 from Sprint 3.3 stands: reasoning usage is recorded in tokens, not money, so the monetary budget
