@@ -263,7 +263,10 @@ not built.
   one word is how the second quietly becomes the first, and a published contract is the worst place
   for that.
 * **Coverage:** agents, projects, task, discovery, brief (with structured acceptance criteria and
-  the scope note), runs, blockers, artefacts, approvals — create, request, decide.
+  the scope note), runs, blockers, artefacts, approvals — create, request, decide — and the company
+  context revision currently in force, reported as a commit SHA with its `cached`/`stale` flags,
+  because "which policy governed this?" and "how sure are we that is still current?" are different
+  questions and showing the first without the second overstates it.
 * **Events:** an append-only `mac_events` table with a monotonic `seq`, read by cursor with optional
   long-poll. `seq` is the only cursor: two events written in the same millisecond have no order, and
   a consumer paging by timestamp will eventually skip one. No broker was introduced; Postgres
@@ -462,7 +465,21 @@ Minimal, per Part J — no redesign.
 
 ## 14. Tests and results
 
-<!--TEST_RESULTS-->
+All green, on a clean full run of both suites.
+
+| Suite | Before (base branch) | After |
+|---|---|---|
+| Server | 811 passed, 58 skipped — **plus 5 failing worker tests inherited** | **1055 passed**, 61 skipped |
+| Worker | 228 passed, 3 skipped (after fixing the 5 stale ones) | **233 passed**, 3 skipped |
+| **Total** | 1039 | **1288** |
+
+Typecheck clean across all four packages; the web build succeeds.
+
+The suites run single-threaded against one PostgreSQL database, which is worth
+recording because it cost time here: two runs overlapping produced 126 spurious
+failures that were entirely an artefact of concurrent `TRUNCATE`. The numbers
+above are from a run with nothing else touching the database and no file edited
+while it was in flight.
 
 New coverage:
 
@@ -546,6 +563,13 @@ of driving the real HTTP surface.
 * **No guardrail was weakened.** The `<0.60` floor, the autonomy band, the hard prohibitions, the
   git policy, the sandbox requirement and the company-context immutability triggers are untouched.
 
+**GitHub identity separation (§30) is unchanged by this phase, and was already correct.** Mac's
+engineering GitHub identity is the `gh` CLI's own authenticated session on the worker VM; the
+company-context credential is a separate read-only token held only by the control plane, passed to
+git through `GIT_ASKPASS` in a child process environment, never placed in argv or a remote URL, and
+prefix-refused into any sandbox. Phase 4 added no GitHub credential and moved none. It is recorded
+here because §30 asks for the separation to be preserved, and preserving it meant not touching it.
+
 One judgement worth flagging for review: `allow_fetch_from_search_results` lets an administrator
 widen retrieval to hosts a run's own search returned. It is **off by default** and every fetch is
 still recorded with its host and source class, but it is a genuine widening and somebody should
@@ -573,6 +597,10 @@ decide about it deliberately rather than discover it.
 6. **No webhook delivery sweeper.** `event_deliveries` rows are created and the signing function is
    implemented and tested; nothing yet POSTs them. Cursor polling works and is what the Forja test
    uses.
+
+   Note the shape of this one: a client with a `webhook_url` accumulates delivery rows that nothing
+   drains. That is visible rather than silent — the rows are there to count — but a deployment that
+   registers a webhook today will get no webhooks and no error.
 7. **Acceptance criteria are frozen at approval, and a run created without going through
    `approveRun`** (a night-shift policy approval takes that path; a directly-inserted row does not)
    **has none.** The deterministic backstop in `completeRun` then reports `not_assessed`.

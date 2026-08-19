@@ -43,6 +43,7 @@ import {
   listApprovalRequests,
 } from '../../services/approval-requests.js';
 import { getSettings } from '../../services/settings.js';
+import { getCompanyContextStatus } from '../../services/company-context/service.js';
 import { record, SYSTEM_ACTOR } from '../../services/audit.js';
 import { db } from '../../db/client.js';
 
@@ -201,6 +202,41 @@ export async function forjaRoutes(app: FastifyInstance): Promise<void> {
         approvals: await listApprovalRequests({ state: 'pending' }),
       }),
     );
+
+    /**
+     * Which revision of PAC company context is currently in force.
+     *
+     * Part D §13 lists it, and it is genuinely useful to an orchestrator: a
+     * platform showing somebody a brief or an artefact wants to say which
+     * approved policy governed it, and the commit SHA is the only thing that
+     * identifies that unambiguously.
+     *
+     * Reports the STATUS rather than the documents. Forja orchestrates work; it
+     * has no business reading PAC's handbook through Mac's credential.
+     */
+    scope.get('/api/forja/company-context', { preHandler: requireScope('read') }, async (_request, reply) => {
+      const status = await getCompanyContextStatus();
+      return reply.send({
+        contractVersion: FORJA_CONTRACT_VERSION,
+        companyContext: {
+          enabled: status.enabled,
+          status: status.status,
+          commitSha: status.revision?.commitSha ?? null,
+          shortSha: status.revision?.shortSha ?? null,
+          contextVersion: status.revision?.contextVersion ?? null,
+          validationState: status.revision?.validationState ?? null,
+          loadedAt: status.revision?.loadedAt ?? null,
+          /*
+           * `cached` and `stale` travel with it, because "which policy governed
+           * this?" and "how sure are we that is still the current one?" are
+           * different questions and an orchestrator showing the first without
+           * the second would overstate it.
+           */
+          cached: status.cached,
+          stale: status.stale,
+        },
+      });
+    });
 
     // --- Events -------------------------------------------------------------
 
