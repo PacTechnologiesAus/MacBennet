@@ -4,6 +4,7 @@ import type {
   ModelProviderName,
   SettingsDto,
   UpdateSettingsRequest,
+  WebSearchProvider,
 } from '@mac/protocol';
 import { emailAddressSchema } from '@mac/protocol';
 import { db, type DbHandle } from '../db/client.js';
@@ -62,6 +63,20 @@ export interface Settings {
   maxResearchToolCalls: number;
   externalResearchEnabled: boolean;
   allowedResearchDomains: string[];
+  // --- Phase 4 ---
+  teamsEnabled: boolean;
+  teamsAuthorisedUsers: string[];
+  teamsNotifyBlockers: boolean;
+  teamsNotifyApprovals: boolean;
+  teamsNotifyReports: boolean;
+  forjaEnabled: boolean;
+  webSearchProvider: WebSearchProvider;
+  maxWebResultsPerSearch: number;
+  allowFetchFromSearchResults: boolean;
+  acceptanceVerificationEnabled: boolean;
+  acceptanceSemanticReviewEnabled: boolean;
+  acceptanceRemediationEnabled: boolean;
+  conversationSummaryThreshold: number;
   updatedAt: Date;
 }
 
@@ -112,6 +127,19 @@ export async function getSettings(handle: DbHandle = db): Promise<Settings> {
     maxResearchToolCalls: row.maxResearchToolCalls,
     externalResearchEnabled: row.externalResearchEnabled,
     allowedResearchDomains: asStringArray(row.allowedResearchDomains),
+    teamsEnabled: row.teamsEnabled,
+    teamsAuthorisedUsers: asStringArray(row.teamsAuthorisedUsers),
+    teamsNotifyBlockers: row.teamsNotifyBlockers,
+    teamsNotifyApprovals: row.teamsNotifyApprovals,
+    teamsNotifyReports: row.teamsNotifyReports,
+    forjaEnabled: row.forjaEnabled,
+    webSearchProvider: row.webSearchProvider as WebSearchProvider,
+    maxWebResultsPerSearch: row.maxWebResultsPerSearch,
+    allowFetchFromSearchResults: row.allowFetchFromSearchResults,
+    acceptanceVerificationEnabled: row.acceptanceVerificationEnabled,
+    acceptanceSemanticReviewEnabled: row.acceptanceSemanticReviewEnabled,
+    acceptanceRemediationEnabled: row.acceptanceRemediationEnabled,
+    conversationSummaryThreshold: row.conversationSummaryThreshold,
     updatedAt: row.updatedAt,
   };
 }
@@ -168,6 +196,19 @@ export const toSettingsDto = (s: Settings): SettingsDto => ({
   maxResearchToolCalls: s.maxResearchToolCalls,
   externalResearchEnabled: s.externalResearchEnabled,
   allowedResearchDomains: s.allowedResearchDomains,
+  teamsEnabled: s.teamsEnabled,
+  teamsAuthorisedUsers: s.teamsAuthorisedUsers,
+  teamsNotifyBlockers: s.teamsNotifyBlockers,
+  teamsNotifyApprovals: s.teamsNotifyApprovals,
+  teamsNotifyReports: s.teamsNotifyReports,
+  forjaEnabled: s.forjaEnabled,
+  webSearchProvider: s.webSearchProvider,
+  maxWebResultsPerSearch: s.maxWebResultsPerSearch,
+  allowFetchFromSearchResults: s.allowFetchFromSearchResults,
+  acceptanceVerificationEnabled: s.acceptanceVerificationEnabled,
+  acceptanceSemanticReviewEnabled: s.acceptanceSemanticReviewEnabled,
+  acceptanceRemediationEnabled: s.acceptanceRemediationEnabled,
+  conversationSummaryThreshold: s.conversationSummaryThreshold,
   updatedAt: s.updatedAt.toISOString(),
 });
 
@@ -315,6 +356,38 @@ export async function updateSettings(
         }),
         ...(patch.allowedResearchDomains !== undefined && {
           allowedResearchDomains: patch.allowedResearchDomains,
+        }),
+        // --- Phase 4 ---
+        ...(patch.teamsEnabled !== undefined && { teamsEnabled: patch.teamsEnabled }),
+        ...(patch.teamsAuthorisedUsers !== undefined && {
+          // Normalised on the way in so a UPN typed with different case matches
+          // the one Teams sends. An authorisation list that fails on casing is
+          // an authorisation list somebody will eventually widen out of
+          // frustration.
+          teamsAuthorisedUsers: patch.teamsAuthorisedUsers.map((entry) => entry.trim().toLowerCase()),
+        }),
+        ...(patch.teamsNotifyBlockers !== undefined && { teamsNotifyBlockers: patch.teamsNotifyBlockers }),
+        ...(patch.teamsNotifyApprovals !== undefined && { teamsNotifyApprovals: patch.teamsNotifyApprovals }),
+        ...(patch.teamsNotifyReports !== undefined && { teamsNotifyReports: patch.teamsNotifyReports }),
+        ...(patch.forjaEnabled !== undefined && { forjaEnabled: patch.forjaEnabled }),
+        ...(patch.webSearchProvider !== undefined && { webSearchProvider: patch.webSearchProvider }),
+        ...(patch.maxWebResultsPerSearch !== undefined && {
+          maxWebResultsPerSearch: patch.maxWebResultsPerSearch,
+        }),
+        ...(patch.allowFetchFromSearchResults !== undefined && {
+          allowFetchFromSearchResults: patch.allowFetchFromSearchResults,
+        }),
+        ...(patch.acceptanceVerificationEnabled !== undefined && {
+          acceptanceVerificationEnabled: patch.acceptanceVerificationEnabled,
+        }),
+        ...(patch.acceptanceSemanticReviewEnabled !== undefined && {
+          acceptanceSemanticReviewEnabled: patch.acceptanceSemanticReviewEnabled,
+        }),
+        ...(patch.acceptanceRemediationEnabled !== undefined && {
+          acceptanceRemediationEnabled: patch.acceptanceRemediationEnabled,
+        }),
+        ...(patch.conversationSummaryThreshold !== undefined && {
+          conversationSummaryThreshold: patch.conversationSummaryThreshold,
         }),
         updatedAt: new Date(),
         updatedBy: actor.id,

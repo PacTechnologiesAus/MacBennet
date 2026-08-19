@@ -16,6 +16,10 @@ import { workerRoutes } from './http/routes/worker.js';
 import { nightShiftRoutes } from './http/routes/night-shift.js';
 import { companyContextRoutes } from './http/routes/company-context.js';
 import { artefactRoutes } from './http/routes/artefacts.js';
+// --- Phase 4 ---
+import { conversationRoutes } from './http/routes/conversations.js';
+import { approvalRoutes } from './http/routes/approvals.js';
+import { teamsRoutes } from './http/routes/teams.js';
 import { startSweepers, type Sweepers } from './jobs/sweepers.js';
 
 export interface BuildOptions {
@@ -98,6 +102,17 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
   await fastify.register(nightShiftRoutes);
   await fastify.register(companyContextRoutes);
   await fastify.register(artefactRoutes);
+  // --- Phase 4 ---
+  await fastify.register(conversationRoutes);
+  await fastify.register(approvalRoutes);
+  /*
+   * The THIRD authentication plane.
+   *
+   * Registered alongside the human and worker planes and overlapping neither.
+   * `/api/teams/messages` authenticates with a Bot Framework JWT and nothing
+   * else; every other route here is unreachable with one.
+   */
+  await fastify.register(teamsRoutes);
   await fastify.register(workerRoutes, limits);
 
   const sweepers = options.startBackgroundJobs === false ? null : startSweepers(fastify.log);

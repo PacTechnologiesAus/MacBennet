@@ -132,6 +132,44 @@ const envSchema = z.object({
    */
   MAC_COMPANY_CONTEXT_TOKEN: z.string().optional(),
   MAC_COMPANY_CONTEXT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600_000).default(60_000),
+
+  // --- Phase 4 -------------------------------------------------------------
+  //
+  // Microsoft Teams. Mac appears as a BOT application named "Mac Bennett":
+  // Teams has no mechanism by which an application posts as a human user
+  // account, and faking human attribution would be both impossible and wrong.
+  // See MAC_TEAMS_IDENTITY in packages/protocol/src/teams.ts.
+
+  /** Azure Bot application (client) ID. Also the expected inbound JWT audience. */
+  MAC_TEAMS_APP_ID: z.string().optional(),
+  /** Client secret, used ONLY to obtain a Bot Connector token. */
+  MAC_TEAMS_APP_PASSWORD: z.string().optional(),
+  /** PAC's tenant. Activities from any other tenant are rejected. */
+  MAC_TEAMS_TENANT_ID: z.string().optional(),
+  /**
+   * Where the Bot Framework publishes its signing keys.
+   *
+   * Configurable because the Government cloud uses a different metadata
+   * document, and because a test needs to point it at a local stub. It is NOT
+   * taken from the token: an issuer that nominates its own key source is a
+   * signature check that verifies nothing.
+   */
+  MAC_TEAMS_OPENID_METADATA: z
+    .string()
+    .default('https://login.botframework.com/v1/.well-known/openidconfiguration'),
+  MAC_TEAMS_LOGIN_URL: z.string().default('https://login.microsoftonline.com/botframework.com'),
+
+  // Forja orchestration.
+  MAC_FORJA_WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(10_000),
+
+  // External web search. Nothing has been signed up for; see
+  // WEB_SEARCH_PROVIDER_REQUIREMENTS for what each provider needs from a human.
+  MAC_SEARCH_API_KEY: z.string().optional(),
+  /** Programmable Search Engine ID, for the Google provider only. */
+  MAC_SEARCH_ENGINE_ID: z.string().optional(),
+  /** Base URL of a SearXNG instance PAC controls. */
+  MAC_SEARCH_BASE_URL: z.string().optional(),
+  MAC_SEARCH_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(20_000),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -215,6 +253,24 @@ export const config = Object.freeze({
      * model as "the web contains nothing about this".
      */
     searchEndpoint: env.MAC_RESEARCH_SEARCH_ENDPOINT,
+  },
+
+  // --- Phase 4 ---
+  teams: {
+    appId: env.MAC_TEAMS_APP_ID,
+    appPassword: env.MAC_TEAMS_APP_PASSWORD,
+    tenantId: env.MAC_TEAMS_TENANT_ID,
+    openIdMetadataUrl: env.MAC_TEAMS_OPENID_METADATA,
+    loginUrl: env.MAC_TEAMS_LOGIN_URL.replace(/\/+$/, ''),
+  },
+  forja: {
+    webhookTimeoutMs: env.MAC_FORJA_WEBHOOK_TIMEOUT_MS,
+  },
+  search: {
+    apiKey: env.MAC_SEARCH_API_KEY,
+    engineId: env.MAC_SEARCH_ENGINE_ID,
+    baseUrl: env.MAC_SEARCH_BASE_URL?.replace(/\/+$/, ''),
+    timeoutMs: env.MAC_SEARCH_TIMEOUT_MS,
   },
 
   // --- Sprint 3.2 ---

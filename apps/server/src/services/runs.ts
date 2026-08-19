@@ -94,6 +94,9 @@ export const toRunDto = (
   startedAt: row.startedAt?.toISOString() ?? null,
   completedAt: row.completedAt?.toISOString() ?? null,
   companyContext: extra.companyContext ?? null,
+  // Denormalised onto the row at review time, so a list of a hundred runs shows
+  // the acceptance position without a hundred joins.
+  acceptanceState: row.acceptanceState as RunDto['acceptanceState'],
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
 });
