@@ -20,6 +20,7 @@ import { analyseGaps } from '../domain/gap-analysis.js';
 import { classifyTask } from '../domain/task-classification.js';
 import { briefDto, createBrief, mergeContextIntoBrief, requireBriefRow } from './briefs.js';
 import { record, type Actor } from './audit.js';
+import { emit } from './events.js';
 import { getSettings } from './settings.js';
 import { structureBriefWithModel } from './model/resolvers.js';
 import { contextRefFor, requireActiveRevision } from './company-context/service.js';
@@ -237,6 +238,13 @@ export async function startDiscovery(
       })
       .returning();
     if (!row) throw new AppError(500, 'DISCOVERY_CREATE_FAILED', 'Could not start discovery.');
+
+    await emit(tx, {
+      type: 'discovery_started',
+      projectId: input.projectId,
+      taskId,
+      data: { discoverySessionId: row.id },
+    });
 
     await record(tx, {
       actor,

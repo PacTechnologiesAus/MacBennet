@@ -20,6 +20,7 @@ import { generateRunReport } from './reports.js';
 import { mondayActivitySince } from './monday/outbox.js';
 import { queueOvernightEmail } from './mail/delivery.js';
 import { record, SYSTEM_ACTOR, type Actor } from './audit.js';
+import { emit } from './events.js';
 
 /**
  * Assembling the night's report (Sprint 3 §9.4).
@@ -252,6 +253,16 @@ export async function deliverOvernightReport(
         completed: content.completed.length,
         blocked: content.blocked.length,
         pullRequests: content.pullRequests.length,
+        decisionsNeeded: content.decisionsNeeded.length,
+      },
+    });
+
+    await emit(tx, {
+      type: 'night_report_ready',
+      data: {
+        nightShiftId,
+        completed: content.completed.length,
+        blocked: content.blocked.length,
         decisionsNeeded: content.decisionsNeeded.length,
       },
     });

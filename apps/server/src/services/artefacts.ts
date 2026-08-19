@@ -14,6 +14,7 @@ import { companyContextRevisions, runArtefacts, runs, tasks } from '../db/schema
 import type { RunArtefactRow } from '../db/schema.js';
 import { AppError } from '../http/errors.js';
 import { record, type Actor } from './audit.js';
+import { emit } from './events.js';
 
 /**
  * Artefacts — the results of work that is not code (Sprint 3.3 §17).
@@ -149,6 +150,15 @@ export async function createArtefact(
         sourcesCited: new Set(findings.flatMap((f) => f.sources)).size,
         companyContextRevisionId: revisionId,
       },
+    });
+
+    await emit(tx, {
+      type: 'artefact_created',
+      projectId: task.projectId,
+      taskId: input.taskId,
+      runId: input.runId ?? null,
+      artefactId: row.id,
+      data: { type: content.type, title: content.title, findings: findings.length },
     });
 
     return toArtefactDto(row, await contextRef(tx, revisionId));

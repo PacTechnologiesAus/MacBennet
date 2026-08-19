@@ -20,6 +20,7 @@ import { artefactRoutes } from './http/routes/artefacts.js';
 import { conversationRoutes } from './http/routes/conversations.js';
 import { approvalRoutes } from './http/routes/approvals.js';
 import { teamsRoutes } from './http/routes/teams.js';
+import { forjaRoutes } from './http/routes/forja.js';
 import { startSweepers, type Sweepers } from './jobs/sweepers.js';
 
 export interface BuildOptions {
@@ -113,6 +114,14 @@ export async function buildApp(options: BuildOptions = {}): Promise<App> {
    * else; every other route here is unreachable with one.
    */
   await fastify.register(teamsRoutes);
+  /*
+   * The FOURTH plane. Human sessions, worker tokens, a Bot Framework JWT and a
+   * Forja API key, each in its own scope with its own hook and a
+   * non-overlapping prefix — so a credential for one cannot authenticate a call
+   * on another because of how the routes are mounted, not because somebody
+   * remembered to check.
+   */
+  await fastify.register(forjaRoutes);
   await fastify.register(workerRoutes, limits);
 
   const sweepers = options.startBackgroundJobs === false ? null : startSweepers(fastify.log);

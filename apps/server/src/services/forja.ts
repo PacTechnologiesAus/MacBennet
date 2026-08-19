@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { and, count, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray } from 'drizzle-orm';
 import {
   FORJA_KEY_PREFIX,
   isDeliveringRunStatus,
@@ -31,8 +31,8 @@ import {
   type ForjaClientRow,
 } from '../db/schema.js';
 import { AppError } from '../http/errors.js';
-import { sha256Hex } from '../lib/crypto.js';
-import { AGENT_REGISTRY } from '../domain/agent-registry.js';
+import { hashToken } from '../lib/crypto.js';
+import { PAC_ACTORS } from '../domain/agent-registry.js';
 import { record, SYSTEM_ACTOR, type Actor } from './audit.js';
 import { briefDto } from './briefs.js';
 import { briefNarrowing } from './acceptance.js';
@@ -44,8 +44,9 @@ import { briefNarrowing } from './acceptance.js';
  * FORJA IS AN APPLICATION
  *
  * It is PAC's engineering and agent-orchestration platform: a piece of software
- * through which PEOPLE do things. It is never registered as an agent, it never
- * appears in `AGENT_REGISTRY`, and — the part that actually bites — every write
+ * through which PEOPLE do things. It is never registered as an agent — `PAC_ACTORS`
+ * types it as a platform, "not an agent, not an employee, and not an autonomous
+ * worker" — and, the part that actually bites, every write
  * it performs carries `onBehalfOf`, because "Forja approved it" is not an
  * answer to "who approved this?".
  *
@@ -99,7 +100,7 @@ export async function createForjaClient(
       .insert(forjaClients)
       .values({
         name: input.name,
-        keyHash: sha256Hex(apiKey),
+        keyHash: hashToken(apiKey),
         keyPrefix: apiKey.slice(0, FORJA_KEY_PREFIX.length + 8),
         scopes: input.scopes,
         webhookUrl: input.webhookUrl ?? null,
@@ -156,7 +157,7 @@ export async function authenticateForja(apiKey: string | undefined): Promise<Aut
   const [row] = await db
     .select()
     .from(forjaClients)
-    .where(and(eq(forjaClients.keyHash, sha256Hex(apiKey)), eq(forjaClients.isActive, true)))
+    .where(and(eq(forjaClients.keyHash, hashToken(apiKey)), eq(forjaClients.isActive, true)))
     .limit(1);
   if (!row) return null;
 
@@ -229,9 +230,11 @@ export function verifyWebhookSignature(input: {
 /**
  * The agents Forja may orchestrate.
  *
- * Built from `AGENT_REGISTRY`, which contains Mac and Otto and — deliberately —
- * does not contain Forja. A platform enumerating the agents it orchestrates
- * should not find itself in the list, and a test asserts it never does.
+ * Filtered on `kind === 'agent'`, which is what keeps Forja itself out of the
+ * list. `PAC_ACTORS` types it as a platform — "not an agent, not an employee,
+ * and not an autonomous worker" in its own summary — and a platform
+ * enumerating the agents it orchestrates should not find itself among them. A
+ * test asserts it never does.
  */
 export async function listAgents(): Promise<ForjaAgentDto[]> {
   const online = await db
@@ -248,12 +251,12 @@ export async function listAgents(): Promise<ForjaAgentDto[]> {
     .from(runs)
     .where(inArray(runs.status, ['queued', 'running', 'blocked', 'self_review'] satisfies RunStatus[]));
 
-  return AGENT_REGISTRY.filter((entry) => entry.kind === 'agent').map((entry) => ({
+  return PAC_ACTORS.filter((entry) => entry.kind === 'agent').map((entry) => ({
     key: entry.key,
-    name: entry.name,
-    jobTitle: entry.jobTitle,
-    email: entry.email ?? null,
-    responsibility: entry.responsibility,
+    name: entry.displayName,
+    jobTitle: entry.agentsDocumentHeading,
+    email: null,
+    responsibility: entry.summary,
     // Only Mac has workers. Otto is modelled but has nothing behind him yet,
     // and reporting him as online would be a capability nobody built.
     online: entry.key === 'mac' ? online.length > 0 : false,
@@ -528,5 +531,3 @@ export async function forjaHealth(): Promise<{ clients: number; activeClients: n
     lastSeenAt: lastSeen?.toISOString() ?? null,
   };
 }
-
-export { sql };

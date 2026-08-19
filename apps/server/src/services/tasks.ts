@@ -6,6 +6,7 @@ import type { TaskRow } from '../db/schema.js';
 import { AppError } from '../http/errors.js';
 import { parseConfidence } from '../domain/confidence.js';
 import { record, type Actor } from './audit.js';
+import { emit } from './events.js';
 
 export const toTaskDto = (
   row: TaskRow,
@@ -147,6 +148,13 @@ export async function createTask(input: CreateTaskRequest, actor: Actor): Promis
       })
       .returning();
     if (!row) throw new AppError(500, 'TASK_CREATE_FAILED', 'Could not create task.');
+
+    await emit(tx, {
+      type: 'task_created',
+      projectId: input.projectId,
+      taskId: row.id,
+      data: { title: row.title, taskKind: row.taskKind, priority: row.priority, origin: row.origin },
+    });
 
     await record(tx, {
       actor,

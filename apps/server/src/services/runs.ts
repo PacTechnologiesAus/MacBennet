@@ -43,6 +43,7 @@ import { recordContextBinding } from './company-context/bindings.js';
 import { requireTaskWithProject } from './tasks.js';
 import { appendSystemLog } from './logs.js';
 import { freezeCriteriaForRun, reviewAcceptance } from './acceptance.js';
+import { emit } from './events.js';
 
 /**
  * The run service owns the control loop.
@@ -718,6 +719,13 @@ export async function leaseNextRun(
       metadata: { workerName: worker.name, jobKind: candidate.jobKind, attempt: candidate.attempt + 1 },
     });
 
+    await emit(tx, {
+      type: 'run_started',
+      runId: updated.id,
+      taskId: updated.taskId,
+      data: { jobKind: candidate.jobKind, worker: worker.name, attempt: candidate.attempt + 1 },
+    });
+
     await tx
       .update(workers)
       .set({ status: 'busy', currentRunId: updated.id, updatedAt: now })
@@ -910,6 +918,30 @@ export async function completeRun(
       },
       metadata: { outcome: input.outcome, stopReason, summary: input.summary ?? null },
     });
+
+    await emit(tx, {
+      type: 'run_completed',
+      runId,
+      taskId: run.taskId,
+      data: { status: target, outcome: input.outcome, stopReason, acceptanceState },
+    });
+
+    /*
+     * A separate event when the work needs a person to look at it.
+     *
+     * `run_completed` says the run stopped; `task_ready_for_review` says
+     * somebody has to do something about it. Forja's inbox needs the second,
+     * and deriving it from the first would mean every consumer re-implementing
+     * the rule about which terminal states want attention.
+     */
+    if (target === 'completed_with_gaps' || target === 'ready_for_human_review') {
+      await emit(tx, {
+        type: 'task_ready_for_review',
+        runId,
+        taskId: run.taskId,
+        data: { status: target, acceptanceState, reason: gapped ? 'acceptance_gaps' : 'awaiting_review' },
+      });
+    }
 
     await tx
       .update(workers)
