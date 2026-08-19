@@ -63,9 +63,21 @@ export class ScriptedModelProvider implements ModelProvider {
 export class AnthropicModelProvider implements ModelProvider {
   readonly name = 'anthropic' as const;
 
+  /**
+   * The resolved call timeout, exposed rather than left buried in `options`.
+   *
+   * It is readable so a test can assert the factory actually passes it. The
+   * bug this guards against was not a wrong value but an absent one: the
+   * factory constructed this class without `timeoutMs` at all, so every call
+   * silently used the 60s fallback and no test could see the difference.
+   */
+  readonly timeoutMs: number;
+
   constructor(
     private readonly options: { apiKey: string; model: string; fetchImpl?: typeof fetch; timeoutMs?: number },
-  ) {}
+  ) {
+    this.timeoutMs = options.timeoutMs ?? 60_000;
+  }
 
   async isAvailable() {
     return this.options.apiKey
@@ -76,7 +88,7 @@ export class AnthropicModelProvider implements ModelProvider {
   async complete(request: ModelCompletionRequest & { signal?: AbortSignal }): Promise<ModelCompletionResult> {
     const fetchImpl = this.options.fetchImpl ?? fetch;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 60_000);
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     /*
      * Sprint 3.3: a research step must abort when the run does.
      *
@@ -146,6 +158,9 @@ export class AnthropicModelProvider implements ModelProvider {
 export class OpenAIModelProvider implements ModelProvider {
   readonly name = 'openai' as const;
 
+  /** Resolved call timeout. See the note on AnthropicModelProvider.timeoutMs. */
+  readonly timeoutMs: number;
+
   constructor(
     private readonly options: {
       apiKey: string;
@@ -154,7 +169,9 @@ export class OpenAIModelProvider implements ModelProvider {
       fetchImpl?: typeof fetch;
       timeoutMs?: number;
     },
-  ) {}
+  ) {
+    this.timeoutMs = options.timeoutMs ?? 60_000;
+  }
 
   async isAvailable() {
     return this.options.apiKey ? { available: true } : { available: false, reason: 'No OPENAI_API_KEY is configured.' };
@@ -163,7 +180,7 @@ export class OpenAIModelProvider implements ModelProvider {
   async complete(request: ModelCompletionRequest & { signal?: AbortSignal }): Promise<ModelCompletionResult> {
     const fetchImpl = this.options.fetchImpl ?? fetch;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 60_000);
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const onAbort = () => controller.abort();
     request.signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -233,15 +250,26 @@ export async function getModelProvider(): Promise<ModelProvider> {
   return buildProvider(settings.modelProvider);
 }
 
-function buildProvider(name: ModelProviderName): ModelProvider {
+export function buildProvider(name: ModelProviderName): ModelProvider {
+  /*
+   * The timeout has to be passed here or it silently falls back to the 60s
+   * default in each provider, which is where the first real research run died:
+   * six aborted calls in a row, no way to configure it, no test that could have
+   * caught it because the scripted provider always answers instantly.
+   */
   if (name === 'anthropic' && config.model.apiKey) {
-    return new AnthropicModelProvider({ apiKey: config.model.apiKey, model: config.model.name });
+    return new AnthropicModelProvider({
+      apiKey: config.model.apiKey,
+      model: config.model.name,
+      timeoutMs: config.model.timeoutMs,
+    });
   }
   if (name === 'openai' && config.model.openaiApiKey) {
     return new OpenAIModelProvider({
       apiKey: config.model.openaiApiKey,
       model: config.model.openaiModel,
       baseUrl: config.model.openaiBaseUrl,
+      timeoutMs: config.model.timeoutMs,
     });
   }
   return new NullModelProvider();

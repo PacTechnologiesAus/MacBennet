@@ -52,6 +52,22 @@ const envSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   MAC_MODEL_NAME: z.string().default('claude-sonnet-5'),
   /**
+   * How long a single model call may take before it is aborted.
+   *
+   * This was hardcoded to 60 seconds and unreachable from configuration, which
+   * was survivable only because every test ran against the scripted provider
+   * and got an answer instantly. The first real research step failed six times
+   * in a row on the commissioned VM: a prompt carrying a 9,855-character task
+   * description and seven Company documents, asked for up to 3,000 tokens
+   * (8,000 when finalising), does not come back inside a minute.
+   *
+   * 300s matches the proxy_read_timeout nginx already uses in front of this
+   * service for the same reason. It is a ceiling, not a target — cancellation
+   * still aborts immediately via the run's own AbortSignal, so a stopped run
+   * does not keep billing for five minutes.
+   */
+  MAC_MODEL_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).default(300_000),
+  /**
    * Sprint 3.3: the second real provider.
    *
    * Spec section 31 requires replaceable model providers, plural. One
@@ -162,6 +178,7 @@ export const config = Object.freeze({
     openaiApiKey: env.OPENAI_API_KEY,
     openaiModel: env.MAC_OPENAI_MODEL_NAME,
     openaiBaseUrl: env.MAC_OPENAI_BASE_URL,
+    timeoutMs: env.MAC_MODEL_TIMEOUT_MS,
   },
 
   // --- Sprint 3.3 ---
