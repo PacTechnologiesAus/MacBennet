@@ -1,8 +1,18 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import type { BudgetStatusDto, CurrentUser, SettingsDto } from '@mac/protocol';
+import type { BudgetStatusDto, CurrentUser, SettingsDto, TeamsStatusDto } from '@mac/protocol';
+import { WEB_SEARCH_PROVIDER_REQUIREMENTS, WEB_SEARCH_PROVIDERS } from '@mac/protocol';
 import { api, ApiError } from '../api.js';
-import { Alert, Field, Time } from '../components/ui.js';
+import { Alert, Badge, Field, Time } from '../components/ui.js';
+
 import { formatMoney } from './Dashboard.js';
+
+/** Newline-separated text into a trimmed list, for the multi-line settings. */
+const LINE_BREAK = '\n';
+const splitLines = (value: string): string[] =>
+  value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 
 /**
  * Settings.
@@ -51,6 +61,19 @@ export function Settings({ user }: { user: CurrentUser }) {
     mailProvider: 'none',
     modelAssistEnabled: false,
     modelProvider: 'none',
+    // --- Phase 4 ---
+    teamsEnabled: false,
+    teamsAuthorisedUsers: [] as string[],
+    teamsNotifyBlockers: true,
+    teamsNotifyApprovals: true,
+    teamsNotifyReports: false,
+    forjaEnabled: false,
+    webSearchProvider: 'none' as SettingsDto['webSearchProvider'],
+    externalResearchEnabled: false,
+    allowedResearchDomains: [] as string[],
+    acceptanceVerificationEnabled: true,
+    acceptanceSemanticReviewEnabled: true,
+    acceptanceRemediationEnabled: true,
   });
 
   const load = () => {
@@ -81,6 +104,18 @@ export function Settings({ user }: { user: CurrentUser }) {
           mailProvider: r.settings.mailProvider,
           modelAssistEnabled: r.settings.modelAssistEnabled,
           modelProvider: r.settings.modelProvider,
+          teamsEnabled: r.settings.teamsEnabled,
+          teamsAuthorisedUsers: r.settings.teamsAuthorisedUsers,
+          teamsNotifyBlockers: r.settings.teamsNotifyBlockers,
+          teamsNotifyApprovals: r.settings.teamsNotifyApprovals,
+          teamsNotifyReports: r.settings.teamsNotifyReports,
+          forjaEnabled: r.settings.forjaEnabled,
+          webSearchProvider: r.settings.webSearchProvider,
+          externalResearchEnabled: r.settings.externalResearchEnabled,
+          allowedResearchDomains: r.settings.allowedResearchDomains,
+          acceptanceVerificationEnabled: r.settings.acceptanceVerificationEnabled,
+          acceptanceSemanticReviewEnabled: r.settings.acceptanceSemanticReviewEnabled,
+          acceptanceRemediationEnabled: r.settings.acceptanceRemediationEnabled,
         });
       })
       .catch((err: Error) => setError(err.message));
@@ -88,6 +123,19 @@ export function Settings({ user }: { user: CurrentUser }) {
   };
 
   useEffect(load, []);
+
+  /*
+   * Teams CONNECTION status, separately from the Teams SETTINGS.
+   *
+   * A checkbox says what an operator asked for; this says what is actually
+   * true, including which specific configuration key is missing. The two are
+   * different questions and conflating them is how enabled comes to mean
+   * working.
+   */
+  const [teams, setTeams] = useState<TeamsStatusDto | null>(null);
+  useEffect(() => {
+    api.teamsStatus().then((r) => setTeams(r.status)).catch(() => undefined);
+  }, []);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -121,6 +169,19 @@ export function Settings({ user }: { user: CurrentUser }) {
         mailProvider: form.mailProvider as SettingsDto['mailProvider'],
         modelAssistEnabled: form.modelAssistEnabled,
         modelProvider: form.modelProvider as SettingsDto['modelProvider'],
+        // --- Phase 4 ---
+        teamsEnabled: form.teamsEnabled,
+        teamsAuthorisedUsers: form.teamsAuthorisedUsers,
+        teamsNotifyBlockers: form.teamsNotifyBlockers,
+        teamsNotifyApprovals: form.teamsNotifyApprovals,
+        teamsNotifyReports: form.teamsNotifyReports,
+        forjaEnabled: form.forjaEnabled,
+        webSearchProvider: form.webSearchProvider,
+        externalResearchEnabled: form.externalResearchEnabled,
+        allowedResearchDomains: form.allowedResearchDomains,
+        acceptanceVerificationEnabled: form.acceptanceVerificationEnabled,
+        acceptanceSemanticReviewEnabled: form.acceptanceSemanticReviewEnabled,
+        acceptanceRemediationEnabled: form.acceptanceRemediationEnabled,
       });
       setNotice('Settings saved. The change is recorded in the audit trail.');
       load();
@@ -315,6 +376,192 @@ export function Settings({ user }: { user: CurrentUser }) {
                 </select>
               </Field>
             </div>
+          </div>
+
+          {/* --- Phase 4 ------------------------------------------------- */}
+
+          <div className="card">
+            <h2>Microsoft Teams</h2>
+            <p className="hint">{teams ? teams.identity.limitation : 'Loading…'}</p>
+            {teams && (
+              <dl className="kv">
+                <dt>Connection</dt>
+                <dd>
+                  <Badge tone={teams.state === 'ready' ? 'ok' : teams.state === 'error' ? 'danger' : 'idle'}>
+                    {teams.state}
+                  </Badge>
+                  {/*
+                    Which specific things are missing, by key. "Teams is not
+                    configured" leaves somebody guessing between six
+                    possibilities at exactly the moment they can least afford to.
+                  */}
+                  {teams.missing.length > 0 && <span className="dim"> — missing: {teams.missing.join(', ')}</span>}
+                </dd>
+                <dt>Appears as</dt>
+                <dd>{teams.identity.signature}</dd>
+                <dt>Threads</dt>
+                <dd>{teams.conversations}</dd>
+                <dt>Deliveries</dt>
+                <dd>
+                  {teams.pendingDeliveries} pending · {teams.failedDeliveries} failed
+                  {teams.lastError && <span className="dim"> — {teams.lastError}</span>}
+                </dd>
+              </dl>
+            )}
+            <div className="grid grid-2">
+              <Field label="Enabled">
+                <label className="inline">
+                  <input type="checkbox" checked={form.teamsEnabled} onChange={toggle('teamsEnabled')} /> accept Teams
+                  messages
+                </label>
+              </Field>
+              <Field
+                label="Authorised Teams identities"
+                hint="AAD object ids or UPNs, one per line. EMPTY MEANS NOBODY: an unrecognised sender may talk to Mac and ask for status, and may not create work or approve anything."
+              >
+                <textarea
+                  rows={3}
+                  value={form.teamsAuthorisedUsers.join(LINE_BREAK)}
+                  onChange={(e) =>
+                    setForm((current) => ({
+                      ...current,
+                      teamsAuthorisedUsers: splitLines(e.target.value),
+                    }))
+                  }
+                />
+              </Field>
+            </div>
+            <div className="grid grid-3">
+              <Field label="Notify blockers">
+                <label className="inline">
+                  <input type="checkbox" checked={form.teamsNotifyBlockers} onChange={toggle('teamsNotifyBlockers')} />{' '}
+                  yes
+                </label>
+              </Field>
+              <Field label="Notify approvals">
+                <label className="inline">
+                  <input
+                    type="checkbox"
+                    checked={form.teamsNotifyApprovals}
+                    onChange={toggle('teamsNotifyApprovals')}
+                  />{' '}
+                  yes
+                </label>
+              </Field>
+              <Field
+                label="Notify morning report"
+                hint="Off: it is already emailed, and a notification that fires daily is one people learn to ignore."
+              >
+                <label className="inline">
+                  <input type="checkbox" checked={form.teamsNotifyReports} onChange={toggle('teamsNotifyReports')} />{' '}
+                  yes
+                </label>
+              </Field>
+            </div>
+          </div>
+
+          <div className="card">
+            <h2>External web research</h2>
+            <p className="hint">
+              Off by default, and additionally gated per project. This is the only capability that reaches outside
+              PAC. Nothing has been purchased: each provider below states exactly what it needs from a person.
+            </p>
+            <div className="grid grid-2">
+              <Field label="Enabled">
+                <label className="inline">
+                  <input
+                    type="checkbox"
+                    checked={form.externalResearchEnabled}
+                    onChange={toggle('externalResearchEnabled')}
+                  />{' '}
+                  allow external research
+                </label>
+              </Field>
+              <Field
+                label="Search provider"
+                hint={WEB_SEARCH_PROVIDER_REQUIREMENTS[form.webSearchProvider].humanRequirement}
+              >
+                <select value={form.webSearchProvider} onChange={set('webSearchProvider')}>
+                  {WEB_SEARCH_PROVIDERS.map((provider) => (
+                    <option key={provider} value={provider}>
+                      {WEB_SEARCH_PROVIDER_REQUIREMENTS[provider].label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <Field
+              label="Approved research domains"
+              hint="One per line. Mac fetches nothing outside this list, and does not add his own."
+            >
+              <textarea
+                rows={3}
+                value={form.allowedResearchDomains.join(LINE_BREAK)}
+                onChange={(e) =>
+                  setForm((current) => ({ ...current, allowedResearchDomains: splitLines(e.target.value) }))
+                }
+              />
+            </Field>
+          </div>
+
+          <div className="card">
+            <h2>Acceptance verification</h2>
+            <p className="hint">
+              Before Mac may call a task complete, the work is checked against the criteria a human approved. A run
+              with no criteria is unaffected — which is every coding run that existed before this was added.
+            </p>
+            <div className="grid grid-3">
+              <Field label="Enabled">
+                <label className="inline">
+                  <input
+                    type="checkbox"
+                    checked={form.acceptanceVerificationEnabled}
+                    onChange={toggle('acceptanceVerificationEnabled')}
+                  />{' '}
+                  verify
+                </label>
+              </Field>
+              <Field
+                label="Model-judged criteria"
+                hint="Costs model calls. A criterion nobody could decide reads as a gap, never as a pass."
+              >
+                <label className="inline">
+                  <input
+                    type="checkbox"
+                    checked={form.acceptanceSemanticReviewEnabled}
+                    onChange={toggle('acceptanceSemanticReviewEnabled')}
+                  />{' '}
+                  allow
+                </label>
+              </Field>
+              <Field
+                label="Remediation"
+                hint="One bounded attempt to produce what is missing, while the worker still holds the lease."
+              >
+                <label className="inline">
+                  <input
+                    type="checkbox"
+                    checked={form.acceptanceRemediationEnabled}
+                    onChange={toggle('acceptanceRemediationEnabled')}
+                  />{' '}
+                  allow
+                </label>
+              </Field>
+            </div>
+          </div>
+
+          <div className="card">
+            <h2>Forja</h2>
+            <p className="hint">
+              Forja is an application, not an agent. Every write it performs records the person it acted for; a client
+              that cannot name an active Mac user cannot write at all.
+            </p>
+            <Field label="Enabled">
+              <label className="inline">
+                <input type="checkbox" checked={form.forjaEnabled} onChange={toggle('forjaEnabled')} /> accept Forja
+                API calls
+              </label>
+            </Field>
           </div>
 
           <div className="card">

@@ -53,7 +53,17 @@ export async function resetDatabase(): Promise<void> {
       night_shifts, night_decisions, discovery_investigations, email_deliveries,
       -- Sprint 3.2. company_context_status is NOT truncated: it is a singleton
       -- like settings, and its row is restored below.
-      company_context_proposals, company_context_revisions
+      company_context_proposals, company_context_revisions,
+      -- Phase 4. mac_events is append-only and refuses UPDATE and DELETE, but
+      -- TRUNCATE is a different statement and is deliberately still permitted --
+      -- unlike audit_events, whose truncate guard exists because it is the
+      -- evidentiary record of what a machine did unsupervised. The event log is
+      -- a transport for a consumer to catch up on, not evidence, and a test
+      -- suite that could not reset it would have to assert against an
+      -- ever-growing sequence.
+      conversation_summaries, conversation_messages, conversation_participants,
+      conversations, approval_requests, event_deliveries, forja_clients,
+      mac_events, research_sources, run_acceptance
     RESTART IDENTITY CASCADE
   `);
   /*
@@ -101,6 +111,28 @@ export async function resetDatabase(): Promise<void> {
       company_context_allow_cached = true,
       company_context_min_refresh_seconds = 60,
       company_context_max_stale_hours = 168,
+      -- Sprint 3.3 defaults, restored explicitly for the same reason.
+      general_work_enabled = true,
+      max_research_steps = 8,
+      max_research_tool_calls = 40,
+      external_research_enabled = false,
+      allowed_research_domains = '[]'::jsonb,
+      -- Phase 4. Teams, Forja and web search are OFF, which is how a fresh
+      -- deployment finds them; a test that switches one on must not leak that
+      -- into the next file.
+      teams_enabled = false,
+      teams_authorised_users = '[]'::jsonb,
+      teams_notify_blockers = true,
+      teams_notify_approvals = true,
+      teams_notify_reports = false,
+      forja_enabled = false,
+      web_search_provider = 'none',
+      max_web_results_per_search = 8,
+      allow_fetch_from_search_results = false,
+      acceptance_verification_enabled = true,
+      acceptance_semantic_review_enabled = true,
+      acceptance_remediation_enabled = true,
+      conversation_summary_threshold = 24,
       updated_by = NULL
     WHERE id = 1
   `);

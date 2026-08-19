@@ -32,6 +32,20 @@ import type {
   GeneralRunStateDto,
   TaskExecutionStateDto,
   UpdateProjectCapabilitiesRequest,
+  // --- Phase 4 ---
+  AcceptanceReviewDto,
+  ApprovalRequestDto,
+  ConversationDto,
+  ConversationMessageDto,
+  ConversationSummaryDto,
+  ConversationTurnDto,
+  CreateForjaClientRequest,
+  DecideApprovalRequest,
+  ForjaClientDto,
+  PostConversationMessageRequest,
+  ResearchSourceDto,
+  StartConversationRequest,
+  TeamsStatusDto,
   // --- Sprint 3 ---
   CompanyContextStatusDto,
   CompanyProposalDto,
@@ -288,4 +302,50 @@ export const api = {
     if (params.runId) query.set('runId', params.runId);
     return get<{ investigations: InvestigationDto[] }>(`/api/investigations?${query.toString()}`);
   },
+
+  // --- Phase 4: conversations ----------------------------------------------
+  listConversations: (params: { taskId?: string; projectId?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.taskId) query.set('taskId', params.taskId);
+    if (params.projectId) query.set('projectId', params.projectId);
+    const suffix = query.toString();
+    return get<{ conversations: ConversationDto[] }>(`/api/conversations${suffix ? `?${suffix}` : ''}`);
+  },
+  getConversation: (id: string) =>
+    get<{
+      conversation: ConversationDto;
+      messages: ConversationMessageDto[];
+      summaries: ConversationSummaryDto[];
+    }>(`/api/conversations/${id}`),
+  startConversation: (body: StartConversationRequest) =>
+    post<{ conversation: ConversationDto; turn: ConversationTurnDto | null }>('/api/conversations', body),
+  sendConversationMessage: (id: string, body: PostConversationMessageRequest) =>
+    post<{ turn: ConversationTurnDto }>(`/api/conversations/${id}/messages`, body),
+
+  // --- Phase 4: approvals ---------------------------------------------------
+  listApprovalRequests: (params: { state?: string; taskId?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.state) query.set('state', params.state);
+    if (params.taskId) query.set('taskId', params.taskId);
+    const suffix = query.toString();
+    return get<{ requests: ApprovalRequestDto[] }>(`/api/approval-requests${suffix ? `?${suffix}` : ''}`);
+  },
+  decideApprovalRequest: (id: string, body: DecideApprovalRequest) =>
+    post<{ request: ApprovalRequestDto }>(`/api/approval-requests/${id}/decision`, body),
+
+  // --- Phase 4: channel status ----------------------------------------------
+  teamsStatus: () => get<{ status: TeamsStatusDto }>('/api/teams/status'),
+  forjaClients: () =>
+    get<{ clients: ForjaClientDto[]; health: { clients: number; activeClients: number; lastSeenAt: string | null } }>(
+      '/api/forja/clients',
+    ),
+  createForjaClient: (body: CreateForjaClientRequest) =>
+    post<{ client: ForjaClientDto; apiKey: string; webhookSecret: string }>('/api/forja/clients', body),
+  revokeForjaClient: (id: string) => post<{ revoked: boolean }>(`/api/forja/clients/${id}/revoke`),
+
+  // --- Phase 4: acceptance and research provenance --------------------------
+  runAcceptance: (runId: string) =>
+    get<{ acceptance: AcceptanceReviewDto | null; sources: ResearchSourceDto[] }>(
+      `/api/runs/${runId}/acceptance`,
+    ),
 };

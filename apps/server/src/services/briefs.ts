@@ -18,6 +18,8 @@ import { adviseExecution, parseConfidence } from '../domain/confidence.js';
 import { analyseGaps, deriveFromContext } from '../domain/gap-analysis.js';
 import { getSettings, toConfidencePolicy } from './settings.js';
 import { record, type Actor } from './audit.js';
+import { emit } from './events.js';
+import { deriveCriteriaForBrief } from './acceptance.js';
 import { contextRefFor } from './company-context/service.js';
 
 /**
@@ -252,6 +254,48 @@ export async function createBrief(
         })),
       },
     });
+
+    /*
+     * Phase 4: the brief's own acceptance criteria, derived as it is written.
+     *
+     * Part F §22 asks briefs to EXPOSE machine-checkable criteria, and deriving
+     * them here rather than at approval means a human sees them — and can edit
+     * them — while they still have the chance to disagree. A criterion first
+     * seen at completion is a criterion nobody agreed to.
+     */
+    await deriveCriteriaForBrief(row.id, actor, tx);
+
+    /*
+     * Two events, and they are genuinely different questions.
+     *
+     * `brief_ready` says a contract now exists that somebody can read.
+     * `question_required` says Mac is BLOCKED on a person — which is what a
+     * Forja inbox needs to surface, and what a brief with unanswered questions
+     * means in practice.
+     */
+    await emit(tx, {
+      type: 'brief_ready',
+      projectId: input.projectId,
+      taskId: input.taskId,
+      data: { briefId: row.id, version: row.version, confidence: analysis.confidence },
+    });
+
+    const unanswered = withQuestions.openQuestions.filter((q) => q.answer === null);
+    if (unanswered.length > 0) {
+      await emit(tx, {
+        type: 'question_required',
+        projectId: input.projectId,
+        taskId: input.taskId,
+        data: {
+          briefId: row.id,
+          // The single next question. Spec section 4: Mac asks one at a time,
+          // and an event carrying five would misrepresent that.
+          question: unanswered[0]!.question,
+          dimension: unanswered[0]!.dimension,
+          outstanding: unanswered.length,
+        },
+      });
+    }
 
     return briefDto(row, tx);
   };

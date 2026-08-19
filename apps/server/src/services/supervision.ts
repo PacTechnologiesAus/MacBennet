@@ -18,6 +18,7 @@ import { getSettings } from './settings.js';
 import { memoryForTask } from './memory.js';
 import { appendSystemLog } from './logs.js';
 import { record, type Actor } from './audit.js';
+import { emit } from './events.js';
 import { toQuestionDto } from './coding-sessions.js';
 import { runInvestigation as investigation_ } from './investigation.js';
 import { consultedSources } from '../domain/investigation.js';
@@ -314,6 +315,48 @@ async function insertBlocker(
       risk: input.risk,
     })
     .returning();
+
+  /*
+   * A blocker is one of the five things Part G section 27 permits Mac to
+   * interrupt a person about, so Forja and the notification path both need to
+   * hear about it at the moment it is raised rather than at the end of a shift.
+   */
+  const [context] = await tx
+    .select({ taskId: runs.taskId, projectId: tasks.projectId })
+    .from(runs)
+    .innerJoin(tasks, eq(tasks.id, runs.taskId))
+    .where(eq(runs.id, runId))
+    .limit(1);
+
+  await emit(tx, {
+    type: 'blocker_raised',
+    runId,
+    taskId: context?.taskId ?? null,
+    projectId: context?.projectId ?? null,
+    data: { blockerId: row!.id, description: truncate(input.description, 500), risk: input.risk },
+  });
+
+  /*
+   * Told to a person, if the policy permits it and there is a thread to say it
+   * in. Imported lazily so this module does not pull the whole Teams path into
+   * every coding run that never raises a blocker.
+   *
+   * Deliberately does not fail the blocker: a blocker that could not be
+   * announced is still a blocker, and losing the record because the
+   * notification failed would be the wrong way round.
+   */
+  if (context?.taskId) {
+    const { notify } = await import('./notifications.js');
+    await notify({
+      trigger: 'blocker_raised',
+      taskId: context.taskId,
+      projectId: context.projectId,
+      text: `I am blocked on **${truncate(input.description, 300)}**
+
+${truncate(input.reason, 600)}`,
+    }).catch(() => undefined);
+  }
+
   return row!.id;
 }
 

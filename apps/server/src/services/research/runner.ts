@@ -1,5 +1,9 @@
 import { eq } from 'drizzle-orm';
+import { z } from 'zod';
 import {
+  artefactContentSchema,
+  deliverableOutlineSchema,
+  frameUntrusted,
   emptyResearchState,
   handoffBriefContentSchema,
   RESEARCH_LIMITS,
@@ -7,6 +11,8 @@ import {
   researchStateSchema,
   researchStepOutputSchema,
   type ArtefactContent,
+  type ModelCompletionResult,
+  type ModelProvider,
   type ResearchPlan,
   type ResearchSource,
   type ResearchState,
@@ -14,6 +20,7 @@ import {
   type ResearchToolResult,
   type TaskKind,
 } from '@mac/protocol';
+import { config } from '../../config.js';
 import { db, type DbHandle } from '../../db/client.js';
 import { generalRunState, handoffBriefs, projects, runs, runUsage, tasks } from '../../db/schema.js';
 import { AppError } from '../../http/errors.js';
@@ -32,7 +39,9 @@ import { getSettings } from '../settings.js';
 import { requireReasoningProvider } from '../model/provider.js';
 import { createArtefact } from '../artefacts.js';
 import { appendSystemLog } from '../logs.js';
+import { injectionNoteFor, scanForInjection } from '../../domain/injection.js';
 import { projectAllowsExternalResearch, runTool, type ToolContext } from './tools.js';
+import { persistToolSources, searchResultHostsFor } from './sources.js';
 
 /**
  * Executing general work (Sprint 3.3 §13).
@@ -178,14 +187,35 @@ const STEP_SYSTEM = [
   'inference, recommendation, assumption, unknown.',
 ].join('\n');
 
-const FINALISE_SYSTEM = [
+/** Phase one of the write-up: name the deliverables, do not write them yet. */
+const OUTLINE_SYSTEM = [
   STEP_SYSTEM,
   '',
   'THIS IS THE FINAL STEP. Do not request any more tools; anything you ask for will be ignored.',
-  'Produce the deliverables named in the plan, in `artefacts`. Each artefact needs:',
-  '  {"type":string,"title":string,"format":"markdown","body":string,"summary":string,"findings":[...]}',
+  '',
+  'Do NOT write the deliverables yet. LIST them. Each will be written separately, by its own',
+  'call, with a full budget to itself — so name every document the plan calls for, without',
+  'worrying about length.',
+  '',
+  'Reply with JSON only:',
+  '{"deliverables":[{"type":string,"title":string,"purpose":string}],',
+  ' "findings":[{"statement":string,"evidenceClass":string,"confidence":number,"sources":[string],"reasoning":string}],',
+  ' "narrative":string,"unknowns":[string],"blockerProposed":string|null}',
+  '',
   'type is one of: investigation_report, engineering_brief, architecture_note, recommendation,',
   'markdown_document, structured_data, diagram_description, task_proposal.',
+  'purpose says what the document is for and what it must cover.',
+].join('\n');
+
+/** Phase two: write exactly one of them. */
+const ARTEFACT_SYSTEM = [
+  STEP_SYSTEM,
+  '',
+  'Write ONE deliverable, named below. Ignore every other document in the plan; they are being',
+  'written separately. Use the whole budget on this one.',
+  '',
+  'Reply with JSON only:',
+  '{"type":string,"title":string,"format":"markdown","body":string,"summary":string,"findings":[...]}',
   '',
   'Write the body for an engineer who will act on it: what you were asked, what you established,',
   'what you could not establish, and what you recommend. Say plainly where the evidence is thin.',
@@ -227,15 +257,28 @@ export async function performResearchStep(
 
   const finalising = decision.action === 'finalise';
 
-  const completion = await provider.complete({
-    system: finalising ? FINALISE_SYSTEM : STEP_SYSTEM,
-    prompt: buildPrompt(plan, state, decision, context.taskTitle),
-    maxTokens: finalising ? 8000 : 3000,
-    expectJson: true,
-    ...(options.signal ? { signal: options.signal } : {}),
-  } as Parameters<typeof provider.complete>[0]);
+  /*
+   * The write-up is produced one deliverable per call. See the note on
+   * `deliverableOutlineSchema` for why: a single response is a fixed budget
+   * shared by every artefact, and truncating it loses all of them rather than
+   * the one that overran. That is not hypothetical — it is what the first real
+   * run on the commissioned VM did.
+   */
+  const writeUp = finalising
+    ? await writeDeliverables(provider, plan, state, decision, context, options.signal)
+    : null;
 
-  const parsed = parseStepOutput(completion.text);
+  const completion: ModelCompletionResult = writeUp
+    ? writeUp
+    : await provider.complete({
+        system: STEP_SYSTEM,
+        prompt: buildPrompt(plan, state, decision, context.taskTitle),
+        maxTokens: config.model.stepMaxTokens,
+        expectJson: true,
+        ...(options.signal ? { signal: options.signal } : {}),
+      } as Parameters<typeof provider.complete>[0]);
+
+  const parsed = writeUp ? writeUp.output : parseStepOutput(completion.text);
 
   /*
    * A model that returned nothing usable does not stop the run.
@@ -245,6 +288,23 @@ export async function performResearchStep(
    * night's work hostage to a single unlucky completion.
    */
   const output: ResearchStepOutput = parsed ?? researchStepOutputSchema.parse({ narrative: '' });
+
+  /*
+   * Truncation is not the same as silence, and must not be reported as it.
+   *
+   * `stop_reason: max_tokens` means we cut the model off mid-sentence. Recording
+   * it distinguishes "the model had nothing to say" from "we did not let it
+   * finish", which is precisely the confusion that made the first real run look
+   * successful while delivering nothing.
+   */
+  if (completion.stopReason === 'max_tokens') {
+    await appendSystemLog(
+      db,
+      runId,
+      'The reasoning model was cut off at the token ceiling before it finished. ' +
+        'What it had written up to that point may be incomplete.',
+    );
+  }
 
   // --- Tools ---------------------------------------------------------------
 
@@ -260,6 +320,20 @@ export async function performResearchStep(
       companyContextRevisionId: context.companyContextRevisionId,
       allowedResearchDomains: settings.allowedResearchDomains,
       externalResearchEnabled: settings.externalResearchEnabled,
+      // Phase 4: resolved from settings HERE, so the model cannot name a
+      // provider, widen a result count, or ask to fetch outside the allowlist.
+      webSearchProvider: settings.webSearchProvider,
+      maxWebResults: settings.maxWebResultsPerSearch,
+      allowFetchFromSearchResults: settings.allowFetchFromSearchResults,
+      vendorDomains: settings.allowedResearchDomains,
+      /*
+       * Hosts this run has already seen in its OWN search results.
+       *
+       * Read once per step rather than per call, and read from the persisted
+       * record rather than from the in-memory state, so a run that reconnected
+       * mid-night does not silently lose the widening it had earned.
+       */
+      searchResultHosts: settings.allowFetchFromSearchResults ? await searchResultHostsFor(runId) : [],
     };
 
     for (const call of output.toolCalls.slice(0, RESEARCH_LIMITS.maxToolCallsPerStep)) {
@@ -277,6 +351,10 @@ export async function performResearchStep(
       toolResults.push(result);
       toolCallsMade += 1;
       newSources.push(...result.sources);
+
+      // Provenance into its own table, so `external_sources_used` is a fact a
+      // predicate can check rather than a number parsed out of a blob.
+      await persistToolSources({ runId, taskId: context.taskId, result }, actor);
 
       await record(db, {
         actor,
@@ -464,7 +542,37 @@ function buildPrompt(plan: ResearchPlan, state: ResearchState, decision: LoopDec
     lines.push('  (none yet)');
   } else {
     for (const source of state.sources.slice(0, 60)) {
-      lines.push(`  [${source.ref}] ${source.label}`, `    ${source.excerpt.slice(0, 1200)}`);
+      if (!source.external) {
+        lines.push(`  [${source.ref}] ${source.label}`, `    ${source.excerpt.slice(0, 1200)}`);
+        continue;
+      }
+
+      /*
+       * External content is FRAMED as untrusted (Part E §20).
+       *
+       * This is the third of four defences and not the one the design rests
+       * on — a web page cannot change Mac authority because the protocol has
+       * no field in which an authority change could be expressed, and nothing
+       * parses retrieved text as instructions because there is no code path
+       * that could.
+       *
+       * Framing is worth having anyway because it costs nothing and a model
+       * told plainly that a block is hostile data behaves better than one left
+       * to infer it. `frameUntrusted` strips the delimiter sequence from the
+       * content, so a page cannot close its own quotation and continue as
+       * though it were the system prompt.
+       */
+      lines.push(
+        `  [${source.ref}] ${source.label}${source.injectionSuspected ? ' — FLAGGED' : ''}`,
+        frameUntrusted({
+          label: source.label,
+          url: source.url ?? source.ref,
+          text: source.excerpt.slice(0, 1200),
+        }),
+      );
+      if (source.injectionSuspected) {
+        lines.push(injectionNoteFor(scanForInjection(source.excerpt)));
+      }
     }
   }
   lines.push('');
@@ -483,6 +591,132 @@ function buildPrompt(plan: ResearchPlan, state: ResearchState, decision: LoopDec
   }
 
   return lines.join('\n');
+}
+
+/**
+ * The write-up, as one call to outline it and one call per document.
+ *
+ * Returns the same shape a single completion would, so the caller's persistence,
+ * usage accounting and audit path are unchanged — the difference is only in how
+ * many times the model was asked. Usage is summed across every call so the run's
+ * recorded cost stays true.
+ *
+ * A document that fails to parse costs that document. The others still land,
+ * and the count of what was asked for versus what arrived is returned so the
+ * caller can refuse to call a run successful when the two disagree.
+ */
+async function writeDeliverables(
+  provider: ModelProvider,
+  plan: ResearchPlan,
+  state: ResearchState,
+  decision: LoopDecision,
+  context: RunContext,
+  signal: AbortSignal | undefined,
+): Promise<{
+  text: string;
+  model: string;
+  usage: { inputTokens: number | null; outputTokens: number | null };
+  stopReason: string | null;
+  output: ResearchStepOutput;
+  requested: number;
+  written: number;
+}> {
+  const ask = (system: string, prompt: string, maxTokens: number) =>
+    provider.complete({
+      system,
+      prompt,
+      maxTokens,
+      expectJson: true,
+      ...(signal ? { signal } : {}),
+    } as Parameters<typeof provider.complete>[0]);
+
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let truncated = false;
+  let model: string = provider.name;
+
+  const account = (c: { model: string; usage: { inputTokens: number | null; outputTokens: number | null }; stopReason: string | null }) => {
+    inputTokens += c.usage.inputTokens ?? 0;
+    outputTokens += c.usage.outputTokens ?? 0;
+    if (c.stopReason === 'max_tokens') truncated = true;
+    model = c.model;
+  };
+
+  // --- Phase one: what are we writing? --------------------------------------
+  const outlineCompletion = await ask(
+    OUTLINE_SYSTEM,
+    buildPrompt(plan, state, decision, context.taskTitle),
+    config.model.outlineMaxTokens,
+  );
+  account(outlineCompletion);
+
+  const outline = parseJsonCandidates(outlineCompletion.text, deliverableOutlineSchema);
+  if (!outline) {
+    // Nothing to write, and nothing invented. The caller treats a zero-artefact
+    // finalise as a failure rather than a quiet success.
+    return {
+      text: outlineCompletion.text,
+      model,
+      usage: { inputTokens, outputTokens },
+      stopReason: truncated ? 'max_tokens' : outlineCompletion.stopReason,
+      output: researchStepOutputSchema.parse({ narrative: '' }),
+      requested: 0,
+      written: 0,
+    };
+  }
+
+  const wanted = outline.deliverables.slice(0, RESEARCH_LIMITS.maxArtefactsPerRun);
+
+  // --- Phase two: write each one on its own budget --------------------------
+  const artefacts: ArtefactContent[] = [];
+  for (const item of wanted) {
+    const completion = await ask(
+      ARTEFACT_SYSTEM,
+      [
+        buildPrompt(plan, state, decision, context.taskTitle),
+        '',
+        '--- THE ONE DOCUMENT TO WRITE NOW ---',
+        `type: ${item.type}`,
+        `title: ${item.title}`,
+        `purpose: ${item.purpose}`,
+      ].join('\n'),
+      config.model.artefactMaxTokens,
+    );
+    account(completion);
+
+    const artefact = parseJsonCandidates(completion.text, artefactContentSchema);
+    if (artefact) artefacts.push(artefact);
+  }
+
+  return {
+    text: outlineCompletion.text,
+    model,
+    usage: { inputTokens, outputTokens },
+    stopReason: truncated ? 'max_tokens' : null,
+    output: researchStepOutputSchema.parse({
+      narrative: outline.narrative,
+      unknowns: outline.unknowns,
+      blockerProposed: outline.blockerProposed,
+      findings: outline.findings,
+      artefacts,
+    }),
+    requested: wanted.length,
+    written: artefacts.length,
+  };
+}
+
+/** Parse JSON that a model may have wrapped in prose, against a given schema. */
+function parseJsonCandidates<T extends z.ZodTypeAny>(text: string, schema: T): z.infer<T> | null {
+  const candidates = [text, extractBraced(text)].filter((c): c is string => Boolean(c));
+  for (const candidate of candidates) {
+    try {
+      const result = schema.safeParse(JSON.parse(candidate));
+      if (result.success) return result.data;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return null;
 }
 
 function parseStepOutput(text: string): ResearchStepOutput | null {
@@ -674,6 +908,121 @@ export async function recordReasoningUsage(
     model: usage.model,
     metadata: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Remediation
+// ---------------------------------------------------------------------------
+
+const REMEDIATION_SYSTEM = [
+  STEP_SYSTEM,
+  '',
+  'THIS IS A REMEDIATION PASS. The work you produced has been checked against the acceptance criteria a',
+  'human approved, and specific criteria were NOT met. You are being given one chance to produce what is',
+  'missing.',
+  '',
+  'Do not restate what you already delivered, and do not argue that a criterion did not need to be met —',
+  'that is not a thing you can do here. Write the missing deliverable, using the sources and findings you',
+  'already have. If the evidence does not support writing it, say so in `unknowns` and produce nothing;',
+  'an invented document is worse than an acknowledged gap.',
+  '',
+  'Reply with JSON only:',
+  '{"type":string,"title":string,"format":"markdown","body":string,"summary":string,"findings":[...]}',
+].join('\n');
+
+/**
+ * One bounded attempt to fill the gaps (Part F §24.6).
+ *
+ * ---------------------------------------------------------------------------
+ * WHY EXACTLY ONE, AND WHY BEFORE COMPLETION
+ *
+ * Before completion, because that is the only moment the worker still holds the
+ * lease and the night still has time in it. Afterwards the run is terminal and
+ * the honest way to produce a missing deliverable is a new run, which leaves
+ * the record of the shortfall intact.
+ *
+ * Exactly one, because a loop that retries until the criteria pass is a loop
+ * that will eventually produce something shaped like the criterion rather than
+ * something true. The ceiling is what keeps "remediation" from becoming
+ * "generate until the check goes green".
+ * ---------------------------------------------------------------------------
+ */
+export async function performAcceptanceRemediation(
+  runId: string,
+  unmet: ReadonlyArray<{ description: string; observed: string }>,
+  actor: Actor = SYSTEM_ACTOR,
+): Promise<{ artefactsCreated: number; note: string }> {
+  if (unmet.length === 0) return { artefactsCreated: 0, note: 'Nothing was unmet.' };
+
+  const provider = await requireReasoningProvider('Acceptance remediation');
+  const loaded = await loadStepState(runId);
+  const { plan, state, context } = loaded;
+
+  let created = 0;
+  const attempted: string[] = [];
+
+  /*
+   * One call per missing deliverable, not one call for all of them.
+   *
+   * The same lesson the write-up learned the expensive way at commissioning: a
+   * single response is a fixed budget shared between every document, so a long
+   * one starves the rest and truncation costs the whole set instead of one.
+   */
+  for (const gap of unmet.slice(0, RESEARCH_LIMITS.maxArtefactsPerRun)) {
+    attempted.push(gap.description);
+
+    const completion = await provider.complete({
+      system: REMEDIATION_SYSTEM,
+      prompt: [
+        buildPrompt(plan, state, { action: 'finalise', reason: 'Filling an unmet acceptance criterion.' }, context.taskTitle),
+        '',
+        '--- THE CRITERION THAT WAS NOT MET ---',
+        gap.description,
+        `What the check observed: ${gap.observed}`,
+      ].join('\n'),
+      maxTokens: config.model.artefactMaxTokens,
+      expectJson: true,
+    });
+
+    const artefact = parseJsonCandidates(completion.text, artefactContentSchema);
+    await recordReasoningUsage(runId, {
+      provider: provider.name,
+      model: completion.model,
+      inputTokens: completion.usage.inputTokens,
+      outputTokens: completion.usage.outputTokens,
+    });
+
+    if (!artefact) continue;
+
+    await createArtefact(
+      {
+        taskId: context.taskId,
+        runId,
+        content: { ...artefact, findings: artefact.findings.length ? artefact.findings : state.findings },
+        usage: {
+          provider: provider.name,
+          model: completion.model,
+          inputTokens: completion.usage.inputTokens,
+          outputTokens: completion.usage.outputTokens,
+        },
+        companyContextRevisionId: context.companyContextRevisionId,
+      },
+      actor,
+    ).catch(async (err) => {
+      await appendSystemLog(db, runId, `A remediation artefact could not be stored: ${(err as Error).message}`);
+      return null;
+    });
+
+    created += 1;
+  }
+
+  const note =
+    created === 0
+      ? `Attempted ${attempted.length} unmet criterion(s) and produced nothing further. The evidence did not support it.`
+      : `Attempted ${attempted.length} unmet criterion(s) and produced ${created} further deliverable(s).`;
+
+  await appendSystemLog(db, runId, note);
+  return { artefactsCreated: created, note };
 }
 
 /** The stored plan and state, for the UI and the report. */

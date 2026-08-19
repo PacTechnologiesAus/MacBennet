@@ -5,6 +5,8 @@ import { requestRotationForAgedTokens } from '../services/worker-credentials.js'
 import { nightShiftTick } from '../services/night-shift.js';
 import { deliverPendingMondayWrites } from '../services/monday/outbox.js';
 import { deliverPendingEmails } from '../services/mail/delivery.js';
+import { deliverPendingMessages } from '../services/notifications.js';
+import { expireStaleRequests } from '../services/approval-requests.js';
 
 /**
  * Two periodic tasks, run in-process with setInterval.
@@ -33,6 +35,15 @@ const NIGHT_TICK_MS = 30_000;
 const MONDAY_SWEEP_MS = 10_000;
 /** The mail outbox. One email a night; there is nothing to hurry. */
 const MAIL_SWEEP_MS = 20_000;
+/**
+ * Phase 4: the conversation outbox, and approval expiry.
+ *
+ * Messages are swept faster than mail because a person is waiting on the other
+ * end of one. Approval expiry is slow-moving — an approval that expired four
+ * minutes ago is not an emergency — and checking it often would be noise.
+ */
+const MESSAGE_SWEEP_MS = 10_000;
+const APPROVAL_EXPIRY_SWEEP_MS = 5 * 60_000;
 
 export interface Sweepers {
   stop: () => void;
@@ -43,6 +54,8 @@ export interface Sweepers {
   tickNightShift: () => Promise<unknown>;
   deliverMondayWrites: () => Promise<unknown>;
   deliverEmails: () => Promise<unknown>;
+  deliverMessages: () => Promise<unknown>;
+  expireApprovals: () => Promise<unknown>;
 }
 
 export function startSweepers(logger: FastifyBaseLogger): Sweepers {
@@ -117,14 +130,40 @@ export function startSweepers(logger: FastifyBaseLogger): Sweepers {
     return result;
   };
 
+  const deliverMessages = async (): Promise<unknown> => {
+    const result = await deliverPendingMessages();
+    if (result.sent > 0) logger.info({ messages: result }, 'conversation messages delivered');
+    // A dead-lettered message means Mac said something a person never saw —
+    // which for a blocker or an approval is the whole point of having said it.
+    if (result.dead > 0) logger.warn({ messages: result }, 'conversation messages dead-lettered');
+    return result;
+  };
+
+  const expireApprovals = async (): Promise<unknown> => {
+    const expired = await expireStaleRequests(new Date());
+    if (expired > 0) logger.info({ expired }, 'approval requests expired');
+    return expired;
+  };
+
   const workerTimer = setInterval(guarded(sweepWorkers, 'heartbeat'), HEARTBEAT_SWEEP_MS);
   const cutoffTimer = setInterval(guarded(sweepCutoffs, 'cutoff'), CUTOFF_SWEEP_MS);
   const credentialTimer = setInterval(guarded(sweepCredentials, 'credential'), CREDENTIAL_SWEEP_MS);
   const nightTimer = setInterval(guarded(tickNightShift, 'night-shift'), NIGHT_TICK_MS);
   const mondayTimer = setInterval(guarded(deliverMondayWrites, 'monday-outbox'), MONDAY_SWEEP_MS);
   const mailTimer = setInterval(guarded(deliverEmails, 'mail-outbox'), MAIL_SWEEP_MS);
+  const messageTimer = setInterval(guarded(deliverMessages, 'message-outbox'), MESSAGE_SWEEP_MS);
+  const approvalTimer = setInterval(guarded(expireApprovals, 'approval-expiry'), APPROVAL_EXPIRY_SWEEP_MS);
 
-  const timers = [workerTimer, cutoffTimer, credentialTimer, nightTimer, mondayTimer, mailTimer];
+  const timers = [
+    workerTimer,
+    cutoffTimer,
+    credentialTimer,
+    nightTimer,
+    mondayTimer,
+    mailTimer,
+    messageTimer,
+    approvalTimer,
+  ];
   // Do not hold the process open purely for a sweep.
   for (const timer of timers) timer.unref();
 
@@ -135,6 +174,8 @@ export function startSweepers(logger: FastifyBaseLogger): Sweepers {
     sweepWorkers,
     sweepCutoffs,
     sweepCredentials,
+    deliverMessages,
+    expireApprovals,
     tickNightShift,
     deliverMondayWrites,
     deliverEmails,

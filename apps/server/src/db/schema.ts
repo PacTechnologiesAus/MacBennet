@@ -53,6 +53,21 @@ import {
   ARTEFACT_FORMATS,
   ARTEFACT_TYPES,
   RESEARCH_STAGES,
+  ACCEPTANCE_STATES,
+  APPROVAL_REQUEST_STATES,
+  APPROVAL_SUBJECT_KINDS,
+  AUTHORITY_CLASSES,
+  CONVERSATION_CHANNELS,
+  CONVERSATION_STATUSES,
+  DELIVERY_STATES,
+  EVENT_DELIVERY_STATUSES,
+  MAC_EVENT_TYPES,
+  MESSAGE_DIRECTIONS,
+  MESSAGE_INTENTS,
+  OUTBOUND_KINDS,
+  PARTICIPANT_KINDS,
+  SOURCE_CLASSES,
+  WEB_SEARCH_PROVIDERS,
   SANDBOX_KINDS,
   SANDBOX_NETWORK_MODES,
   SCOPE_KINDS,
@@ -226,6 +241,49 @@ export const settings = pgTable('settings', {
    */
   externalResearchEnabled: boolean('external_research_enabled').notNull().default(false),
   allowedResearchDomains: jsonb('allowed_research_domains').notNull().default(sql`'[]'::jsonb`),
+
+  // --- Phase 4 ---
+  /** Off, like every integration that reaches outside this process. */
+  teamsEnabled: boolean('teams_enabled').notNull().default(false),
+  /**
+   * Teams identities permitted to assign work and approve, by AAD object id or
+   * UPN.
+   *
+   * Empty means nobody, and that is the safe reading rather than an oversight:
+   * an unrecognised Teams sender may talk to Mac and ask for status, and may
+   * not create work or authorise anything. Authorisation is not something a
+   * chat platform confers.
+   */
+  teamsAuthorisedUsers: jsonb('teams_authorised_users').notNull().default(sql`'[]'::jsonb`),
+  teamsNotifyBlockers: boolean('teams_notify_blockers').notNull().default(true),
+  teamsNotifyApprovals: boolean('teams_notify_approvals').notNull().default(true),
+  /**
+   * Off. The morning report is long, arrives at 08:00, and is already emailed.
+   * Part G §27 is explicit that Teams must not become progress chatter, and a
+   * daily report is the thickest end of that wedge.
+   */
+  teamsNotifyReports: boolean('teams_notify_reports').notNull().default(false),
+
+  forjaEnabled: boolean('forja_enabled').notNull().default(false),
+
+  webSearchProvider: enumText('web_search_provider', WEB_SEARCH_PROVIDERS).notNull().default('none'),
+  maxWebResultsPerSearch: integer('max_web_results_per_search').notNull().default(8),
+  /**
+   * Whether a search result's host may be fetched without being on the
+   * research-domain allowlist.
+   *
+   * Off. A search provider that could choose what Mac may retrieve would make
+   * the administrator's allowlist decorative — and a poisoned result set is a
+   * cheaper attack than compromising a host PAC already trusts.
+   */
+  allowFetchFromSearchResults: boolean('allow_fetch_from_search_results').notNull().default(false),
+
+  acceptanceVerificationEnabled: boolean('acceptance_verification_enabled').notNull().default(true),
+  /** Separately switchable: semantic criteria cost model calls. */
+  acceptanceSemanticReviewEnabled: boolean('acceptance_semantic_review_enabled').notNull().default(true),
+  acceptanceRemediationEnabled: boolean('acceptance_remediation_enabled').notNull().default(true),
+
+  conversationSummaryThreshold: integer('conversation_summary_threshold').notNull().default(24),
 });
 
 export const projects = pgTable(
@@ -487,6 +545,19 @@ export const runs = pgTable(
      * what this run was working under (Sprint 3.2 §8.2, §9.3).
      */
     companyContextRevisionId: uuid('company_context_revision_id'),
+
+    // --- Phase 4 ---
+    /**
+     * Whether the work delivered matched the criteria a human approved.
+     *
+     * Denormalised onto the run so every list, filter and report that already
+     * reads this table can show the acceptance position without a join. The
+     * detail lives in `run_acceptance`; this is the one word.
+     *
+     * `not_assessed` for every run that has no criteria, which is every coding
+     * run that existed before Phase 4.
+     */
+    acceptanceState: enumText('acceptance_state', ACCEPTANCE_STATES).notNull().default('not_assessed'),
   },
   (t) => ({
     taskIdx: index('runs_task_id_idx').on(t.taskId),
@@ -691,6 +762,19 @@ export const handoffBriefs = pgTable(
     version: integer('version').notNull().default(1),
     status: text('status').notNull().default('draft'),
     content: jsonb('content').notNull(),
+    /**
+     * Phase 4: the machine-checkable acceptance criteria.
+     *
+     * Alongside `content.acceptanceCriteria`, which is free text and stays
+     * exactly as it is. The free-text list is what a human reads and is where
+     * requirements that cannot be mechanised belong; reducing it to a checklist
+     * would lose them.
+     *
+     * This list is what completion is judged against, and it is FROZEN onto the
+     * run at approval — so a brief edited afterwards cannot move the bar the
+     * work is being measured by.
+     */
+    acceptance: jsonb('acceptance').notNull().default(sql`'[]'::jsonb`),
     confidence: numeric('confidence', { precision: 4, scale: 3 }).notNull().default('0'),
     /** Provenance only. Never the specification handed to a coding agent. */
     sourceConversation: text('source_conversation').notNull().default(''),
@@ -728,6 +812,16 @@ export const discoverySessions = pgTable(
     pendingQuestion: jsonb('pending_question'),
     /** Sprint 3.2: the company context bound when this session started. */
     companyContextRevisionId: uuid('company_context_revision_id'),
+    /**
+     * Phase 4: the conversation this discovery is being conducted through.
+     *
+     * A LINK, not a merge. Discovery keeps its own message array and its own
+     * `pendingQuestion`, because rewriting the working half of Sprints 2 and
+     * 3.3 to sit on top of conversations would risk a great deal for a
+     * structural tidiness nobody asked for. What this column buys is that a
+     * Teams answer can reach the same brief a web-UI answer would.
+     */
+    conversationId: uuid('conversation_id'),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -1505,6 +1599,344 @@ export const companyContextProposals = pgTable(
   }),
 );
 
+
+// ---------------------------------------------------------------------------
+// Phase 4 — conversations
+// ---------------------------------------------------------------------------
+
+/**
+ * A persistent thread that belongs to MAC, not to a channel.
+ *
+ * Teams, the web UI, Forja and (later) voice attach to the same conversation.
+ * `channel` records where it STARTED; individual messages carry their own, so a
+ * thread begun in Teams and continued in the web UI stays one thread rather
+ * than being forced to pick.
+ */
+export const conversations = pgTable(
+  'conversations',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    channel: enumText('channel', CONVERSATION_CHANNELS).notNull().default('web'),
+    status: enumText('status', CONVERSATION_STATUSES).notNull().default('open'),
+    title: text('title').notNull().default(''),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'set null' }),
+    /** The channel's own thread id. Unique per channel; the webhook's anchor. */
+    externalRef: text('external_ref'),
+    /**
+     * Where a Bot Connector reply must be POSTed.
+     *
+     * Captured from a JWT-verified activity and never from a request body. A
+     * `serviceUrl` an attacker supplies is an instruction to send Mac's bearer
+     * token to a host of their choosing, so this column is written from exactly
+     * one place and validated against an allowlist before use.
+     */
+    serviceUrl: text('service_url'),
+    tenantId: text('tenant_id'),
+    /** Immutable once set, like runs and briefs. Trigger-enforced. */
+    companyContextRevisionId: uuid('company_context_revision_id'),
+    lastMessageAt: timestamp('last_message_at', { withTimezone: true }),
+    messageCount: integer('message_count').notNull().default(0),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    taskIdx: index('conversations_task_idx').on(t.taskId),
+    projectIdx: index('conversations_project_idx').on(t.projectId),
+  }),
+);
+
+export const conversationParticipants = pgTable(
+  'conversation_participants',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    kind: enumText('kind', PARTICIPANT_KINDS).notNull(),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** The channel's identifier — an AAD object id, a Forja principal. */
+    externalId: text('external_id'),
+    displayName: text('display_name').notNull().default(''),
+    firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    conversationIdx: index('conversation_participants_conversation_idx').on(t.conversationId),
+  }),
+);
+
+/**
+ * Every message, inbound and outbound.
+ *
+ * Delivery state lives here rather than in a separate outbox: the mail outbox
+ * proved the retry and idempotency pattern in Sprint 3.1, and a second table
+ * holding a copy of the same text would only create a way for the two to
+ * disagree about what was actually sent.
+ */
+export const conversationMessages = pgTable(
+  'conversation_messages',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    /** Monotonic within the conversation. Summaries cite ranges of it. */
+    seq: integer('seq').notNull(),
+    direction: enumText('direction', MESSAGE_DIRECTIONS).notNull(),
+    channel: enumText('channel', CONVERSATION_CHANNELS).notNull(),
+    authorKind: enumText('author_kind', PARTICIPANT_KINDS).notNull(),
+    authorUserId: uuid('author_user_id').references(() => users.id, { onDelete: 'set null' }),
+    authorName: text('author_name').notNull().default(''),
+    body: text('body').notNull(),
+    /** Null on outbound: Mac does not classify his own intent. */
+    intent: enumText('intent', MESSAGE_INTENTS),
+    intentConfidence: numeric('intent_confidence', { precision: 4, scale: 3 }),
+    outboundKind: enumText('outbound_kind', OUTBOUND_KINDS),
+    deliveryState: enumText('delivery_state', DELIVERY_STATES).notNull().default('not_required'),
+    deliveryAttempts: integer('delivery_attempts').notNull().default(0),
+    deliveryError: text('delivery_error'),
+    providerMessageId: text('provider_message_id'),
+    /** The channel's own message id. The idempotency key; unique per channel. */
+    externalMessageId: text('external_message_id'),
+    inReplyToMessageId: uuid('in_reply_to_message_id'),
+    approvalRequestId: uuid('approval_request_id'),
+    evidence: jsonb('evidence').notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    conversationIdx: index('conversation_messages_conversation_idx').on(t.conversationId, t.seq),
+    seqKey: uniqueIndex('conversation_messages_seq_key').on(t.conversationId, t.seq),
+  }),
+);
+
+/**
+ * A generated summary of part of a conversation.
+ *
+ * Appended ALONGSIDE the source messages, never over them. A summary that
+ * overwrote its own evidence would be the one artefact in this system nobody
+ * could check.
+ */
+export const conversationSummaries = pgTable(
+  'conversation_summaries',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    coversFromSeq: integer('covers_from_seq').notNull(),
+    coversToSeq: integer('covers_to_seq').notNull(),
+    content: jsonb('content').notNull().default(sql`'{}'::jsonb`),
+    modelProvider: text('model_provider'),
+    modelName: text('model_name'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    conversationIdx: index('conversation_summaries_conversation_idx').on(t.conversationId, t.coversToSeq),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Phase 4 — approval requests
+// ---------------------------------------------------------------------------
+
+/**
+ * The request that precedes an approval.
+ *
+ * `approvals` remains the record of the authorisation itself, with its
+ * confidence and its threshold. This is the addressable object that makes
+ * "sounds good must not approve the wrong action" enforceable: a pending
+ * approval with no identity has nothing for a reply to bind to, so any
+ * affirmation nearby is as good as any other.
+ */
+export const approvalRequests = pgTable(
+  'approval_requests',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    /** The human-quotable code, e.g. `AP-4F2K`. Unique among pending rows. */
+    code: text('code').notNull(),
+    state: enumText('state', APPROVAL_REQUEST_STATES).notNull().default('pending'),
+    subjectKind: enumText('subject_kind', APPROVAL_SUBJECT_KINDS).notNull(),
+    /** A brief at v3 and at v4 are different contracts. */
+    subjectVersion: integer('subject_version').notNull().default(0),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id').references(() => runs.id, { onDelete: 'cascade' }),
+    briefId: uuid('brief_id').references(() => handoffBriefs.id, { onDelete: 'set null' }),
+    title: text('title').notNull(),
+    detail: text('detail').notNull().default(''),
+    recommendation: text('recommendation').notNull().default(''),
+    risk: enumText('risk', RISK_LEVELS).notNull().default('medium'),
+    authority: enumText('authority', AUTHORITY_CLASSES).notNull().default('execute_run'),
+    confidence: numeric('confidence', { precision: 4, scale: 3 }),
+    requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    deliveredChannels: jsonb('delivered_channels').notNull().default(sql`'[]'::jsonb`),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    decidedByUserId: uuid('decided_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    decidedViaChannel: text('decided_via_channel'),
+    decidedViaMessageId: uuid('decided_via_message_id'),
+    decisionNotes: text('decision_notes'),
+    supersededByRequestId: uuid('superseded_by_request_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    taskIdx: index('approval_requests_task_idx').on(t.taskId),
+    runIdx: index('approval_requests_run_idx').on(t.runId),
+    pendingIdx: index('approval_requests_pending_idx').on(t.state, t.requestedAt),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Forja
+// ---------------------------------------------------------------------------
+
+/**
+ * An API client, not an agent.
+ *
+ * Forja is never registered in `agent-registry.ts`, and every write it performs
+ * carries the human it is acting for — because "Forja approved it" is not an
+ * answer to "who approved this?".
+ */
+export const forjaClients = pgTable('forja_clients', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  name: text('name').notNull(),
+  /** SHA-256 only, so a database dump yields no usable credential. */
+  keyHash: text('key_hash').notNull(),
+  keyPrefix: text('key_prefix').notNull(),
+  scopes: jsonb('scopes').notNull().default(sql`'[]'::jsonb`),
+  isActive: boolean('is_active').notNull().default(true),
+  webhookUrl: text('webhook_url'),
+  /**
+   * Separate from the API key on purpose: one authenticates Forja to Mac and
+   * the other authenticates Mac to Forja, and a single secret doing both jobs
+   * cannot be rotated independently.
+   */
+  webhookSecret: text('webhook_secret'),
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
+  createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+});
+
+/**
+ * The event log. Append-only, trigger-enforced, cursor-read.
+ *
+ * `seq` is the only cursor. Timestamps are not one: two events written in the
+ * same millisecond have no order between them, and a consumer paging by time
+ * will eventually skip one.
+ */
+export const macEvents = pgTable(
+  'mac_events',
+  {
+    seq: bigserial('seq', { mode: 'number' }).primaryKey(),
+    type: enumText('type', MAC_EVENT_TYPES).notNull(),
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+    projectId: uuid('project_id'),
+    taskId: uuid('task_id'),
+    runId: uuid('run_id'),
+    conversationId: uuid('conversation_id'),
+    approvalRequestId: uuid('approval_request_id'),
+    artefactId: uuid('artefact_id'),
+    data: jsonb('data').notNull().default(sql`'{}'::jsonb`),
+  },
+  (t) => ({
+    typeIdx: index('mac_events_type_idx').on(t.type, t.seq),
+  }),
+);
+
+export const eventDeliveries = pgTable(
+  'event_deliveries',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    clientId: uuid('client_id')
+      .notNull()
+      .references(() => forjaClients.id, { onDelete: 'cascade' }),
+    eventSeq: bigint('event_seq', { mode: 'number' }).notNull(),
+    status: enumText('status', EVENT_DELIVERY_STATUSES).notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    uniqueDelivery: uniqueIndex('event_deliveries_unique').on(t.clientId, t.eventSeq),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Phase 4 — research provenance and acceptance
+// ---------------------------------------------------------------------------
+
+/**
+ * One retrieved source, with enough provenance to trace a claim back to it.
+ *
+ * A table rather than a JSON blob because "did this run use any external
+ * source?" has to be answerable by a predicate — that is the check Part F §23
+ * describes, and it cannot be run against a JSON document.
+ */
+export const researchSources = pgTable(
+  'research_sources',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    /** The query that found it, so a search is inspectable after the fact. */
+    query: text('query').notNull().default(''),
+    tool: text('tool').notNull(),
+    ref: text('ref').notNull(),
+    url: text('url'),
+    title: text('title').notNull().default(''),
+    sourceClass: enumText('source_class', SOURCE_CLASSES).notNull().default('unknown'),
+    external: boolean('external').notNull().default(false),
+    excerpt: text('excerpt').notNull().default(''),
+    publishedAt: text('published_at'),
+    retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Recorded, not acted on: a page discussing injection is not an attack. */
+    injectionSuspected: boolean('injection_suspected').notNull().default(false),
+    injectionDetail: text('injection_detail'),
+  },
+  (t) => ({
+    runIdx: index('research_sources_run_idx').on(t.runId),
+    taskIdx: index('research_sources_task_idx').on(t.taskId),
+    externalIdx: index('research_sources_external_idx').on(t.runId, t.external),
+  }),
+);
+
+/**
+ * Whether the work delivered matched the criteria a human approved.
+ *
+ * `criteria` is a copy FROZEN at approval rather than a pointer to the brief:
+ * what is checked has to be what somebody authorised, and a brief edited
+ * afterwards must not silently move the bar.
+ */
+export const runAcceptance = pgTable('run_acceptance', {
+  runId: uuid('run_id')
+    .primaryKey()
+    .references(() => runs.id, { onDelete: 'cascade' }),
+  state: enumText('state', ACCEPTANCE_STATES).notNull().default('not_assessed'),
+  criteria: jsonb('criteria').notNull().default(sql`'[]'::jsonb`),
+  results: jsonb('results').notNull().default(sql`'[]'::jsonb`),
+  artefactsProduced: integer('artefacts_produced').notNull().default(0),
+  externalSourcesUsed: integer('external_sources_used').notNull().default(0),
+  remediationAttempted: boolean('remediation_attempted').notNull().default(false),
+  remediationNote: text('remediation_note'),
+  modelAssisted: boolean('model_assisted').notNull().default(false),
+  modelProvider: text('model_provider'),
+  modelName: text('model_name'),
+  reviewedAt: timestamp('reviewed_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export type UserRow = typeof users.$inferSelect;
 export type SessionRow = typeof sessions.$inferSelect;
 export type SettingsRow = typeof settings.$inferSelect;
@@ -1547,6 +1979,17 @@ export type CompanyContextProposalRow = typeof companyContextProposals.$inferSel
 // --- Sprint 3.3 ---
 export type RunArtefactRow = typeof runArtefacts.$inferSelect;
 export type GeneralRunStateRow = typeof generalRunState.$inferSelect;
+// --- Phase 4 ---
+export type ConversationRow = typeof conversations.$inferSelect;
+export type ConversationParticipantRow = typeof conversationParticipants.$inferSelect;
+export type ConversationMessageRow = typeof conversationMessages.$inferSelect;
+export type ConversationSummaryRow = typeof conversationSummaries.$inferSelect;
+export type ApprovalRequestRow = typeof approvalRequests.$inferSelect;
+export type ForjaClientRow = typeof forjaClients.$inferSelect;
+export type MacEventRow = typeof macEvents.$inferSelect;
+export type EventDeliveryRow = typeof eventDeliveries.$inferSelect;
+export type ResearchSourceRow = typeof researchSources.$inferSelect;
+export type RunAcceptanceRow = typeof runAcceptance.$inferSelect;
 
 /**
  * The authoritative list of enum CHECK constraints.
@@ -1616,4 +2059,24 @@ export const ENUM_CHECKS: Array<{ table: string; column: string; values: readonl
   { table: 'run_artefacts', column: 'artefact_type', values: ARTEFACT_TYPES },
   { table: 'run_artefacts', column: 'format', values: ARTEFACT_FORMATS },
   { table: 'general_run_state', column: 'stage', values: RESEARCH_STAGES },
+  // --- Phase 4 ---
+  { table: 'conversations', column: 'channel', values: CONVERSATION_CHANNELS },
+  { table: 'conversations', column: 'status', values: CONVERSATION_STATUSES },
+  { table: 'conversation_participants', column: 'kind', values: PARTICIPANT_KINDS },
+  { table: 'conversation_messages', column: 'direction', values: MESSAGE_DIRECTIONS },
+  { table: 'conversation_messages', column: 'channel', values: CONVERSATION_CHANNELS },
+  { table: 'conversation_messages', column: 'author_kind', values: PARTICIPANT_KINDS },
+  { table: 'conversation_messages', column: 'intent', values: MESSAGE_INTENTS },
+  { table: 'conversation_messages', column: 'outbound_kind', values: OUTBOUND_KINDS },
+  { table: 'conversation_messages', column: 'delivery_state', values: DELIVERY_STATES },
+  { table: 'approval_requests', column: 'state', values: APPROVAL_REQUEST_STATES },
+  { table: 'approval_requests', column: 'subject_kind', values: APPROVAL_SUBJECT_KINDS },
+  { table: 'approval_requests', column: 'risk', values: RISK_LEVELS },
+  { table: 'approval_requests', column: 'authority', values: AUTHORITY_CLASSES },
+  { table: 'mac_events', column: 'type', values: MAC_EVENT_TYPES },
+  { table: 'event_deliveries', column: 'status', values: EVENT_DELIVERY_STATUSES },
+  { table: 'research_sources', column: 'source_class', values: SOURCE_CLASSES },
+  { table: 'run_acceptance', column: 'state', values: ACCEPTANCE_STATES },
+  { table: 'runs', column: 'acceptance_state', values: ACCEPTANCE_STATES },
+  { table: 'settings', column: 'web_search_provider', values: WEB_SEARCH_PROVIDERS },
 ];

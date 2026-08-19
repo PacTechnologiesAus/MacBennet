@@ -61,6 +61,21 @@ export interface ModelCompletionResult {
   text: string;
   model: string;
   usage: { inputTokens: number | null; outputTokens: number | null };
+  /**
+   * Why the model stopped, verbatim from the provider where it says.
+   *
+   * `'max_tokens'` (Anthropic) and `'length'` (OpenAI) both mean the reply was
+   * CUT OFF rather than finished, which for a JSON response means it will not
+   * parse and the step produced nothing usable.
+   *
+   * This was previously discarded. The first real research run on the
+   * commissioned VM truncated its write-up at exactly the token ceiling, failed
+   * to parse, produced no artefacts, and still reported success — because the
+   * one field that would have distinguished "the model had nothing to say" from
+   * "we cut the model off mid-sentence" was thrown away while parsing the
+   * response. `null` where a provider does not report one.
+   */
+  stopReason: string | null;
 }
 
 export interface ModelProvider {

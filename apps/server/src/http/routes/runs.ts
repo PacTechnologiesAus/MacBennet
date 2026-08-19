@@ -23,6 +23,8 @@ import { auditTrailForRun } from '../../services/audit-query.js';
 import { listArtefacts } from '../../services/artefacts.js';
 import { getGeneralRunState } from '../../services/research/runner.js';
 import { currentActor, requireAuth, requireRole } from '../auth-plugin.js';
+import { getRunAcceptance } from '../../services/acceptance.js';
+import { listResearchSources } from '../../services/research/sources.js';
 
 export async function runRoutes(app: FastifyInstance): Promise<void> {
   /** The allowlist, exposed so the UI can only offer operations that exist. */
@@ -55,6 +57,22 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /** Polled by the Run Detail screen. `afterId` is the monotonic cursor. */
+  /**
+   * Phase 4: whether the work delivered matched what was approved.
+   *
+   * The per-criterion detail and the sources behind it, returned together,
+   * because "which criterion was not met" and "what did Mac actually read" are
+   * the same question asked twice and a reader who has one wants the other.
+   */
+  app.get('/api/runs/:id/acceptance', { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const [acceptance, sources] = await Promise.all([
+      getRunAcceptance(id),
+      listResearchSources({ runId: id }),
+    ]);
+    return reply.send({ acceptance, sources });
+  });
+
   app.get('/api/runs/:id/logs', { preHandler: requireAuth }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const { afterId, limit } = request.query as { afterId?: string; limit?: string };

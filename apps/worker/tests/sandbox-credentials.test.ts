@@ -201,8 +201,28 @@ describe('credential mounts', () => {
 
 describe('the configuration actually reaches the sandbox', () => {
   const withEnv = <T>(vars: Record<string, string | undefined>, fn: () => T): T => {
+    /*
+     * loadConfig() validates the WHOLE worker environment, not just the part a
+     * given test cares about, and MAC_CONTROL_PLANE_URL is the one variable
+     * with no default. Supplying it here is what makes each case self-contained.
+     *
+     * It used to be inherited from whatever dotenv had already loaded, which
+     * meant these four tests silently depended on a developer having an
+     * apps/worker/.env in the checkout. On the commissioned VM there is no such
+     * file on purpose — configuration arrives from systemd's EnvironmentFile and
+     * keeping secrets out of the working tree is structural rather than a matter
+     * of remembering. So the suite passed on every laptop and failed on the one
+     * machine configured the way the deployment actually requires.
+     *
+     * A test that needs the URL to be something else still just overrides it:
+     * `vars` is spread last.
+     */
+    const required: Record<string, string | undefined> = {
+      MAC_CONTROL_PLANE_URL: 'https://control-plane.test',
+      ...vars,
+    };
     const saved = new Map<string, string | undefined>();
-    for (const [key, value] of Object.entries(vars)) {
+    for (const [key, value] of Object.entries(required)) {
       saved.set(key, process.env[key]);
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

@@ -2,14 +2,22 @@ import { and, desc, eq, isNotNull, ne } from 'drizzle-orm';
 import {
   handoffBriefContentSchema,
   isExternalTool,
+  makeResearchSource,
+  MAX_SOURCE_EXCERPT_CHARS,
   projectContextSnapshotSchema,
   RESEARCH_LIMITS,
+  WebResearchError,
   type ResearchSource,
   type ResearchTool,
   type ResearchToolCall,
   type ResearchToolResult,
+  type SourceClass,
+  type WebSearchProvider,
 } from '@mac/protocol';
 import { db, type DbHandle } from '../../db/client.js';
+import { classifySource } from '../../domain/source-quality.js';
+import { scanForInjection } from '../../domain/injection.js';
+import { fetchDocument, getWebSearchProvider } from './web.js';
 import {
   agentQuestions,
   discoverySessions,
@@ -65,6 +73,27 @@ export interface ToolContext {
   /** Domains an administrator has allowed for external retrieval. */
   allowedResearchDomains: readonly string[];
   externalResearchEnabled: boolean;
+  // --- Phase 4 ---
+  /** The configured search provider. `none` refuses honestly. */
+  webSearchProvider: WebSearchProvider;
+  maxWebResults: number;
+  /**
+   * Whether a search result's own host may be fetched without being on the
+   * allowlist. Off by default: a search provider that could choose what Mac
+   * retrieves would make the administrator's allowlist decorative.
+   */
+  allowFetchFromSearchResults: boolean;
+  /**
+   * Hosts this run has already seen in its own search results.
+   *
+   * Only consulted when `allowFetchFromSearchResults` is on. Supplied by the
+   * runner from the run's accumulated sources rather than looked up here, so
+   * the tool layer stays a pure function of its inputs and a test can state
+   * exactly what a run had seen.
+   */
+  searchResultHosts?: readonly string[];
+  /** Hosts an administrator has named as PAC's suppliers, for classification. */
+  vendorDomains?: readonly string[];
 }
 
 const now = () => new Date().toISOString();
@@ -117,7 +146,7 @@ export async function runTool(
     case 'monday_search':
       return mondaySearch(call, context, handle);
     case 'public_web_search':
-      return publicWebSearch(call);
+      return publicWebSearch(call, context);
     case 'public_doc_fetch':
       return publicDocFetch(call, context);
   }
@@ -146,7 +175,8 @@ async function companyContextSearch(call: ResearchToolCall, context: ToolContext
     const sections = [...selection.core, ...selection.taskRelevant];
     return performed(
       call,
-      sections.map((section) => ({
+      sections.map((section) =>
+        makeResearchSource({
         /*
          * Sprint 3.2's own ref format, reused rather than reinvented.
          *
@@ -158,10 +188,10 @@ async function companyContextSearch(call: ResearchToolCall, context: ToolContext
          */
         ref: section.ref,
         label: section.heading ?? section.document,
-        excerpt: section.text.slice(0, 4000),
-        retrievedAt: now(),
-        external: false,
-      })),
+          excerpt: section.text.slice(0, MAX_SOURCE_EXCERPT_CHARS),
+          retrievedAt: now(),
+        }),
+      ),
     );
   } catch (err) {
     return refused(call, `Company context is unreadable: ${(err as Error).message.slice(0, 200)}`);
@@ -181,13 +211,14 @@ async function projectMemorySearch(
 
   return performed(
     call,
-    matched.map((entry) => ({
-      ref: `project_memory:${entry.scope}/${entry.key}`,
-      label: entry.key,
-      excerpt: entry.value.slice(0, 4000),
-      retrievedAt: now(),
-      external: false,
-    })),
+    matched.map((entry) =>
+      makeResearchSource({
+        ref: `project_memory:${entry.scope}/${entry.key}`,
+        label: entry.key,
+        excerpt: entry.value.slice(0, MAX_SOURCE_EXCERPT_CHARS),
+        retrievedAt: now(),
+      }),
+    ),
   );
 }
 
@@ -231,15 +262,19 @@ async function priorRunSearch(
 
   return performed(
     call,
-    matched.map((row) => ({
-      ref: `previous_run:${row.runId}`,
-      label: row.question.slice(0, 200),
-      // Groundedness travels with the excerpt so a later reader can see whether
-      // Mac established this last time or merely assumed it.
-      excerpt: `Q: ${row.question}\nA: ${row.answer}\n(${row.groundedness ?? 'unknown groundedness'})`.slice(0, 4000),
-      retrievedAt: now(),
-      external: false,
-    })),
+    matched.map((row) =>
+      makeResearchSource({
+        ref: `previous_run:${row.runId}`,
+        label: row.question.slice(0, 200),
+        // Groundedness travels with the excerpt so a later reader can see whether
+        // Mac established this last time or merely assumed it.
+        excerpt: `Q: ${row.question}\nA: ${row.answer}\n(${row.groundedness ?? 'unknown groundedness'})`.slice(
+          0,
+          MAX_SOURCE_EXCERPT_CHARS,
+        ),
+        retrievedAt: now(),
+      }),
+    ),
   );
 }
 
@@ -269,13 +304,14 @@ async function briefSearch(
     ];
     for (const entry of durable) {
       if (terms.length && !overlaps(entry.text, terms)) continue;
-      sources.push({
-        ref: `brief:${row.id}#${entry.label}`,
-        label: `${parsed.data.title} — ${entry.label}`,
-        excerpt: entry.text.slice(0, 4000),
-        retrievedAt: now(),
-        external: false,
-      });
+      sources.push(
+        makeResearchSource({
+          ref: `brief:${row.id}#${entry.label}`,
+          label: `${parsed.data.title} — ${entry.label}`,
+          excerpt: entry.text.slice(0, MAX_SOURCE_EXCERPT_CHARS),
+          retrievedAt: now(),
+        }),
+      );
     }
   }
 
@@ -302,13 +338,14 @@ async function repositorySearch(
   const snapshot = parsed.data;
   const sources: ResearchSource[] = [];
   const push = (label: string, text: string) =>
-    sources.push({
-      ref: `repository:${label}@${snapshot.headSha.slice(0, 8)}`,
-      label,
-      excerpt: text.slice(0, 4000),
-      retrievedAt: now(),
-      external: false,
-    });
+    sources.push(
+      makeResearchSource({
+        ref: `repository:${label}@${snapshot.headSha.slice(0, 8)}`,
+        label,
+        excerpt: text.slice(0, MAX_SOURCE_EXCERPT_CHARS),
+        retrievedAt: now(),
+      }),
+    );
 
   if (snapshot.readme) push('README', snapshot.readme);
   if (snapshot.languages.length) push('languages', snapshot.languages.join(', '));
@@ -338,25 +375,27 @@ async function mondaySearch(
 
   const sources: ResearchSource[] = [];
   if (linked.item.description) {
-    sources.push({
-      ref: `monday:item/${linked.item.itemId}`,
-      label: linked.item.name,
-      excerpt: linked.item.description.slice(0, 4000),
-      retrievedAt: now(),
-      external: false,
-    });
+    sources.push(
+      makeResearchSource({
+        ref: `monday:item/${linked.item.itemId}`,
+        label: linked.item.name,
+        excerpt: linked.item.description.slice(0, MAX_SOURCE_EXCERPT_CHARS),
+        retrievedAt: now(),
+      }),
+    );
   }
 
   try {
     const client = await clientForBoard(linked.board);
     for (const update of await client.listUpdates(linked.item.itemId, 20)) {
-      sources.push({
-        ref: `monday:item/${linked.item.itemId}/update/${update.id}`,
-        label: `Update on ${linked.item.name}`,
-        excerpt: update.body.slice(0, 4000),
-        retrievedAt: now(),
-        external: false,
-      });
+      sources.push(
+        makeResearchSource({
+          ref: `monday:item/${linked.item.itemId}/update/${update.id}`,
+          label: `Update on ${linked.item.name}`,
+          excerpt: update.body.slice(0, MAX_SOURCE_EXCERPT_CHARS),
+          retrievedAt: now(),
+        }),
+      );
     }
   } catch {
     // A board that is unreachable contributes nothing rather than failing the
@@ -386,15 +425,50 @@ async function mondaySearch(
  * shape it must return is already fixed by the tests.
  * ---------------------------------------------------------------------------
  */
-async function publicWebSearch(call: ResearchToolCall): Promise<ResearchToolResult> {
-  if (!config.research?.searchEndpoint) {
-    return refused(
-      call,
-      'No web-search provider is configured (MAC_RESEARCH_SEARCH_ENDPOINT). Mac will not guess at search ' +
-        'results, and an empty result here would read as "the web says nothing about this".',
-    );
+async function publicWebSearch(call: ResearchToolCall, context: ToolContext): Promise<ResearchToolResult> {
+  const provider = getWebSearchProvider(context.webSearchProvider);
+
+  let results;
+  try {
+    results = await provider.search(call.argument, { limit: context.maxWebResults });
+  } catch (err) {
+    /*
+     * A provider FAILURE is a refusal, never an empty result.
+     *
+     * The distinction Sprint 3.3 drew between "Mac was not allowed to look" and
+     * "Mac looked and found nothing" applies with equal force to "the provider
+     * returned 429". A model reading zero results writes down that the web
+     * contains nothing about the subject, and there is no way to tell from the
+     * artefact afterwards which of the three actually happened.
+     */
+    const failure = err instanceof WebResearchError ? err.failure : 'unreachable';
+    return refused(call, `Web search could not be performed (${failure}): ${(err as Error).message.slice(0, 300)}`);
   }
-  return refused(call, 'The configured web-search provider is not yet implemented.');
+
+  return performed(
+    call,
+    results.map((result) => {
+      /*
+       * A snippet is UNTRUSTED CONTENT, and it is scanned like one.
+       *
+       * A search snippet is attacker-controllable — anybody can publish a page
+       * whose meta description addresses an AI system — and it reaches a prompt
+       * without anyone having chosen to fetch that page.
+       */
+      const scan = scanForInjection(`${result.title} ${result.snippet}`);
+      return {
+        ref: result.url,
+        label: result.title || result.url,
+        excerpt: result.snippet.slice(0, MAX_SOURCE_EXCERPT_CHARS),
+        retrievedAt: now(),
+        external: true,
+        sourceClass: classifySource(result.url, { vendorDomains: context.vendorDomains ?? [] }),
+        url: result.url,
+        publishedAt: result.publishedAt,
+        injectionSuspected: scan.suspected,
+      };
+    }),
+  );
 }
 
 /**
@@ -415,7 +489,26 @@ async function publicDocFetch(call: ResearchToolCall, context: ToolContext): Pro
 
   if (url.protocol !== 'https:') return refused(call, 'Only https URLs may be fetched.');
 
-  if (!hostAllowed(url.hostname, context.allowedResearchDomains)) {
+  const onAllowlist = hostAllowed(url.hostname, context.allowedResearchDomains);
+
+  /*
+   * A host this run's own search surfaced, when the deployment permits it.
+   *
+   * OFF by default, and worth understanding why the option exists at all: an
+   * allowlist is unusable for open research, because the whole point of
+   * searching is to find documents nobody has named in advance. So an
+   * administrator may widen retrieval to hosts the SEARCH returned.
+   *
+   * That is a real widening and it is stated as one. With it on, a poisoned
+   * result set can put a host in front of Mac — which is a cheaper attack than
+   * compromising a host PAC already trusts, and is why the default is off and
+   * why every fetch is still recorded with its host and its source class.
+   */
+  const fromSearch =
+    context.allowFetchFromSearchResults &&
+    (context.searchResultHosts ?? []).some((host) => host.toLowerCase() === url.hostname.toLowerCase());
+
+  if (!onAllowlist && !fromSearch) {
     return refused(
       call,
       `${url.hostname} is not on the approved research-domain allowlist. ` +
@@ -423,30 +516,41 @@ async function publicDocFetch(call: ResearchToolCall, context: ToolContext): Pro
     );
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
   try {
-    const response = await fetch(url, { redirect: 'manual', signal: controller.signal });
-    if (response.status >= 300 && response.status < 400) {
-      return refused(call, `${url.hostname} redirected, and a redirect could leave the allowlist. Not followed.`);
-    }
-    if (!response.ok) return refused(call, `${url.hostname} returned ${response.status}.`);
+    const document = await fetchDocument(url);
 
-    const body = (await response.text()).slice(0, 200_000);
+    /*
+     * The page is scanned, classified and KEPT.
+     *
+     * Detection is the weakest of the four defences and it is important not to
+     * mistake it for the strong one: a web page cannot change Mac authority
+     * because the protocol has no field in which an authority change could be
+     * expressed, not because a regex spotted it. What the flag buys is that a
+     * HUMAN reading the run can see a page tried something.
+     *
+     * Which is also why a match does not drop the content. A vendor security
+     * advisory matches every pattern, and discarding it would lose real
+     * evidence to defend against something the structure already prevents.
+     */
+    const scan = scanForInjection(document.text);
+
     return performed(call, [
       {
         ref: url.toString(),
-        label: url.hostname + url.pathname,
-        excerpt: stripMarkup(body).slice(0, 4000),
-        retrievedAt: now(),
+        label: document.title,
+        excerpt: document.text.slice(0, MAX_SOURCE_EXCERPT_CHARS),
+        retrievedAt: document.retrievedAt,
         // The flag that keeps an internet claim from being filed as a PAC fact.
         external: true,
+        sourceClass: classifySource(url.toString(), { vendorDomains: context.vendorDomains ?? [] }) as SourceClass,
+        url: url.toString(),
+        publishedAt: null,
+        injectionSuspected: scan.suspected,
       },
     ]);
   } catch (err) {
-    return refused(call, `Could not retrieve it: ${(err as Error).message.slice(0, 200)}`);
-  } finally {
-    clearTimeout(timer);
+    const failure = err instanceof WebResearchError ? err.failure : 'unreachable';
+    return refused(call, `Could not retrieve it (${failure}): ${(err as Error).message.slice(0, 300)}`);
   }
 }
 
@@ -460,14 +564,6 @@ function hostAllowed(hostname: string, allowed: readonly string[]): boolean {
     return host === domain || host.endsWith(`.${domain}`);
   });
 }
-
-const stripMarkup = (html: string): string =>
-  html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
 
 // ---------------------------------------------------------------------------
 

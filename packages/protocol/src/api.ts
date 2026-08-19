@@ -46,6 +46,9 @@ import {
 } from './night.js';
 import { emailAddressSchema, emailDeliveryKindSchema, emailDeliveryStatusSchema, mailProviderSchema } from './mail.js';
 import { modelProviderSchema } from './model.js';
+// --- Phase 4 ---
+import { webSearchProviderSchema } from './web-research.js';
+import { acceptanceStateSchema, type AcceptanceReviewDto } from './acceptance.js';
 import type { CompanyContextRef } from './company-context.js';
 
 /**
@@ -315,8 +318,22 @@ export interface RunDto {
    * attributable to the policy actually in force at the time.
    */
   companyContext: CompanyContextRef | null;
+  /**
+   * Phase 4: whether the work delivered matched the criteria a human approved.
+   *
+   * `not_assessed` for a run with no criteria, which is every coding run that
+   * existed before Phase 4 — so nothing about the existing path changes.
+   */
+  acceptanceState: z.infer<typeof acceptanceStateSchema>;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Phase 4: the per-criterion detail behind `RunDto.acceptanceState`. */
+export interface RunAcceptanceDto extends AcceptanceReviewDto {
+  criteria: Array<{ id: string; kind: string; description: string; required: boolean; source: string }>;
+  artefactsProduced: number;
+  externalSourcesUsed: number;
 }
 
 export interface ApprovalDto {
@@ -492,6 +509,31 @@ export const updateSettingsRequestSchema = z
     companyContextAllowCached: z.boolean().optional(),
     companyContextMinRefreshSeconds: z.number().int().min(0).max(86_400).optional(),
     companyContextMaxStaleHours: z.number().int().min(0).max(8760).optional(),
+    // --- Phase 4 ---
+    /** Off by default, like every integration that leaves this process. */
+    teamsEnabled: z.boolean().optional(),
+    /**
+     * Teams identities permitted to assign work and approve, by AAD object id
+     * or UPN. Empty means nobody: an unrecognised sender may talk to Mac and
+     * ask for status, and may not create work or authorise anything.
+     */
+    teamsAuthorisedUsers: z.array(z.string().min(1).max(320)).max(200).optional(),
+    teamsNotifyBlockers: z.boolean().optional(),
+    teamsNotifyApprovals: z.boolean().optional(),
+    teamsNotifyReports: z.boolean().optional(),
+    forjaEnabled: z.boolean().optional(),
+    webSearchProvider: webSearchProviderSchema.optional(),
+    maxWebResultsPerSearch: z.number().int().min(1).max(25).optional(),
+    /**
+     * Whether a search result's own host may be fetched without appearing on
+     * the research-domain allowlist. Off: a search provider that could choose
+     * what Mac retrieves would make the allowlist decorative.
+     */
+    allowFetchFromSearchResults: z.boolean().optional(),
+    acceptanceVerificationEnabled: z.boolean().optional(),
+    acceptanceSemanticReviewEnabled: z.boolean().optional(),
+    acceptanceRemediationEnabled: z.boolean().optional(),
+    conversationSummaryThreshold: z.number().int().min(4).max(500).optional(),
   })
   .strict();
 export type UpdateSettingsRequest = z.infer<typeof updateSettingsRequestSchema>;
@@ -538,6 +580,20 @@ export interface SettingsDto {
   maxResearchToolCalls: number;
   externalResearchEnabled: boolean;
   allowedResearchDomains: string[];
+  // --- Phase 4 ---
+  teamsEnabled: boolean;
+  teamsAuthorisedUsers: string[];
+  teamsNotifyBlockers: boolean;
+  teamsNotifyApprovals: boolean;
+  teamsNotifyReports: boolean;
+  forjaEnabled: boolean;
+  webSearchProvider: z.infer<typeof webSearchProviderSchema>;
+  maxWebResultsPerSearch: number;
+  allowFetchFromSearchResults: boolean;
+  acceptanceVerificationEnabled: boolean;
+  acceptanceSemanticReviewEnabled: boolean;
+  acceptanceRemediationEnabled: boolean;
+  conversationSummaryThreshold: number;
   updatedAt: string;
 }
 

@@ -380,3 +380,67 @@ a.button:hover { border-color: var(--accent); text-decoration: none; }
 .evidence-group h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); }
 .evidence-group ul { margin: 0; padding-left: 18px; font-size: 14px; }
 .artefact-body { white-space: pre-wrap; font-size: 14px; line-height: 1.6; }
+
+/* --- Phase 4: conversations, the inbox and acceptance ---------------------- */
+
+/*
+ * A two-column reading layout: the threads on the left, the open one on the
+ * right. It collapses to one column on a narrow screen because the most likely
+ * place somebody reads a Teams thread in Mac is a laptop next to a panel.
+ */
+.split { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; gap: 16px; align-items: start; }
+@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+
+.thread-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 6px; }
+.thread-item {
+  display: grid; gap: 4px; width: 100%; text-align: left; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer;
+}
+.thread-item:hover { border-color: var(--accent); }
+.thread-item.selected { border-color: var(--accent); background: var(--panel-alt, var(--panel)); }
+.thread-title { font-weight: 600; font-size: 14px; }
+.thread-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+
+.thread-header h2 { margin: 0 0 4px; }
+
+/*
+ * Messages are laid out so the CHANNEL is visible on every one.
+ *
+ * That is the fact the conversation model exists to make true: a thread begun
+ * in Teams and continued in the web UI is one conversation, and a reader must
+ * be able to see which half arrived where without being told.
+ */
+.messages { list-style: none; margin: 12px 0; padding: 0; display: grid; gap: 12px; }
+.message { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--panel); }
+.message.from-mac { border-left: 3px solid var(--accent); }
+.message-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; color: var(--text-dim); }
+.message-body { margin: 6px 0 0; white-space: pre-wrap; font-size: 14px; line-height: 1.55; }
+
+.composer { display: grid; gap: 8px; }
+.composer textarea { width: 100%; }
+
+.summary { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; font-size: 14px; }
+.summary ul { margin: 4px 0 8px; padding-left: 18px; }
+
+/* --- The inbox ------------------------------------------------------------ */
+
+.approval-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.approval-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.approval-head h3 { margin: 0; }
+/*
+ * The code is monospaced and prominent because it is the actionable part: it is
+ * what somebody types back to bind a decision to this specific request rather
+ * than to whichever one happened to be nearest.
+ */
+.approval-code {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 14px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px;
+}
+.approval-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+
+/* --- Acceptance criteria -------------------------------------------------- */
+
+.criteria { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; font-size: 14px; }
+/* Unmet criteria are marked in the margin, so a long list still reads at a glance. */
+.criteria li.unmet { border-left: 3px solid var(--warn, #b58900); padding-left: 10px; }
+.criteria li.met { border-left: 3px solid transparent; padding-left: 10px; }

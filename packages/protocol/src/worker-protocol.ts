@@ -491,6 +491,46 @@ export const researchStepResponseSchema = withControl({
 });
 export type ResearchStepResponse = z.infer<typeof researchStepResponseSchema>;
 
+// --- Phase 4: acceptance verification ---------------------------------------
+
+/**
+ * The worker asks the control plane to check the work against its criteria.
+ *
+ * Asked BEFORE the worker reports completion, because that is the only moment
+ * remediation is still possible: the lease is held, the night has time left,
+ * and the run is not yet terminal.
+ *
+ * Like every other worker call, it carries nothing. The criteria, the
+ * artefacts, the sources and the model all live in the control plane; the
+ * worker supplies its identity and the run id and gets back a verdict.
+ */
+export const acceptanceReviewRequestSchema = z
+  .object({
+    /**
+     * Whether the worker still has room to remediate.
+     *
+     * The worker owns the wall clock and the cutoff, so it is the component
+     * that knows whether there is time. The control plane owns whether
+     * remediation is PERMITTED at all, and both must agree.
+     */
+    canRemediate: z.boolean().default(true),
+  })
+  .strict();
+export type AcceptanceReviewRequest = z.infer<typeof acceptanceReviewRequestSchema>;
+
+export const acceptanceReviewResponseSchema = withControl({
+  /** `not_assessed`, `satisfied`, `gaps` or `failed`. */
+  state: z.string().max(40),
+  criteriaChecked: z.number().int().min(0),
+  unmet: z.number().int().min(0),
+  artefactsProduced: z.number().int().min(0),
+  externalSourcesUsed: z.number().int().min(0),
+  remediationAttempted: z.boolean(),
+  /** One line per unmet criterion, for the run log. Never the artefact text. */
+  unmetSummary: z.array(z.string().max(600)).max(40).default([]),
+});
+export type AcceptanceReviewResponse = z.infer<typeof acceptanceReviewResponseSchema>;
+
 // --- Sprint 3: credential rotation and sandbox attestation ------------------
 
 /**

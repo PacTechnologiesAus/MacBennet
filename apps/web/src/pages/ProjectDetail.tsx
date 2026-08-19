@@ -100,6 +100,8 @@ export function ProjectDetail({ user }: { user: CurrentUser }) {
 
       <CapabilityPanel project={project} user={user} onSaved={load} onError={setError} />
 
+      <NightShiftPanel project={project} user={user} onSaved={load} onError={setError} />
+
       {showForm && canWrite && (
         <TaskForm
           projectId={project.id}
@@ -153,6 +155,121 @@ export function ProjectDetail({ user }: { user: CurrentUser }) {
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * Approving a project for unattended overnight work.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS PANEL EXISTS
+ *
+ * This control used to live in exactly one place: inside a monday board's card
+ * on the Monday page, keyed to `board.projectId`. That was fine while every
+ * night-shift project came from a board. Sprint 3.3 introduced general work on
+ * projects with no repository and no board, and the approval control was never
+ * lifted out — so a board-less project could be approved by the API and by
+ * nothing a human could actually click.
+ *
+ * Commissioning hit that wall on `PAC Internal Development`, which has no board
+ * by design. The endpoint is unchanged and no new authority is created here;
+ * this is the same admin-only grant, given somewhere it can be reached.
+ *
+ * It is deliberately a separate panel from the capability checkboxes above.
+ * That panel is saved as a form; this is a single irreversible-feeling switch
+ * that says Mac may work here while nobody is watching, and it should not be
+ * something a person flips by accident on their way to ticking a checkbox.
+ * ---------------------------------------------------------------------------
+ */
+function NightShiftPanel({
+  project,
+  user,
+  onSaved,
+  onError,
+}: {
+  project: ProjectDto;
+  user: CurrentUser;
+  onSaved: () => void;
+  onError: (message: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const isAdmin = user.role === 'admin';
+  const approved = project.nightShiftApproved;
+
+  // Approval on its own does nothing. Without a permitted task kind the
+  // eligibility check `task_kind_permitted` still refuses the run, and saying
+  // so here is cheaper than letting someone approve a project and then wonder
+  // why Mac never picked the work up.
+  const noKindsPermitted = project.allowedTaskKinds.length === 0;
+
+  const setApproval = async (next: boolean) => {
+    setBusy(true);
+    onError('');
+    try {
+      await api.approveProjectNightShift(project.id, next);
+      onSaved();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : 'Could not change night-shift approval.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Night shift</h2>
+      <dl className="kv">
+        <dt>Approval</dt>
+        <dd>
+          {approved ? (
+            <Badge tone="ok">approved for night shift</Badge>
+          ) : (
+            <Badge tone="idle">not approved</Badge>
+          )}
+        </dd>
+        {project.nightShiftApprovedAt && (
+          <>
+            <dt>Approved</dt>
+            <dd>
+              <Time value={project.nightShiftApprovedAt} />
+            </dd>
+          </>
+        )}
+      </dl>
+
+      <p className="hint">
+        Whether Mac may pick work up in this project unattended overnight. Every other guardrail still
+        applies: a brief must exist, understanding confidence must clear the floor, a worker must be
+        online with the right capability, and the work must be a kind this project permits.
+      </p>
+
+      {approved && noKindsPermitted && (
+        <Alert kind="warn">
+          This project is approved for night shift but permits no kind of work, so nothing will run.
+          Tick a kind under &ldquo;What Mac may do here&rdquo; above and save.
+        </Alert>
+      )}
+
+      {isAdmin ? (
+        <div className="button-row">
+          <button
+            className={approved ? undefined : 'primary'}
+            disabled={busy}
+            onClick={() => void setApproval(!approved)}
+          >
+            {busy
+              ? 'Saving…'
+              : approved
+                ? 'Revoke night-shift approval'
+                : 'Approve for night shift'}
+          </button>
+        </div>
+      ) : (
+        <p className="hint" style={{ marginTop: 10 }}>
+          Only an administrator may approve a project for night shift.
+        </p>
+      )}
+    </div>
   );
 }
 

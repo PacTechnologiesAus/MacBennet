@@ -4,7 +4,7 @@ Mac Bennett is a persistent AI Automation Engineer for PAC Technologies — inte
 operate like an additional engineering employee who works overnight, delegates coding to agents such
 as Claude Code, keeps a complete audit trail, and never merges to main on his own.
 
-**This repository contains Sprints 1, 2 and 3.**
+**This repository contains Sprints 1, 2, 3, 3.1, 3.2, 3.3 and Phase 4.**
 
 Sprint 1 built and proved the control loop:
 
@@ -39,6 +39,46 @@ in [`docs/sprint-1-design.md`](docs/sprint-1-design.md),
 [`docs/sprint-3-design.md`](docs/sprint-3-design.md).
 
 ---
+
+## Phase 4 capabilities
+
+Mac becomes somebody you can work with, and stops being able to call work finished when it is not.
+
+* **Persistent conversations.** One thread per piece of work, belonging to Mac rather than to a
+  channel. Teams, the web UI and Forja all write to it, and all call the same handler — so a
+  conversation begun in Teams and continued in the browser is one conversation rather than two that
+  agree. Retrieval is structured: a summary plus a bounded tail, with decisions, corrections,
+  project facts and unresolved questions carried forward from every summary.
+
+* **Microsoft Teams.** A verified Bot Framework endpoint. Mac appears as an application named
+  **Mac Bennett**, signed *Automation Engineer · PAC Technologies* — Teams provides no way for an
+  application to post as a human account, and Mac does not pretend otherwise. Tell him to
+  investigate something tonight and he raises the task, structures a brief, asks one question at a
+  time, and comes back with an approval to press.
+
+* **Approvals that cannot land on the wrong thing.** Every request carries a short code
+  (`AP-4F2K`). "Sounds good" binds to nothing, ever — including when only one approval is
+  outstanding, because the number outstanding changes between Mac asking and you answering. A stale
+  card refuses by name. Spec §16's prohibitions are refused on **every** channel, including the web
+  UI.
+
+* **Controlled external web research.** A provider abstraction with three real implementations,
+  source-quality classification, currency judgement, per-source provenance, and an injection defence
+  that is structural rather than pattern-matched: a web page cannot change Mac's authority because
+  the protocol has no field in which it could. Off by default and gated per project. *Nothing has
+  been purchased and no account created* — each provider states exactly what it needs from a person.
+
+* **Acceptance verification.** Machine-checkable criteria are derived onto the brief, frozen onto
+  the run at approval, and checked before completion. A run that delivered some of what was asked
+  for is `completed_with_gaps`, with the shortfall named in the morning report. A model may fail a
+  criterion and may never pass one a count failed.
+
+* **A Forja contract.** A fourth authentication plane with scoped API keys, narrow published
+  projections, and an append-only event stream read by cursor. Every write names the person it acted
+  for. Forja is an application, and never appears among the agents it orchestrates.
+
+See [`docs/phase-4-completion-report.md`](docs/phase-4-completion-report.md) for what is proven, what
+is not, and the eleven defects this phase found.
 
 ## Sprint 3.2 capabilities
 
@@ -568,7 +608,24 @@ at development data would destroy it.
 
 ## Current limitations
 
-Honest list of what this is not, as of Sprint 3.
+Honest list of what this is not, as of Phase 4.
+
+**Teams has never talked to Microsoft.** Every token in the suite is genuinely signed and genuinely
+verified through the production code path, which covers everything except whether Microsoft accepts
+the credential and whether a message arrives in somebody's client. No Azure Bot resource exists for
+this work. `teams-live.test.ts` exercises exactly that gap and skips loudly without credentials.
+
+**No web search has ever been performed.** Three providers are implemented against their real APIs
+and none is configured, because adopting one is a commercial decision that belongs to a person at
+PAC. The tool refuses honestly rather than returning an empty result, since a model reading zero
+results will write down that the web says nothing about the subject.
+
+**Conversation summarisation does not run.** The table, the schema, the retrieval path and the
+carry-forward behaviour are all built and tested; nothing yet generates a summary when a thread grows
+long, so a long thread relies on its twelve-message tail.
+
+**Nothing POSTs a webhook to Forja yet.** Delivery rows are created and the signing is implemented
+and tested. Cursor polling works and is what the contract test uses.
 
 **The sandbox contains the filesystem, not git.** An agent inside it can reach the repository's `.git`
 directory, because git has to work. What stops it moving the default branch is the three layers

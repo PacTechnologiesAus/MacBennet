@@ -28,6 +28,16 @@ const RUN_TONE: Record<RunStatus, Tone> = {
   self_review: 'info',
   ready_for_human_review: 'warn',
   completed: 'ok',
+  /*
+   * Amber, not green and not red.
+   *
+   * Work was delivered and is worth reading, so red would send somebody looking
+   * for a crash that did not happen. But a required acceptance criterion was not
+   * met, so green would be the exact misreport this phase exists to stop — a
+   * glance down a list of green ticks is how an investigation delivering one of
+   * five requested documents got filed as finished.
+   */
+  completed_with_gaps: 'warn',
   stopped_by_guardrail: 'danger',
   cancelled: 'idle',
   failed: 'danger',

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type {
+  AcceptanceReviewDto,
+  ResearchSourceDto,
   ApprovalDto,
   ArtefactDto,
   AuditEventDto,
@@ -10,7 +12,7 @@ import type {
   RunLogDto,
   SettingsDto,
 } from '@mac/protocol';
-import { isTerminalRunStatus } from '@mac/protocol';
+import { ACCEPTANCE_STATE_LABELS, isTerminalRunStatus, SOURCE_CLASS_LABELS } from '@mac/protocol';
 import { api, ApiError } from '../api.js';
 import { CompanyContextBadge } from './CompanyContext.js';
 import { Alert, ApprovalBadge, Badge, Confidence, Empty, Field, RunStatusBadge, Time, humanise } from '../components/ui.js';
@@ -34,6 +36,10 @@ export function RunDetail({ user }: { user: CurrentUser }) {
   // renders on one.
   const [artefacts, setArtefacts] = useState<ArtefactDto[]>([]);
   const [research, setResearch] = useState<GeneralRunStateDto | null>(null);
+  // Phase 4: null until reviewed, and `not_assessed` for a run with no criteria
+  // — so nothing extra renders on a run there was nothing to check.
+  const [acceptance, setAcceptance] = useState<AcceptanceReviewDto | null>(null);
+  const [sources, setSources] = useState<ResearchSourceDto[]>([]);
   const [settings, setSettings] = useState<SettingsDto | null>(null);
   const [logs, setLogs] = useState<RunLogDto[]>([]);
   const [error, setError] = useState('');
@@ -54,6 +60,12 @@ export function RunDetail({ user }: { user: CurrentUser }) {
     setAuditEvents(detail.auditEvents);
     setArtefacts(detail.artefacts);
     setResearch(detail.research);
+
+    const verification = await api.runAcceptance(id).catch(() => null);
+    if (verification) {
+      setAcceptance(verification.acceptance);
+      setSources(verification.sources);
+    }
   }, [id]);
 
   const loadLogs = useCallback(async () => {
@@ -319,6 +331,102 @@ export function RunDetail({ user }: { user: CurrentUser }) {
               )}
             </dd>
           </dl>
+        </div>
+      )}
+
+      {/*
+        Acceptance sits ABOVE the results, deliberately.
+        Whether the work satisfied what was approved is the first thing a reader
+        needs; scrolling past five documents to discover that two more were
+        asked for is the reading order this phase exists to fix.
+      */}
+      {acceptance && acceptance.state !== 'not_assessed' && (
+        <div className="card">
+          <h2>Acceptance criteria</h2>
+          <p>
+            <Badge tone={acceptance.state === 'satisfied' ? 'ok' : acceptance.state === 'gaps' ? 'warn' : 'danger'}>
+              {ACCEPTANCE_STATE_LABELS[acceptance.state]}
+            </Badge>
+            {acceptance.remediationAttempted && <span className="dim"> · one remediation pass was attempted</span>}
+            {acceptance.modelAssisted && <span className="dim"> · a model judged at least one criterion</span>}
+          </p>
+
+          <ul className="criteria">
+            {acceptance.results.map((result) => (
+              <li key={result.criterionId} className={result.verdict === 'satisfied' ? 'met' : 'unmet'}>
+                <Badge
+                  tone={
+                    result.verdict === 'satisfied'
+                      ? 'ok'
+                      : result.verdict === 'not_applicable'
+                        ? 'idle'
+                        : 'warn'
+                  }
+                >
+                  {result.verdict}
+                </Badge>{' '}
+                {result.description}
+                {result.observed && <span className="dim"> — {result.observed}</span>}
+                {!result.required && <span className="dim"> (optional)</span>}
+                {result.reasoning && <div className="dim">{result.reasoning}</div>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {sources.length > 0 && (
+        <div className="card">
+          <h2>Sources Mac retrieved</h2>
+          <p className="dim">
+            {sources.filter((s) => s.external).length} of {sources.length} came from outside PAC. A claim resting on
+            the public internet is a different kind of claim from one resting on PAC's own records.
+          </p>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Kind</th>
+                <th>Query</th>
+                <th>Retrieved</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sources.map((source) => (
+                <tr key={source.id}>
+                  <td>
+                    {source.url ? (
+                      <a href={source.url} rel="noreferrer noopener" target="_blank">
+                        {source.title || source.ref}
+                      </a>
+                    ) : (
+                      source.title || source.ref
+                    )}
+                    {/*
+                      A page that addressed an AI system is a fact about the
+                      page, and a reader deciding how much to trust a claim
+                      wants to know it. The content was kept, not blocked.
+                    */}
+                    {source.injectionSuspected && (
+                      <>
+                        {' '}
+                        <Badge tone="danger">contained instructions to an AI</Badge>
+                      </>
+                    )}
+                  </td>
+                  <td>
+                    <Badge tone={source.external ? 'warn' : 'idle'}>
+                      {SOURCE_CLASS_LABELS[source.sourceClass]}
+                    </Badge>
+                  </td>
+                  <td className="dim">{source.query}</td>
+                  <td>
+                    <Time value={source.retrievedAt} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 

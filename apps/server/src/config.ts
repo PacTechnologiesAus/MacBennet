@@ -52,6 +52,45 @@ const envSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   MAC_MODEL_NAME: z.string().default('claude-sonnet-5'),
   /**
+   * How long a single model call may take before it is aborted.
+   *
+   * This was hardcoded to 60 seconds and unreachable from configuration, which
+   * was survivable only because every test ran against the scripted provider
+   * and got an answer instantly. The first real research step failed six times
+   * in a row on the commissioned VM: a prompt carrying a 9,855-character task
+   * description and seven Company documents, asked for up to 3,000 tokens
+   * (8,000 when finalising), does not come back inside a minute.
+   *
+   * 300s matches the proxy_read_timeout nginx already uses in front of this
+   * service for the same reason. It is a ceiling, not a target — cancellation
+   * still aborts immediately via the run's own AbortSignal, so a stopped run
+   * does not keep billing for five minutes.
+   */
+  MAC_MODEL_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).default(300_000),
+  /**
+   * Output ceilings, per kind of call, replacing two literals in the runner.
+   *
+   * The write-up is produced one document per call, so `artefact` is the budget
+   * for ONE deliverable rather than for all of them at once. That is what makes
+   * a large investigation possible: total output scales with the number of
+   * documents instead of being capped by a single response.
+   *
+   * `outline` is small on purpose — it names the documents, it does not write
+   * them.
+   */
+  /*
+   * 3,000 was the value inherited from the scripted-provider era and it is far
+   * too small for a real one. Six of eight steps in the third commissioning run
+   * stopped at exactly 3,000 output tokens, truncated mid-JSON, failed to parse
+   * and contributed NO findings — so the run gathered 28 sources and reached
+   * its write-up with nothing to write about. A step states findings with their
+   * statements, evidence classes, citations and reasoning, plus a narrative;
+   * that is not a 3,000-token reply on a substantial task.
+   */
+  MAC_MODEL_STEP_MAX_TOKENS: z.coerce.number().int().min(256).max(64_000).default(12_000),
+  MAC_MODEL_OUTLINE_MAX_TOKENS: z.coerce.number().int().min(256).max(64_000).default(4_000),
+  MAC_MODEL_ARTEFACT_MAX_TOKENS: z.coerce.number().int().min(1_000).max(64_000).default(16_000),
+  /**
    * Sprint 3.3: the second real provider.
    *
    * Spec section 31 requires replaceable model providers, plural. One
@@ -93,6 +132,44 @@ const envSchema = z.object({
    */
   MAC_COMPANY_CONTEXT_TOKEN: z.string().optional(),
   MAC_COMPANY_CONTEXT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600_000).default(60_000),
+
+  // --- Phase 4 -------------------------------------------------------------
+  //
+  // Microsoft Teams. Mac appears as a BOT application named "Mac Bennett":
+  // Teams has no mechanism by which an application posts as a human user
+  // account, and faking human attribution would be both impossible and wrong.
+  // See MAC_TEAMS_IDENTITY in packages/protocol/src/teams.ts.
+
+  /** Azure Bot application (client) ID. Also the expected inbound JWT audience. */
+  MAC_TEAMS_APP_ID: z.string().optional(),
+  /** Client secret, used ONLY to obtain a Bot Connector token. */
+  MAC_TEAMS_APP_PASSWORD: z.string().optional(),
+  /** PAC's tenant. Activities from any other tenant are rejected. */
+  MAC_TEAMS_TENANT_ID: z.string().optional(),
+  /**
+   * Where the Bot Framework publishes its signing keys.
+   *
+   * Configurable because the Government cloud uses a different metadata
+   * document, and because a test needs to point it at a local stub. It is NOT
+   * taken from the token: an issuer that nominates its own key source is a
+   * signature check that verifies nothing.
+   */
+  MAC_TEAMS_OPENID_METADATA: z
+    .string()
+    .default('https://login.botframework.com/v1/.well-known/openidconfiguration'),
+  MAC_TEAMS_LOGIN_URL: z.string().default('https://login.microsoftonline.com/botframework.com'),
+
+  // Forja orchestration.
+  MAC_FORJA_WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(10_000),
+
+  // External web search. Nothing has been signed up for; see
+  // WEB_SEARCH_PROVIDER_REQUIREMENTS for what each provider needs from a human.
+  MAC_SEARCH_API_KEY: z.string().optional(),
+  /** Programmable Search Engine ID, for the Google provider only. */
+  MAC_SEARCH_ENGINE_ID: z.string().optional(),
+  /** Base URL of a SearXNG instance PAC controls. */
+  MAC_SEARCH_BASE_URL: z.string().optional(),
+  MAC_SEARCH_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(20_000),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -162,6 +239,10 @@ export const config = Object.freeze({
     openaiApiKey: env.OPENAI_API_KEY,
     openaiModel: env.MAC_OPENAI_MODEL_NAME,
     openaiBaseUrl: env.MAC_OPENAI_BASE_URL,
+    timeoutMs: env.MAC_MODEL_TIMEOUT_MS,
+    stepMaxTokens: env.MAC_MODEL_STEP_MAX_TOKENS,
+    outlineMaxTokens: env.MAC_MODEL_OUTLINE_MAX_TOKENS,
+    artefactMaxTokens: env.MAC_MODEL_ARTEFACT_MAX_TOKENS,
   },
 
   // --- Sprint 3.3 ---
@@ -172,6 +253,24 @@ export const config = Object.freeze({
      * model as "the web contains nothing about this".
      */
     searchEndpoint: env.MAC_RESEARCH_SEARCH_ENDPOINT,
+  },
+
+  // --- Phase 4 ---
+  teams: {
+    appId: env.MAC_TEAMS_APP_ID,
+    appPassword: env.MAC_TEAMS_APP_PASSWORD,
+    tenantId: env.MAC_TEAMS_TENANT_ID,
+    openIdMetadataUrl: env.MAC_TEAMS_OPENID_METADATA,
+    loginUrl: env.MAC_TEAMS_LOGIN_URL.replace(/\/+$/, ''),
+  },
+  forja: {
+    webhookTimeoutMs: env.MAC_FORJA_WEBHOOK_TIMEOUT_MS,
+  },
+  search: {
+    apiKey: env.MAC_SEARCH_API_KEY,
+    engineId: env.MAC_SEARCH_ENGINE_ID,
+    baseUrl: env.MAC_SEARCH_BASE_URL?.replace(/\/+$/, ''),
+    timeoutMs: env.MAC_SEARCH_TIMEOUT_MS,
   },
 
   // --- Sprint 3.2 ---
