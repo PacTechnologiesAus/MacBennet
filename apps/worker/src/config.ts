@@ -121,6 +121,24 @@ export const REFUSED_SANDBOX_ENV = [
    * defining Mac's own authority.
    */
   'MAC_COMPANY_',
+  /*
+   * Phase 4: Teams, Forja and web-search credentials.
+   *
+   * All three belong to the CONTROL PLANE and none of them has any use inside a
+   * coding sandbox. The Teams one is the sharpest: `MAC_TEAMS_APP_PASSWORD`
+   * obtains a Bot Connector token, and an agent holding it could post as Mac —
+   * into a thread where Mac asks for approvals.
+   *
+   * Prefix-matched, like the others, so a future `MAC_TEAMS_ANYTHING` is
+   * refused without anyone remembering to come back here.
+   *
+   * `ANTHROPIC_API_KEY` is deliberately NOT on this list: it is how a coding
+   * agent authenticates, and an administrator naming it is doing the thing the
+   * allowlist exists for.
+   */
+  'MAC_TEAMS_',
+  'MAC_SEARCH_',
+  'MAC_FORJA_',
   'SEED_ADMIN_',
   'SESSION_',
   'AWS_',

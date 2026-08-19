@@ -4,6 +4,7 @@ import { db } from '../../src/db/client.js';
 import {
   auditEvents,
   handoffBriefs,
+  researchSources,
   runAcceptance,
   runArtefacts,
   runs,
@@ -13,9 +14,18 @@ import { asUser, createAndLogin, resetDatabase, startTestApp, type Session, type
 import { makeProject, makeTask, registerTestWorker } from '../helpers/fixtures.js';
 import { ScriptedModelProvider, setModelProvider } from '../../src/services/model/provider.js';
 import { beginGeneralRun, performResearchStep } from '../../src/services/research/runner.js';
-import { freezeCriteriaForRun, getRunAcceptance, reviewAcceptance } from '../../src/services/acceptance.js';
+import {
+  freezeCriteriaForRun,
+  getRunAcceptance,
+  noteRemediation,
+  remediationAlreadyAttempted,
+  reviewAcceptance,
+} from '../../src/services/acceptance.js';
+import { performAcceptanceRemediation } from '../../src/services/research/runner.js';
 import { completeRun } from '../../src/services/runs.js';
 import { updateSettings } from '../../src/services/settings.js';
+import { createMemory } from '../../src/services/memory.js';
+import { SYSTEM_ACTOR } from '../../src/services/audit.js';
 
 /**
  * Acceptance verification, end to end (Phase 4 Part F, Acceptance Case 1).
@@ -322,6 +332,357 @@ describe('Acceptance Case 1 — research fidelity', () => {
     expect(gaps.length).toBeGreaterThanOrEqual(2);
     const descriptions = gaps.map((g) => (g.metadata as { description: string }).description);
     expect(descriptions.some((d) => /engineering brief/i.test(d))).toBe(true);
+  });
+});
+
+
+/**
+ * A model that LOOKS SOMETHING UP and then cites what came back.
+ *
+ * The distinction from `onePagerModel` is the whole subject of this file: one
+ * of them retrieves a source and grounds a claim in it, and the other asserts a
+ * conclusion. Only the first can satisfy an evidence criterion.
+ */
+function groundedModel() {
+  return new ScriptedModelProvider([
+    JSON.stringify({
+      toolCalls: [{ tool: 'project_memory_search', argument: 'existing panel', purpose: 'what PAC already records' }],
+      findings: [],
+      narrative: 'Reading what PAC already records.',
+      unknowns: [],
+      artefacts: [],
+      blockerProposed: null,
+    }),
+    /*
+     * Step two: reason over what came back, asking for nothing more.
+     *
+     * The empty `toolCalls` is what tells the loop the model is satisfied —
+     * `lastRequestedToolCount` is read from what was ASKED FOR, not from what
+     * came back, so a step whose every tool was refused does not end the run.
+     */
+    JSON.stringify({
+      toolCalls: [],
+      findings: [
+        {
+          statement: 'The existing panel is an S7-300 with a CP343-1.',
+          evidenceClass: 'project_fact',
+          confidence: 0.85,
+          sources: ['project_memory:project/existing-panel'],
+          reasoning: 'Recorded in this project.',
+        },
+      ],
+      narrative: 'Reasoning over what was gathered.',
+      unknowns: [],
+      artefacts: [],
+      blockerProposed: null,
+    }),
+    // Step three, phase one: what is being written.
+    JSON.stringify({
+      deliverables: [{ type: 'recommendation', title: 'Replace or migrate', purpose: 'The recommendation.' }],
+      findings: [],
+      narrative: 'Writing up.',
+      unknowns: [],
+      blockerProposed: null,
+    }),
+    // Step three, phase two: the document itself, on its own budget.
+    JSON.stringify({
+      type: 'recommendation',
+      title: 'Replace or migrate',
+      format: 'markdown',
+      body: ['# Recommendation', '', '## Summary', 'Migrate incrementally.'].join('\n'),
+      summary: 'Migrate incrementally.',
+      findings: [],
+    }),
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+
+/** Runs the loop far enough to produce exactly one recommendation. */
+async function produceOneArtefact(runId: string): Promise<void> {
+  setModelProvider(onePagerModel());
+  await beginGeneralRun(runId);
+  await performResearchStep(runId);
+  await performResearchStep(runId);
+}
+
+describe('a run that met everything asked of it', () => {
+  it('is satisfied, and completes as completed', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    await updateSettings(
+      { acceptanceSemanticReviewEnabled: false },
+      { type: 'user', id: admin.user.id, label: admin.user.name },
+    );
+
+    // A modest request, met in full: one recommendation, one grounded finding.
+    const { runId, taskId } = await briefedRun(
+      project.id,
+      'Give me a single written recommendation on whether to replace or migrate. Internal sources only.',
+    );
+
+    /*
+     * Something for Mac to actually retrieve.
+     *
+     * The evidence criterion asks for a finding a reader can CHECK, and
+     * `classifyFindings` demotes any factual claim whose citation was not
+     * retrieved during the run. So a satisfied run has to have gone and read
+     * something — which is the whole point of the criterion, and the reason
+     * this test seeds project memory rather than asserting against a model that
+     * merely claims to be grounded.
+     */
+    await createMemory(
+      {
+        scope: 'project',
+        projectId: project.id,
+        key: 'existing-panel',
+        value: 'The existing panel at this site is an S7-300 with a CP343-1 ethernet module.',
+        confidence: 1,
+      },
+      SYSTEM_ACTOR,
+    );
+
+    setModelProvider(groundedModel());
+    await beginGeneralRun(runId);
+    // Gather, reason, write up — three steps, because this run actually looks
+    // something up rather than asserting a conclusion from nothing.
+    await performResearchStep(runId);
+    await performResearchStep(runId);
+    await performResearchStep(runId);
+
+    const review = await reviewAcceptance(runId, { allowModel: false });
+    expect(review.unmet).toEqual([]);
+    expect(review.state).toBe('satisfied');
+
+    const worker = await registerTestWorker(app.fastify, { name: 'happy-worker', capabilities: ['general_task'] });
+    await db.update(runs).set({ status: 'running', workerId: worker.workerId }).where(eq(runs.id, runId));
+
+    const status = await completeRun(runId, { id: worker.workerId, name: 'happy-worker' }, {
+      outcome: 'succeeded',
+      summary: 'Done.',
+    });
+
+    expect(status).toBe('completed');
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId));
+    expect(task!.status).toBe('done');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('criteria a count cannot decide', () => {
+  const semanticCriterion = {
+    id: 'semantic-costs',
+    kind: 'semantic' as const,
+    description: 'States a rough cost for each of the three systems',
+    required: true,
+    source: 'human' as const,
+    statement: 'The report states a rough cost for each of the three systems.',
+  };
+
+  it('is unmet when no model is available to judge it', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    const { runId } = await briefedRun(project.id, 'Write me a recommendation.');
+
+    await produceOneArtefact(runId);
+    await db.update(runAcceptance).set({ criteria: [semanticCriterion] }).where(eq(runAcceptance.runId, runId));
+
+    // No provider configured. `indeterminate` reads as a gap, never as a pass:
+    // a check that degrades to green when it breaks is worse than no check.
+    setModelProvider(null);
+    const review = await reviewAcceptance(runId);
+
+    expect(review.state).toBe('gaps');
+    expect(review.unmet.map((u) => u.criterionId)).toContain('semantic-costs');
+  });
+
+  it('is decided by a model when one is available', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    const { runId } = await briefedRun(project.id, 'Write me a recommendation.');
+
+    await produceOneArtefact(runId);
+    await db.update(runAcceptance).set({ criteria: [semanticCriterion] }).where(eq(runAcceptance.runId, runId));
+
+    setModelProvider(
+      new ScriptedModelProvider([
+        JSON.stringify({
+          judgements: [
+            {
+              criterionId: 'semantic-costs',
+              satisfied: true,
+              evidence: 'Section "Cost" gives a figure for each system.',
+              reasoning: 'All three are costed.',
+            },
+          ],
+        }),
+      ]),
+    );
+
+    const review = await reviewAcceptance(runId);
+
+    expect(review.modelAssisted).toBe(true);
+    expect(review.state).toBe('satisfied');
+    expect(review.results[0]!.method).toBe('model');
+  });
+
+  it('cannot let a model talk its way past a failed count', async () => {
+    /*
+     * The safety property of the whole mechanism. Semantic review runs ONLY
+     * over criteria marked semantic; it never revisits a deterministic result.
+     * A fluent explanation must not be able to pass "0 of type
+     * engineering_brief, 3 required".
+     */
+    const project = await researchProject(['company_context', 'internal_only']);
+    const { runId } = await briefedRun(project.id, 'Write me a recommendation.');
+
+    await produceOneArtefact(runId);
+    await db
+      .update(runAcceptance)
+      .set({
+        criteria: [
+          {
+            id: 'briefs',
+            kind: 'artefact_type',
+            description: 'Produce 3 engineering briefs',
+            required: true,
+            source: 'derived',
+            artefactType: 'engineering_brief',
+            minimum: 3,
+          },
+          semanticCriterion,
+        ],
+      })
+      .where(eq(runAcceptance.runId, runId));
+
+    // A model that says everything is fine, about everything.
+    setModelProvider(
+      new ScriptedModelProvider([
+        JSON.stringify({
+          judgements: [
+            { criterionId: 'briefs', satisfied: true, evidence: 'It is all covered.', reasoning: 'Trust me.' },
+            { criterionId: 'semantic-costs', satisfied: true, evidence: 'Costed.', reasoning: 'Yes.' },
+          ],
+        }),
+      ]),
+    );
+
+    const review = await reviewAcceptance(runId);
+
+    expect(review.state).toBe('gaps');
+    const briefs = review.results.find((r) => r.criterionId === 'briefs')!;
+    expect(briefs.verdict).toBe('unmet');
+    // Decided by a count, and the count is what is reported.
+    expect(briefs.method).toBe('deterministic');
+    expect(briefs.observed).toContain('0 of type engineering_brief, 3 required');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('required source classes', () => {
+  it('is unmet when the sources retrieved are not of the class asked for', async () => {
+    const project = await researchProject();
+    const { runId, taskId } = await briefedRun(project.id, 'Confirm against the vendor documentation.');
+
+    await produceOneArtefact(runId);
+    await db
+      .update(runAcceptance)
+      .set({
+        criteria: [
+          {
+            id: 'primary',
+            kind: 'source_class',
+            description: 'Cite a primary source',
+            required: true,
+            source: 'derived',
+            sourceClasses: ['official_vendor_docs', 'standards_body', 'government'],
+            minimum: 1,
+          },
+        ],
+      })
+      .where(eq(runAcceptance.runId, runId));
+
+    // A forum thread is a source. It is not a primary source, and a conclusion
+    // resting on it is second-hand.
+    await db.insert(researchSources).values({
+      runId,
+      taskId,
+      query: 'anything',
+      tool: 'public_web_search',
+      ref: 'https://reddit.com/r/plc/1',
+      url: 'https://reddit.com/r/plc/1',
+      title: 'A thread',
+      sourceClass: 'forum_community',
+      external: true,
+      excerpt: 'somebody said',
+    });
+
+    const review = await reviewAcceptance(runId, { allowModel: false });
+
+    expect(review.state).toBe('gaps');
+    expect(review.unmet[0]!.observed).toMatch(/retrieved, none of the required class/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('remediation', () => {
+  it('is attempted once, and recorded as such', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    const { runId } = await briefedRun(project.id, 'Write me a recommendation.');
+
+    await produceOneArtefact(runId);
+
+    await noteRemediation(runId, 'Attempted once.');
+    expect(await remediationAlreadyAttempted(runId)).toBe(true);
+
+    const review = await reviewAcceptance(runId, { allowModel: false });
+    expect(review.remediationAttempted).toBe(true);
+  });
+
+  it('produces the missing deliverable when the evidence supports it', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    const { runId } = await briefedRun(project.id, 'Write me a recommendation.');
+
+    await produceOneArtefact(runId);
+
+    setModelProvider(
+      new ScriptedModelProvider([
+        JSON.stringify({
+          type: 'engineering_brief',
+          title: 'Engineering brief — Project Registry',
+          format: 'markdown',
+          body: '# Engineering brief\n\n## Scope\nThe registry.\n',
+          summary: 'The missing brief.',
+          findings: [],
+        }),
+      ]),
+    );
+
+    const outcome = await performAcceptanceRemediation(runId, [
+      { description: 'Produce 1 engineering brief', observed: '0 of type engineering_brief, 1 required' },
+    ]);
+
+    expect(outcome.artefactsCreated).toBe(1);
+    const artefacts = await db.select().from(runArtefacts).where(eq(runArtefacts.runId, runId));
+    expect(artefacts.map((a) => a.artefactType)).toContain('engineering_brief');
+  });
+
+  it('produces nothing rather than inventing a document', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    const { runId } = await briefedRun(project.id, 'Write me a recommendation.');
+
+    await produceOneArtefact(runId);
+
+    // The model returns something unusable. An invented document is worse than
+    // an acknowledged gap.
+    setModelProvider(new ScriptedModelProvider(['I am afraid I cannot write that from what I have.']));
+
+    const outcome = await performAcceptanceRemediation(runId, [
+      { description: 'Produce 1 engineering brief', observed: '0 of type engineering_brief, 1 required' },
+    ]);
+
+    expect(outcome.artefactsCreated).toBe(0);
+    expect(outcome.note).toMatch(/produced nothing further/);
   });
 });
 

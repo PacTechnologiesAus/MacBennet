@@ -290,3 +290,37 @@ describe('the PAC company context credential', () => {
     expect(REFUSED_SANDBOX_ENV).toContain('MAC_COMPANY_');
   });
 });
+
+// ---------------------------------------------------------------------------
+
+describe('the Phase 4 credentials', () => {
+  it('are refused if an administrator tries to forward one into a sandbox', () => {
+    /*
+     * The sharpest of the three is the Teams client secret: it obtains a Bot
+     * Connector token, and a coding agent holding one could post as Mac into a
+     * thread where Mac asks for approvals.
+     *
+     * Prefix-matched, so a future MAC_TEAMS_ANYTHING is refused too.
+     */
+    for (const variable of [
+      'MAC_TEAMS_APP_PASSWORD',
+      'MAC_TEAMS_APP_ID',
+      'MAC_TEAMS_FUTURE_THING',
+      'MAC_SEARCH_API_KEY',
+      'MAC_FORJA_WEBHOOK_TIMEOUT_MS',
+    ]) {
+      expect(() => resolveSandboxAgentEnv([variable], { [variable]: 'sentinel' }), variable).toThrow(
+        RefusedSandboxEnv,
+      );
+    }
+  });
+
+  it('still permits the one credential a coding agent legitimately needs', () => {
+    // ANTHROPIC_API_KEY is how the agent authenticates. An administrator naming
+    // it is doing the thing the allowlist exists for, and refusing it would
+    // break the coding path this phase was told not to touch.
+    expect(resolveSandboxAgentEnv(['ANTHROPIC_API_KEY'], { ANTHROPIC_API_KEY: 'sk-ant-example' })).toEqual({
+      ANTHROPIC_API_KEY: 'sk-ant-example',
+    });
+  });
+});

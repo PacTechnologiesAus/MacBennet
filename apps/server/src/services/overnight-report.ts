@@ -1,10 +1,12 @@
 import { desc, eq, inArray } from 'drizzle-orm';
-import type { EmailDeliveryDto, OvernightEmailContent } from '@mac/protocol';
+import type { CriterionResult, EmailDeliveryDto, OvernightEmailContent, RunStatus } from '@mac/protocol';
+import { isDeliveringRunStatus, unmetCriteria } from '@mac/protocol';
 import { db } from '../db/client.js';
 import {
   nightShifts,
   projects,
   pullRequests,
+  runAcceptance,
   runAssumptions,
   runBlockers,
   runReports,
@@ -57,6 +59,21 @@ export async function buildOvernightContent(nightShiftId: string): Promise<Overn
   ]);
 
   const reportByRun = new Map(reports.map((r) => [r.runId, r.content as Record<string, unknown>]));
+
+  /*
+   * Acceptance verdicts for every run in the shift, in one query.
+   *
+   * A morning report that had to fetch this per run would either be slow or
+   * quietly skip it, and the sentence it produces — "delivered, with two
+   * required criteria unmet" — is the single most useful line in the email.
+   */
+  const acceptanceRows = shiftRuns.length
+    ? await db
+        .select()
+        .from(runAcceptance)
+        .where(inArray(runAcceptance.runId, shiftRuns.map((r) => r.run.id)))
+    : [];
+  const acceptanceByRun = new Map(acceptanceRows.map((row) => [row.runId, row]));
   const reviewByRun = new Map(reviews.map((r) => [r.runId, r]));
 
   const completed: OvernightEmailContent['completed'] = [];
@@ -270,3 +287,10 @@ export async function deliverOvernightReport(
 
   return delivery;
 }
+
+/** The stored per-criterion results, defensively parsed. */
+const resultsOf = (row: { results: unknown } | undefined): CriterionResult[] =>
+  Array.isArray(row?.results) ? (row.results as CriterionResult[]) : [];
+
+/** How many REQUIRED criteria a run fell short of. */
+const unmetCount = (row: { results: unknown } | undefined): number => unmetCriteria(resultsOf(row)).length;
