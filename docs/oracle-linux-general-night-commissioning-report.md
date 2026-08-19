@@ -4,7 +4,7 @@
 **Plan:** `docs/oracle-linux-general-night-commissioning.md`
 **Target:** Oracle Cloud VM `mac-bennet-pc`, `161.33.80.88`, ap-melbourne-1
 **Public name:** `mac.pac-technologies.com.au`
-**Started:** 2026-08-18 22:53 UTC · **This revision:** 2026-08-19 03:15 UTC
+**Started:** 2026-08-18 22:53 UTC · **This revision:** 2026-08-19 03:25 UTC
 
 Where this report and the plan disagree, this report wins. Where something was not exercised, it
 says `BLOCKED` or `NOT EXERCISED` and names what is missing rather than implying it passed.
@@ -29,10 +29,10 @@ behaviour as proven.**
 | DNS, OCI ingress, public HTTP | Done, observed from off-host |
 | TLS, HTTPS-only, HSTS, renewal | Done, observed |
 | fail2ban login jail | Done, ban proven into nftables |
-| Reasoning provider | **BLOCKED** — awaiting `ANTHROPIC_API_KEY` |
+| Reasoning provider | Configured — real API call succeeded; §10.1 validation still to run |
 | Company credential least-privilege | Done — read proven, write refused by two probes |
 | Project night-shift approval | **AWAITING HUMAN** — control now exists, not clicked |
-| Acceptance run | **NOT STARTED** — gated on the API key and the two approvals |
+| Acceptance run | **NOT STARTED** — gated only on the two human approvals |
 
 ---
 
@@ -602,8 +602,40 @@ to `fresh` on its own.
 
 ## 8. Reasoning provider
 
-**BLOCKED.** `model_provider` is `none` and no `ANTHROPIC_API_KEY` is present in
-`/etc/mac-bennett/control-plane.env`.
+**Configured.** The operator supplied the key; it was moved onto the VM without passing through a
+chat transcript, a shell history or a command argument, and installed into
+`/etc/mac-bennett/control-plane.env` (`root:mac`, `0640`). `model_provider` was set to `anthropic`
+through the audited admin API rather than by mutating the database.
+
+**Containment of the new credential, verified rather than assumed:**
+
+* `grep -c ANTHROPIC /etc/mac-bennett/worker.env` → `0`. The worker's unit does not load the
+  control-plane file, so the key is not in the worker's environment.
+* `MAC_SANDBOX_AGENT_ENV` is unset, so the sandbox environment is built from empty and nothing
+  forwards the key into a contained process.
+* Claude Code keeps its own subscription session and was not switched to API-key billing.
+
+**The provider answers.** A minimal real call to the Messages API:
+
+```
+model       : claude-sonnet-5
+stop_reason : end_turn
+text        : 'commissioned'
+usage       : in=18 out=6
+```
+
+That proves three things at once that would otherwise have failed mid-run: the key authenticates,
+`MAC_MODEL_NAME=claude-sonnet-5` is a model this account can actually call, and usage is reported
+per token.
+
+The eligibility check now reads:
+
+> `PASS reasoning_model_available` — A real reasoning-model provider is configured.
+
+**Still to do, and not claimed:** the rest of §10.1 — structured output, citations, cancellation of a
+live call by `AbortSignal`, usage recorded against a run, and the **mandatory adversarial input**
+that tests `classifyFindings()` against a real model rather than a scripted misbehaving one. Those
+are exercised as part of the acceptance run, not before it.
 
 `requireReasoningProvider()` refuses rather than degrading, and the eligibility check says so in
 words a human can act on:
