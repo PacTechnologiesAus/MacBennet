@@ -634,6 +634,86 @@ export async function generateBrief(
 }
 
 /**
+ * Picks the next question from the brief AS IT NOW STANDS.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS NOT `generateBrief`
+ *
+ * `generateBrief` structures a brief from the CONVERSATION. That is right the
+ * first time and wrong every time after, because `answerBriefQuestion` folds an
+ * answer into the specific brief field its question was about — and
+ * regenerating from the transcript throws that mapping away.
+ *
+ * The failure it produces is quiet and total: a generic answer like "assume the
+ * existing panel stays" is not recognisable to the sentence classifier as a
+ * constraint, so the regenerated brief has no constraints, so the constraints
+ * question is asked again, and the conversation loops on one question for ever.
+ * Found by the Teams acceptance case, which answered the same question eight
+ * times and got it back eight times.
+ *
+ * So a conversational answer folds in and then asks THIS: given the brief as it
+ * now is, what is still missing? No structuring, no model call, no new version.
+ * ---------------------------------------------------------------------------
+ */
+export async function refreshPendingQuestion(
+  sessionId: string,
+  actor: Actor,
+): Promise<{ session: DiscoverySessionDto; brief: Awaited<ReturnType<typeof briefDto>> | null }> {
+  return db.transaction(async (tx) => {
+    const session = await requireSessionRow(sessionId, tx);
+    if (!session.briefId) {
+      return { session: await discoverySessionDto(session, tx), brief: null };
+    }
+
+    const briefRow = await requireBriefRow(session.briefId, tx);
+    const [task] = await tx.select().from(tasks).where(eq(tasks.id, session.taskId)).limit(1);
+
+    const content = handoffBriefContentSchema.parse(briefRow.content);
+    const snapshot = session.contextSnapshot ? projectContextSnapshotSchema.parse(session.contextSnapshot) : null;
+
+    const analysis = analyseGaps(mergeContextIntoBrief(content, snapshot), snapshot, {
+      taskKind: (task?.taskKind ?? 'coding') as TaskKind,
+    });
+    const next = analysis.nextQuestion;
+
+    const messages = asMessages(session.messages);
+    if (next) {
+      messages.push({
+        role: 'mac',
+        message: next.question,
+        at: new Date().toISOString(),
+        questionId: `gap-${next.dimension}`,
+      });
+    }
+
+    const [row] = await tx
+      .update(discoverySessions)
+      .set({
+        status: next ? 'brief_drafted' : 'ready',
+        messages,
+        pendingQuestion: next
+          ? { id: `gap-${next.dimension}`, question: next.question, dimension: next.dimension }
+          : null,
+        updatedAt: new Date(),
+      })
+      .where(eq(discoverySessions.id, sessionId))
+      .returning();
+    if (!row) throw AppError.notFound('Discovery session');
+
+    if (next) {
+      await record(tx, {
+        actor,
+        eventType: 'discovery.question_asked',
+        context: { projectId: session.projectId, taskId: session.taskId },
+        metadata: { discoverySessionId: sessionId, dimension: next.dimension, question: next.question },
+      });
+    }
+
+    return { session: await discoverySessionDto(row, tx), brief: await briefDto(briefRow, tx) };
+  });
+}
+
+/**
  * Investigates each outstanding dimension, and records what was consulted.
  *
  * Returns a map of dimension → the sources that resolved it, which

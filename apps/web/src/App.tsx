@@ -20,6 +20,9 @@ import { NightShift } from './pages/NightShift.js';
 import { Monday } from './pages/Monday.js';
 import { Security } from './pages/Security.js';
 import { CompanyContext, CompanyContextWarning } from './pages/CompanyContext.js';
+// --- Phase 4 ---
+import { Conversations } from './pages/Conversations.js';
+import { Inbox } from './pages/Inbox.js';
 
 export function App() {
   const [user, setUser] = useState<CurrentUser | null>(null);
@@ -57,10 +60,18 @@ function Shell({ user, onSignedOut }: { user: CurrentUser; onSignedOut: () => vo
       <aside className="sidebar">
         <div className="brand">
           <strong>Mac Bennett</strong>
-          <span>Automation Engineer · Sprint 3.2</span>
+          <span>Automation Engineer · Phase 4</span>
         </div>
         <nav className="nav">
           <NavLink to="/" end>Dashboard</NavLink>
+          {/*
+            Two Phase 4 entries, placed high on purpose: "what is waiting on me"
+            and "talk to Mac" are the two things somebody arriving in the
+            morning actually wants, and burying them below the machinery would
+            make the channel work and the screen not.
+          */}
+          <NavLink to="/inbox">Waiting on you</NavLink>
+          <NavLink to="/conversations">Conversations</NavLink>
           <NavLink to="/night-shift">Night shift</NavLink>
           <NavLink to="/discovery">Discovery</NavLink>
           <NavLink to="/projects">Projects</NavLink>
@@ -92,6 +103,8 @@ function Shell({ user, onSignedOut }: { user: CurrentUser; onSignedOut: () => vo
       <main className="main">
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/inbox" element={<Inbox user={user} />} />
+          <Route path="/conversations" element={<Conversations user={user} />} />
           <Route path="/night-shift" element={<NightShift user={user} />} />
           <Route path="/monday" element={<Monday user={user} />} />
           <Route path="/security" element={<Security user={user} />} />

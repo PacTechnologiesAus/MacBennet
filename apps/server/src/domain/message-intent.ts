@@ -132,7 +132,18 @@ const CUES: Cue[] = [
     intent: 'question',
     weight: 0.7,
     patterns: [
-      /^(what|why|how|when|where|which|who|is|are|do|does|did|can|could|should|would|will)\b/i,
+      /*
+       * An interrogative opener counts only when the message actually asks
+       * something.
+       *
+       * "What we want is level control that stops the pumps short-cycling" is a
+       * cleft construction, not a question — and it is exactly how somebody
+       * answers "what outcome do you want?". Without the lookahead it outscored
+       * the pending-question bias, so every declarative answer beginning with
+       * What, How or Which was classified as a question and never reached the
+       * brief it was answering. Found by the cross-channel acceptance case.
+       */
+      /^(what|why|how|when|where|which|who|is|are|do|does|did|can|could|should|would|will)\b(?=[\s\S]*\?)/i,
       /\?\s*$/,
     ],
   },

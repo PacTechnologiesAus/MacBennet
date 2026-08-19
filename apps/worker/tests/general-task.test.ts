@@ -233,6 +233,109 @@ describe('driving a general run', () => {
   });
 });
 
+describe('the acceptance review', () => {
+  const review = (over: Record<string, unknown> = {}) => ({
+    control: step().control,
+    state: 'satisfied',
+    criteriaChecked: 3,
+    unmet: 0,
+    artefactsProduced: 1,
+    externalSourcesUsed: 2,
+    remediationAttempted: false,
+    unmetSummary: [],
+    ...over,
+  });
+
+  it('asks the control plane to check the work BEFORE reporting completion', async () => {
+    const performResearchStep = vi.fn().mockResolvedValue(step({ done: true, artefactsCreated: 1 }));
+    const reviewAcceptance = vi.fn().mockResolvedValue(review());
+
+    const { ctx } = context();
+    const result = await runGeneralTaskJob(assignment(), ctx, {
+      client: { performResearchStep, reviewAcceptance } as never,
+    });
+
+    expect(reviewAcceptance).toHaveBeenCalledTimes(1);
+    expect(result.summary).toMatch(/all 3 required criteria met/i);
+  });
+
+  it('reports the shortfall in the summary when criteria were not met', async () => {
+    const performResearchStep = vi.fn().mockResolvedValue(step({ done: true, artefactsCreated: 1 }));
+    const reviewAcceptance = vi.fn().mockResolvedValue(
+      review({
+        state: 'gaps',
+        unmet: 2,
+        remediationAttempted: true,
+        unmetSummary: ['Produce 3 engineering briefs — 0 of type engineering_brief, 3 required'],
+      }),
+    );
+
+    const { ctx, logs } = context();
+    const result = await runGeneralTaskJob(assignment(), ctx, {
+      client: { performResearchStep, reviewAcceptance } as never,
+    });
+
+    expect(result.summary).toMatch(/2 of 3 required criteria NOT met after a remediation attempt/);
+    // The specific criterion, in the run log, so a reader knows WHICH one.
+    expect(logs.join(' ')).toMatch(/0 of type engineering_brief, 3 required/);
+  });
+
+  it('tells the control plane whether there is time to remediate', async () => {
+    // The worker holds the wall clock and the cutoff, so it is the component
+    // that knows. The control plane decides whether remediation is PERMITTED.
+    const performResearchStep = vi.fn().mockResolvedValue(step({ done: true, artefactsCreated: 1 }));
+    const reviewAcceptance = vi.fn().mockResolvedValue(review());
+
+    const { ctx } = context();
+    await runGeneralTaskJob(assignment({ maxMinutes: 2 }), ctx, {
+      client: { performResearchStep, reviewAcceptance } as never,
+    });
+
+    // Two minutes left is not enough for a model call plus a remediation pass.
+    expect(reviewAcceptance.mock.calls[0]![1]).toEqual({ canRemediate: false });
+
+    reviewAcceptance.mockClear();
+    const second = context();
+    await runGeneralTaskJob(assignment({ maxMinutes: 60 }), second.ctx, {
+      client: { performResearchStep, reviewAcceptance } as never,
+    });
+    expect(reviewAcceptance.mock.calls[0]![1]).toEqual({ canRemediate: true });
+  });
+
+  it('does not fail the run when the review itself could not be performed', async () => {
+    /*
+     * Work was produced and is worth reading. The control plane performs a
+     * deterministic review of its own when completion arrives, so a skipped
+     * check here cannot yield a clean `completed` — which is what makes it safe
+     * for this to degrade rather than throw.
+     */
+    const performResearchStep = vi.fn().mockResolvedValue(step({ done: true, artefactsCreated: 1 }));
+    const reviewAcceptance = vi.fn().mockRejectedValue(new Error('control plane exploded'));
+
+    const { ctx, logs } = context();
+    const result = await runGeneralTaskJob(assignment(), ctx, {
+      client: { performResearchStep, reviewAcceptance } as never,
+    });
+
+    expect(result.summary).toMatch(/1 artefact\(s\) produced/);
+    expect(logs.join(' ')).toMatch(/acceptance review could not be performed/i);
+  });
+
+  it('never asks for a review of a run that produced nothing', async () => {
+    // An empty run fails before it gets here, and reviewing it would spend a
+    // model call to discover what the artefact count already said.
+    const performResearchStep = vi.fn().mockResolvedValue(step({ done: true, artefactsCreated: 0 }));
+    const reviewAcceptance = vi.fn();
+
+    const { ctx } = context();
+    await expect(
+      runGeneralTaskJob(assignment(), ctx, { client: { performResearchStep, reviewAcceptance } as never }),
+    ).rejects.toThrow(/produced NO artefacts/);
+
+    expect(reviewAcceptance).not.toHaveBeenCalled();
+  });
+});
+
 describe('what the worker never touches', () => {
   it('receives no credential, no prompt and no tool in its assignment', () => {
     const general = assignment().general!;

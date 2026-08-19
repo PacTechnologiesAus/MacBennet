@@ -7,10 +7,12 @@ import {
   type ConversationTurnDto,
   type MessageIntent,
   type ParticipantKind,
+  type TaskKind,
 } from '@mac/protocol';
 import { db } from '../db/client.js';
 import { conversationMessages, discoverySessions, projects } from '../db/schema.js';
 import { classifyMessageIntent, isConsequentialIntent } from '../domain/message-intent.js';
+import { classifyTask } from '../domain/task-classification.js';
 import { record, type Actor } from './audit.js';
 import { emit } from './events.js';
 import {
@@ -22,7 +24,7 @@ import {
 } from './conversations.js';
 import { bindMessageToApproval, createApprovalRequest, decideApprovalRequest } from './approval-requests.js';
 import { answerStatusQuery } from './status-queries.js';
-import { addDiscoveryMessage, generateBrief, startDiscovery } from './discovery.js';
+import { addDiscoveryMessage, generateBrief, refreshPendingQuestion, startDiscovery } from './discovery.js';
 import { createTask } from './tasks.js';
 import { getSettings } from './settings.js';
 
@@ -343,18 +345,73 @@ async function answer(args: {
 
   await addDiscoveryMessage(args.pendingQuestionSessionId, { message: args.input.body }, args.input.actor);
 
-  const session = await sessionById(args.pendingQuestionSessionId);
-  const next = session?.pendingQuestion as { question?: string } | null;
+  /*
+   * The next question comes from the brief AS IT NOW STANDS.
+   *
+   * `addDiscoveryMessage` folds the answer into the brief field its question was
+   * about and clears the pending question; it does not work out what to ask
+   * next, because that is gap analysis. Without this the conversation simply
+   * stopped: Mac answered every question with "that fills the gap I had" and
+   * then asked nothing further and raised nothing.
+   *
+   * Deliberately NOT `generateBrief`, which structures from the transcript and
+   * would discard the field mapping the answer just made — the loop that
+   * produces is worse than the silence: one question asked eight times.
+   */
+  const { session, brief } = await refreshPendingQuestion(args.pendingQuestionSessionId, args.input.actor);
+  const next = session.pendingQuestion?.question ?? null;
+
+  /*
+   * Discovery finished HERE, mid-conversation, so the approval is raised HERE.
+   *
+   * Part A §5 ends at "present an approval request", and the only reason the
+   * task-assignment handler also raises one is that a sufficiently complete
+   * first message finishes discovery immediately. Raising it in only one of the
+   * two places leaves the common case — several questions, then completion —
+   * with a finished brief nobody is asked to approve.
+   */
+  const approval =
+    next === null && brief
+      ? await createApprovalRequest(
+          {
+            taskId: session.taskId,
+            briefId: brief.id,
+            subjectKind: 'brief',
+            subjectVersion: brief.version,
+            title: `Accept the brief for "${session.taskTitle}"`,
+            detail: brief.content.userObjective.slice(0, 8000),
+            recommendation: brief.content.proposedScope || 'Proceed as the brief describes.',
+            risk: 'medium',
+            authority: 'accept_brief',
+            confidence: brief.confidence,
+          },
+          args.input.actor,
+        )
+      : null;
 
   const reply = await say(
     args.input,
-    next?.question
-      ? `Thanks. Next: ${next.question}`
-      : 'Thanks — that fills the gap I had. I will put a brief together and come back for approval.',
-    { inReplyToMessageId: args.inbound.id, outboundKind: next?.question ? 'question' : 'reply' },
+    next
+      ? `Thanks. Next: ${next}`
+      : approval && brief
+        ? `Thanks — that is enough for me to work with. I understand it at ${(brief.confidence * 100).toFixed(0)}%. ` +
+          `Approve ${approval.code} and I will get on with it.`
+        : 'Thanks — that fills the gap I had.',
+    {
+      inReplyToMessageId: args.inbound.id,
+      outboundKind: next ? 'question' : approval ? 'approval_request' : 'reply',
+      ...(approval ? { approvalRequestId: approval.id } : {}),
+    },
   );
 
-  return { reply, created: { ...nothingCreated(), discoverySessionId: args.pendingQuestionSessionId } };
+  return {
+    reply,
+    created: {
+      ...nothingCreated(),
+      discoverySessionId: args.pendingQuestionSessionId,
+      approvalRequestId: approval?.id ?? null,
+    },
+  };
 }
 
 /**
@@ -387,12 +444,35 @@ async function assignment(args: { input: InboundTurn; inbound: ConversationMessa
     return { reply, created: nothingCreated() };
   }
 
+  /*
+   * The project's permitted work is information the classifier does not have.
+   *
+   * `classifyTask` reads words. "Investigate whether we should replace the old
+   * S7-300 or migrate it incrementally" scores 0.56 — genuinely uncertain,
+   * because `migrate` is as much a coding cue as `investigate` is a research
+   * one — so the task falls back to the schema default of `coding`.
+   *
+   * In a project that does not permit coding at all, that fallback is
+   * guaranteed to be wrong: the task lands unexecutable, needing a repository
+   * the project does not have, and the conversation gives no sign of it. So
+   * where the project forbids coding and the classifier's own top choice is
+   * something the project allows, the project wins.
+   *
+   * This never OVERRIDES a confident classification and never widens what the
+   * project permits — it only declines to choose a kind that could not run here.
+   */
+  const proposed = classifyTask({ title: titleFrom(args.input.body), description: args.input.body });
+  const allowed = await allowedKindsFor(projectId);
+  const kind =
+    allowed.length > 0 && !allowed.includes('coding') && allowed.includes(proposed.kind) ? proposed.kind : undefined;
+
   const task = await createTask(
     {
       projectId,
       title: titleFrom(args.input.body),
       description: args.input.body,
       priority: 'normal',
+      ...(kind ? { taskKind: kind } : {}),
     },
     args.input.actor,
   );
@@ -698,6 +778,16 @@ function titleFrom(body: string): string {
 
   const title = cleaned || first || 'Work requested in conversation';
   return title.charAt(0).toUpperCase() + title.slice(1, 200);
+}
+
+/** The task kinds a human has allowed in this project. Empty means none yet. */
+async function allowedKindsFor(projectId: string): Promise<TaskKind[]> {
+  const [row] = await db
+    .select({ allowedTaskKinds: projects.allowedTaskKinds })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  return Array.isArray(row?.allowedTaskKinds) ? (row.allowedTaskKinds as TaskKind[]) : [];
 }
 
 /** Whether this deployment lets a given Teams identity change anything. */
