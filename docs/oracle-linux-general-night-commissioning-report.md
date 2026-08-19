@@ -19,7 +19,7 @@ behaviour as proven.**
 | Area | State |
 |---|---|
 | Host, service user, systemd units | Done, observed |
-| PostgreSQL, migrations 0001–0008, backups | Done, observed |
+| PostgreSQL, migrations 0001–0008, backups | Done — backup restored and verified, not just written |
 | Acceptance task migration (ids preserved) | Done, observed |
 | Worker enrolment, heartbeat, rotation, reconnect | Done, observed |
 | Bubblewrap containment | Done, 18/18 against the real provider |
@@ -160,6 +160,22 @@ taken and retained before `0007`/`0008` were applied, so the schema change is re
 
 Backups: `mac-bennett-backup.timer`, `OnCalendar=*-*-* 03:15:00 Australia/Sydney`,
 `Persistent=true`, writing to `/var/backups/mac-bennett/`. A dump from the first firing exists.
+
+**The backup was restored, not merely produced.** A backup nobody has restored is a hypothesis. The
+most recent nightly dump (`mac_bennett-20260818T235120Z.dump`, 165,181 bytes) was restored into a
+throwaway database and its contents checked:
+
+| Restored | Value |
+|---|---|
+| projects / tasks / audit events / briefs | 1 / 1 / 98 / 1 |
+| task | `332dcf3e-…`, *Investigate PAC Project Registry…*, `draft`, `investigation` |
+| project approval state | `night_shift_approved = f`, `allowed_task_kinds = []` |
+
+The restore command is `pg_restore --no-owner --role=mac -d <target> <dump>`. The probe database was
+dropped afterwards; `mac_bennett` and `mac_bennett_test` are the only databases on the host.
+
+Note that the restored copy carries the project **unapproved**, which is correct — the backup holds
+the true state and would not silently reinstate an authority grant.
 
 ### 3.2 The acceptance task — migrated, not recreated
 
