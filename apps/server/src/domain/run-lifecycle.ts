@@ -24,16 +24,27 @@ export const RUN_TRANSITIONS: Readonly<Record<RunStatus, readonly RunStatus[]>> 
     'self_review',
     'ready_for_human_review',
     'completed',
+    'completed_with_gaps',
     'failed',
     'cancelled',
     'stopped_by_guardrail',
   ],
   blocked: ['running', 'cancelled', 'stopped_by_guardrail', 'failed'],
-  self_review: ['ready_for_human_review', 'running', 'completed', 'failed', 'cancelled'],
-  ready_for_human_review: ['completed', 'running', 'cancelled'],
+  self_review: ['ready_for_human_review', 'running', 'completed', 'completed_with_gaps', 'failed', 'cancelled'],
+  ready_for_human_review: ['completed', 'completed_with_gaps', 'running', 'cancelled'],
 
   // Terminal.
   completed: [],
+  /**
+   * Phase 4: terminal, exactly like `completed`.
+   *
+   * A run that fell short of its acceptance criteria is not resumed. Remediation
+   * happens BEFORE completion, while the worker still holds the lease and the
+   * night still has time in it; once the run is closed, the honest way to
+   * produce the missing deliverable is a new run against the same brief, which
+   * leaves the record of the shortfall intact.
+   */
+  completed_with_gaps: [],
   stopped_by_guardrail: [],
   cancelled: [],
   failed: [],

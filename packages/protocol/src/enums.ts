@@ -42,6 +42,29 @@ export const RUN_STATUSES = [
   'self_review',
   'ready_for_human_review',
   'completed',
+  /**
+   * Phase 4: delivered, with required acceptance criteria unmet.
+   *
+   * ---------------------------------------------------------------------
+   * WHY THIS IS A STATUS AND NOT ONLY A COLUMN ON A SIDE TABLE
+   *
+   * The alternative considered was to leave the status as `completed` and
+   * record the shortfall in `run_acceptance` alone. It was rejected because
+   * every list, filter, dashboard tile, morning-report section and monday
+   * status mapping in this system already reads `status` — and a distinction
+   * that exists only in a table none of them join to is a distinction they
+   * will all report as "completed".
+   *
+   * That is the exact failure this phase exists to fix, reproduced one layer
+   * down: commissioning's first run reported success while delivering nothing,
+   * and every machine-readable signal agreed with it.
+   *
+   * Terminal, like the other outcomes. A run that fell short is not resumed;
+   * remediation happens BEFORE completion, while the worker still holds the
+   * lease, and anything after that is a new run.
+   * ---------------------------------------------------------------------
+   */
+  'completed_with_gaps',
   'stopped_by_guardrail',
   'cancelled',
   'failed',
@@ -49,11 +72,35 @@ export const RUN_STATUSES = [
 export const runStatusSchema = z.enum(RUN_STATUSES);
 export type RunStatus = z.infer<typeof runStatusSchema>;
 
-export const TERMINAL_RUN_STATUSES = ['completed', 'stopped_by_guardrail', 'cancelled', 'failed'] as const;
+export const TERMINAL_RUN_STATUSES = [
+  'completed',
+  'completed_with_gaps',
+  'stopped_by_guardrail',
+  'cancelled',
+  'failed',
+] as const;
 export type TerminalRunStatus = (typeof TERMINAL_RUN_STATUSES)[number];
 
 export const isTerminalRunStatus = (status: RunStatus): status is TerminalRunStatus =>
   (TERMINAL_RUN_STATUSES as readonly string[]).includes(status);
+
+/**
+ * Statuses in which the run actually delivered something.
+ *
+ * `completed_with_gaps` belongs here: work was produced and is worth reading,
+ * and a dashboard that files it with `failed` would send somebody looking for a
+ * crash that never happened. It is the ACCEPTANCE state, not the run status,
+ * that says what was missing.
+ *
+ * Exported as a predicate rather than left to each call site to remember,
+ * because "did this run produce anything?" is asked in the report, the
+ * dashboard, the monday sync and the night scheduler, and four independent
+ * answers to it is three too many.
+ */
+export const DELIVERING_RUN_STATUSES = ['completed', 'completed_with_gaps'] as const;
+
+export const isDeliveringRunStatus = (status: RunStatus): boolean =>
+  (DELIVERING_RUN_STATUSES as readonly string[]).includes(status);
 
 export const APPROVAL_STATES = ['not_required', 'pending', 'approved', 'rejected', 'revoked'] as const;
 export const approvalStateSchema = z.enum(APPROVAL_STATES);
@@ -138,6 +185,13 @@ export const STOP_REASONS = [
   'research_limit_reached',
   /** The project has not been allowed to do this kind of work. */
   'task_kind_not_permitted',
+  // --- Phase 4 ---
+  /**
+   * The run delivered, and at least one required acceptance criterion was not
+   * met. Distinct from `completed_with_blockers`, which is about work left
+   * unimplemented rather than about the contract not being satisfied.
+   */
+  'acceptance_gaps',
 ] as const;
 export const stopReasonSchema = z.enum(STOP_REASONS);
 export type StopReason = z.infer<typeof stopReasonSchema>;
@@ -370,6 +424,73 @@ export const AUDIT_EVENT_TYPES = [
   'model.reasoning_completed',
   /** Reasoning work could not proceed because no real provider is configured. */
   'model.provider_required',
+
+  // --- Phase 4 --------------------------------------------------------------
+  // Conversations, Teams, approvals, Forja, web research and acceptance.
+  // Each entry is something a reader of the trail genuinely needs: who said
+  // what to Mac and through which channel, what a machine was refused, what
+  // Mac fetched from outside PAC, and whether the work delivered matched what
+  // a person authorised.
+
+  // Conversations (Part C)
+  'conversation.started',
+  'conversation.message_received',
+  'conversation.message_sent',
+  'conversation.message_duplicate_ignored',
+  'conversation.linked_to_task',
+  'conversation.summarised',
+  /** An inbound message was classified. Records the intent and what decided it. */
+  'conversation.intent_classified',
+
+  // Teams (Part A)
+  'teams.activity_received',
+  /** An activity failed JWT verification, tenant check or service-URL check. */
+  'teams.activity_rejected',
+  'teams.message_sent',
+  'teams.delivery_failed',
+  'teams.task_created_from_message',
+
+  // Approvals (Part B)
+  'approval_request.created',
+  'approval_request.delivered',
+  'approval_request.decided',
+  /** A reply that could have approved the wrong thing, and did not. */
+  'approval_request.ambiguous_reply_refused',
+  'approval_request.superseded',
+  'approval_request.expired',
+  /**
+   * Somebody tried to authorise, conversationally, something spec §16 forbids.
+   * A genuine security signal and never a silent no-op.
+   */
+  'approval_request.authority_refused',
+
+  // Blockers and notifications (Part B, Part G)
+  'blocker.notified',
+  /** A notification the policy deliberately did not send. */
+  'notification.suppressed',
+
+  // Forja (Part D)
+  'forja.client_created',
+  'forja.client_revoked',
+  'forja.request',
+  'forja.unauthorized',
+  'forja.webhook_delivered',
+  'forja.webhook_failed',
+
+  // Web research (Part E)
+  'research.web_search',
+  'research.web_search_failed',
+  /** Retrieved content matched a known prompt-injection shape. */
+  'research.injection_suspected',
+
+  // Acceptance verification (Part F)
+  'acceptance.criteria_derived',
+  'acceptance.reviewed',
+  'acceptance.gap_recorded',
+  'acceptance.remediation_attempted',
+
+  // Status queries (Part G)
+  'status.query_answered',
 ] as const;
 export const auditEventTypeSchema = z.enum(AUDIT_EVENT_TYPES);
 export type AuditEventType = z.infer<typeof auditEventTypeSchema>;
