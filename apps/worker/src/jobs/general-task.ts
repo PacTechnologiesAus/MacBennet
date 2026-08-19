@@ -75,16 +75,28 @@ export async function runGeneralTaskJob(
   let artefacts = 0;
   let lastNarrative = '';
   let blocker: string | null = null;
+  /*
+   * WHY the loop ended, in the worker's own words.
+   *
+   * A run that delivers nothing is reported as failed either way, but "failed
+   * after being cut off at the 30-minute ceiling" and "failed after the model
+   * wrote nothing across eight steps" are different problems with different
+   * fixes, and a summary that cannot tell them apart sends whoever reads it
+   * looking in the wrong place.
+   */
+  let stopCause = 'the loop finished';
 
   while (iterations < general.maxSteps) {
     iterations += 1;
     if (ctx.signal.aborted) throw new JobCancelledError();
 
     if (Date.now() >= deadline) {
+      stopCause = `it reached the ${general.maxMinutes}-minute ceiling for this run`;
       ctx.log(`Reached the ${general.maxMinutes}-minute ceiling for this run.`, 'stderr');
       break;
     }
     if (Date.now() >= assignmentDeadline) {
+      stopCause = 'it reached the overnight cutoff';
       ctx.log('Reached the overnight cutoff for this run.', 'stderr');
       break;
     }
@@ -104,10 +116,18 @@ export async function runGeneralTaskJob(
     await ctx.progress(result.stage, result.percent);
 
     if (result.limitReached) {
+      stopCause = 'the research loop reached its configured ceiling';
       ctx.log('The research loop reached its configured ceiling.', 'stderr');
       break;
     }
-    if (result.done) break;
+    if (result.done) {
+      stopCause = 'the control plane reported the work was done';
+      break;
+    }
+  }
+
+  if (iterations >= general.maxSteps && stopCause === 'the loop finished') {
+    stopCause = `it reached its ${general.maxSteps}-step ceiling`;
   }
 
   if (ctx.signal.aborted) throw new JobCancelledError();
@@ -141,8 +161,8 @@ export async function runGeneralTaskJob(
    */
   if (artefacts === 0) {
     const detail =
-      `${general.taskKind} work ran for ${steps} step(s) and produced NO artefacts. ` +
-      `${lastNarrative}`.trim();
+      `${general.taskKind} work ran for ${steps} step(s) and produced NO artefacts, because ` +
+      `${stopCause}. ${lastNarrative}`.trim();
     ctx.log(detail, 'stderr');
     throw new Error(
       `${detail} A research run that delivers nothing is reported as failed rather than complete, ` +
