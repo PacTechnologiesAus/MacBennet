@@ -336,6 +336,27 @@ async function insertBlocker(
     data: { blockerId: row!.id, description: truncate(input.description, 500), risk: input.risk },
   });
 
+  /*
+   * Told to a person, if the policy permits it and there is a thread to say it
+   * in. Imported lazily so this module does not pull the whole Teams path into
+   * every coding run that never raises a blocker.
+   *
+   * Deliberately does not fail the blocker: a blocker that could not be
+   * announced is still a blocker, and losing the record because the
+   * notification failed would be the wrong way round.
+   */
+  if (context?.taskId) {
+    const { notify } = await import('./notifications.js');
+    await notify({
+      trigger: 'blocker_raised',
+      taskId: context.taskId,
+      projectId: context.projectId,
+      text: `I am blocked on **${truncate(input.description, 300)}**
+
+${truncate(input.reason, 600)}`,
+    }).catch(() => undefined);
+  }
+
   return row!.id;
 }
 
