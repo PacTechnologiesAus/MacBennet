@@ -94,6 +94,35 @@ describe('authentication', () => {
     expect(response.json().error.message).toMatch(/does not hold the "write" scope/);
   });
 
+  /*
+   * Commissioning defect 2.
+   *
+   * `taskKind` was published as `z.string().max(40)` and cast `as never` into
+   * `createTask`, so an unrecognised kind travelled all the way to the CHECK
+   * constraint on `tasks.task_kind` and came back as a 500 INTERNAL_ERROR. A
+   * 500 from a published contract reads as "Mac is broken" rather than "you
+   * sent something wrong", and a client integrating against it had no way to
+   * discover the seven permitted kinds except by provoking server errors.
+   *
+   * Found against the real deployment, where the only test that had ever
+   * exercised the field sent a valid value.
+   */
+  it('refuses a task kind that is not one of the permitted kinds, as a validation error', async () => {
+    const project = await makeProject(app, admin, { repoUrl: null });
+
+    const response = await forja().post('/api/forja/tasks', {
+      onBehalfOf: 'admin@pac.test',
+      projectId: project.id,
+      title: 'A kind that does not exist',
+      taskKind: 'general',
+      startDiscovery: false,
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe('VALIDATION_FAILED');
+    expect(JSON.stringify(response.json().error.details)).toMatch(/taskKind/);
+  });
+
   it('cannot be used on the human plane', async () => {
     // The planes do not overlap: a Forja key is not a session cookie.
     const response = await app.inject({ method: 'GET', url: '/api/tasks', headers: { 'x-forja-key': apiKey } });

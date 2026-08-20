@@ -288,7 +288,9 @@ export async function forjaRoutes(app: FastifyInstance): Promise<void> {
           ...(body.description ? { description: body.description } : {}),
           title: body.title,
           priority: body.priority,
-          ...(body.taskKind ? { taskKind: body.taskKind as never } : {}),
+          // No cast: `taskKind` is the same enum every other plane uses, so
+          // there is nothing left for `as never` to silence.
+          ...(body.taskKind ? { taskKind: body.taskKind } : {}),
         },
         actor,
       );

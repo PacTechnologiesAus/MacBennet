@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { taskKindSchema } from './task-model.js';
 
 /**
  * The Forja orchestration contract (Phase 4 Part D).
@@ -333,7 +334,16 @@ export const forjaCreateTaskRequestSchema = forjaActorSchema.extend({
   projectId: z.string().uuid(),
   title: z.string().min(1).max(200),
   description: z.string().max(20_000).optional(),
-  taskKind: z.string().max(40).optional(),
+  /*
+   * The enum, not a free string.
+   *
+   * This was `z.string().max(40)`, which published a field the contract had no
+   * intention of honouring: `tasks.task_kind` is CHECK-constrained to seven
+   * values, so anything else reached the database and returned a 500. A caller
+   * reading the contract could not discover the permitted set, and the error it
+   * got said Mac had broken rather than that the request was wrong.
+   */
+  taskKind: taskKindSchema.optional(),
   priority: z.enum(['low', 'normal', 'high', 'urgent']).default('normal'),
   /** Start discovery immediately, which is almost always what is wanted. */
   startDiscovery: z.boolean().default(true),
