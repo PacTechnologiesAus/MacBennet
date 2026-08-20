@@ -30,7 +30,11 @@ import {
 } from '../db/schema.js';
 import { AppError } from '../http/errors.js';
 import {
+  analyseDeliverables,
   compareRequestToBrief,
+  contractTextOf,
+  deliverableAmbiguityNote,
+  deliverableNormalisationNote,
   deriveCriteria,
   evaluateDeterministic,
   unmetResearchCapability,
@@ -135,6 +139,31 @@ export async function deriveCriteriaForBrief(
         description: row.description,
         externalResearchAvailable: settings.externalResearchEnabled && capabilities.includes('external_research'),
       }),
+      /*
+       * Commissioning defect 9: what normalisation decided, and what it would not.
+       *
+       * The criteria list records the numbers Mac arrived at. It cannot record
+       * the wording he arrived at them FROM, or the mentions he folded together
+       * to get there, and a count that looks like it came from nowhere is a
+       * count nobody can argue with. So the resolutions and the ambiguities are
+       * recorded beside the criteria they produced — including, deliberately,
+       * the phrases that produced NO criterion because nothing could decide
+       * what they meant.
+       */
+      deliverables: (() => {
+        const analysis = analyseDeliverables(contractTextOf(handoffBriefContentSchema.parse(row.brief.content)));
+        return {
+          required: analysis.deliverables.map((d) => ({ type: d.type, count: d.count, phrase: d.sources[0]?.phrase ?? '' })),
+          normalised: analysis.resolutions.map((r) => ({
+            phrase: r.phrase,
+            span: r.span,
+            relationship: r.relationship,
+            resolvedTo: r.resolvedTo,
+            reason: r.reason,
+          })),
+          needsClarification: analysis.ambiguities.map((a) => ({ phrase: a.phrase, span: a.span, readings: a.readings })),
+        };
+      })(),
       // The divergence note, recorded alongside — see below.
       ...(row.description
         ? {
@@ -179,7 +208,12 @@ export async function deriveCriteriaForBrief(
 export async function briefApprovalNotes(
   briefId: string,
   handle: DbHandle = db,
-): Promise<{ scopeNote: string | null; researchGapNote: string | null }> {
+): Promise<{
+  scopeNote: string | null;
+  researchGapNote: string | null;
+  deliverableNote: string | null;
+  deliverableAmbiguityNote: string | null;
+}> {
   const [row] = await handle
     .select({
       content: handoffBriefs.content,
@@ -192,7 +226,7 @@ export async function briefApprovalNotes(
     .where(eq(handoffBriefs.id, briefId))
     .limit(1);
 
-  if (!row) return { scopeNote: null, researchGapNote: null };
+  if (!row) return { scopeNote: null, researchGapNote: null, deliverableNote: null, deliverableAmbiguityNote: null };
 
   const content = handoffBriefContentSchema.parse(row.content);
   const settings = await getSettings(handle);
@@ -202,6 +236,20 @@ export async function briefApprovalNotes(
     scopeNote: row.description
       ? compareRequestToBrief({ requestText: row.description, brief: content }).note
       : null,
+    /*
+     * Commissioning defect 9. Two sentences, and they answer different questions.
+     *
+     * `deliverableNote` says Mac read two phrases as naming ONE deliverable —
+     * "two distinct documents" is the two engineering briefs — so the approver
+     * can see the judgement was made and overturn it if it is wrong.
+     *
+     * `deliverableAmbiguityNote` says Mac could NOT tell, derived nothing from
+     * the phrase, and is waiting on the open question already on the brief.
+     * Neither blocks, for the same reason nothing else here does: Mac notices, a
+     * person chooses.
+     */
+    deliverableNote: deliverableNormalisationNote(content),
+    deliverableAmbiguityNote: deliverableAmbiguityNote(content),
     researchGapNote: unmetResearchCapability({
       brief: content,
       description: row.description,

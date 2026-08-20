@@ -61,6 +61,27 @@ const base = {
   required: z.boolean().default(true),
   /** Where it came from, so a human can tell a derived criterion from theirs. */
   source: z.enum(['derived', 'human', 'task_kind']).default('derived'),
+  /**
+   * Why this criterion says what it says, in the requester's own words.
+   *
+   * ---------------------------------------------------------------------------
+   * ADDED BY COMMISSIONING DEFECT 9
+   *
+   * Normalising deliverables means Mac now sometimes decides that two phrases in
+   * a brief name ONE thing — that "two distinct documents" is the two engineering
+   * briefs already required rather than two more files. That decision is usually
+   * right and is occasionally wrong, and a human approving the criteria has to be
+   * able to see it was made at all.
+   *
+   * So the evidence is not consumed by the normalisation that used it. This field
+   * carries the phrases that produced the criterion, verbatim, and one sentence
+   * saying what was folded into what. Absent on a criterion with nothing to
+   * explain, which is most of them — optional rather than defaulted so that the
+   * criteria stored before this field existed stay valid, and so that a caller
+   * writing a criterion by hand is not made to say "no provenance" out loud.
+   * ---------------------------------------------------------------------------
+   */
+  provenance: z.string().max(1200).optional(),
 };
 
 /**

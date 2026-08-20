@@ -877,3 +877,288 @@ describe('runs with nothing to check', () => {
     expect(acceptance?.state ?? 'not_assessed').toBe('not_assessed');
   });
 });
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Commissioning defect 9 — the real acceptance path, re-tested.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THIS RUN USED TO DO
+ *
+ * A request naming "two separate engineering briefs and two distinct
+ * documents" — where the second phrase was the requester counting out the same
+ * two briefs — derived FOUR required artefacts: `engineering_brief >= 2` and
+ * `markdown_document >= 2`. The run then produced exactly what was wanted, two
+ * engineering briefs and a cover note, and was reported with a gap.
+ *
+ * The unit tests beside this prove the taxonomy. This proves the path: the
+ * criteria that reach the database, the artefacts a real run writes, and the
+ * state the run finishes in.
+ * ---------------------------------------------------------------------------
+ */
+
+/** Two engineering briefs and a cover note, from a run that looked something up. */
+function twoBriefsAndACoverNoteModel() {
+  return new ScriptedModelProvider([
+    JSON.stringify({
+      toolCalls: [{ tool: 'project_memory_search', argument: 'registry', purpose: 'what PAC already records' }],
+      findings: [],
+      narrative: 'Reading what PAC already records.',
+      unknowns: [],
+      artefacts: [],
+      blockerProposed: null,
+    }),
+    JSON.stringify({
+      toolCalls: [],
+      findings: [
+        {
+          statement: 'The Project Registry is planned rather than built.',
+          evidenceClass: 'project_fact',
+          confidence: 0.85,
+          sources: ['project_memory:project/registry-state'],
+          reasoning: 'Recorded in this project.',
+        },
+      ],
+      narrative: 'Reasoning over what was gathered.',
+      unknowns: [],
+      artefacts: [],
+      blockerProposed: null,
+    }),
+    JSON.stringify({
+      deliverables: [
+        { type: 'engineering_brief', title: 'Project Registry', purpose: 'Brief one.' },
+        { type: 'engineering_brief', title: 'Document Controller', purpose: 'Brief two.' },
+        { type: 'markdown_document', title: 'Cover note', purpose: 'How to read the two briefs.' },
+      ],
+      findings: [],
+      narrative: 'Writing up.',
+      unknowns: [],
+      blockerProposed: null,
+    }),
+    JSON.stringify({
+      type: 'engineering_brief',
+      title: 'Project Registry',
+      format: 'markdown',
+      body: ['# Project Registry', '', '## Summary', 'Planned, not built.'].join('\n'),
+      summary: 'Brief one.',
+      findings: [],
+    }),
+    JSON.stringify({
+      type: 'engineering_brief',
+      title: 'Document Controller',
+      format: 'markdown',
+      body: ['# Document Controller', '', '## Summary', 'Planned, not built.'].join('\n'),
+      summary: 'Brief two.',
+      findings: [],
+    }),
+    JSON.stringify({
+      type: 'markdown_document',
+      title: 'Cover note',
+      format: 'markdown',
+      body: ['# Cover note', '', 'Read the Registry brief first.'].join('\n'),
+      summary: 'A cover note.',
+      findings: [],
+    }),
+  ]);
+}
+
+describe('defect 9 — two briefs asked for, two briefs delivered', () => {
+  const REQUEST_WITH_RESTATEMENT =
+    'Produce two separate engineering briefs, one per system, and two distinct documents. Internal sources only.';
+
+  it('requires two artefacts, not four, and no duplicate generic-document criterion', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    const { briefId } = await briefedRun(project.id, REQUEST_WITH_RESTATEMENT);
+
+    const [brief] = await db.select().from(handoffBriefs).where(eq(handoffBriefs.id, briefId));
+    const criteria = brief!.acceptance as Array<{
+      kind: string;
+      artefactType?: string;
+      minimum?: number;
+      provenance?: string;
+    }>;
+
+    const artefactCriteria = criteria.filter((c) => c.kind === 'artefact_type');
+
+    // Required engineering briefs = 2. The number the requester actually wrote.
+    const briefs = artefactCriteria.find((c) => c.artefactType === 'engineering_brief');
+    expect(briefs?.minimum).toBe(2);
+
+    /*
+     * And nothing else. Before defect 9 was fixed this list also carried
+     * `markdown_document >= 2`, from the same two briefs named a second time,
+     * and the run was measured against four artefacts.
+     */
+    expect(artefactCriteria.map((c) => c.artefactType)).toEqual(['engineering_brief']);
+    expect(artefactCriteria.reduce((total, c) => total + (c.minimum ?? 0), 0)).toBe(2);
+  });
+
+  it('records why, without erasing what the requester wrote', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    const { taskId } = await briefedRun(project.id, REQUEST_WITH_RESTATEMENT);
+
+    const [event] = await db
+      .select()
+      .from(auditEvents)
+      .where(and(eq(auditEvents.taskId, taskId), eq(auditEvents.eventType, 'acceptance.criteria_derived')));
+
+    const metadata = event!.metadata as {
+      deliverables?: {
+        required?: Array<{ type: string; count: number }>;
+        normalised?: Array<{ phrase: string; relationship: string; resolvedTo: string | null; reason: string }>;
+        needsClarification?: Array<{ phrase: string }>;
+      };
+    };
+
+    expect(metadata.deliverables?.required).toEqual([
+      expect.objectContaining({ type: 'engineering_brief', count: 2 }),
+    ]);
+
+    /*
+     * The phrase survives the decision that folded it away.
+     *
+     * A human disagreeing with "documents meant the briefs" needs the words
+     * that produced the judgement, not a count with no history. Whether the
+     * derivation resolved the phrase or declined to decide it, it must have
+     * said so somewhere a reader can find.
+     */
+    const documentsPhrase = [
+      ...(metadata.deliverables?.normalised ?? []),
+      ...(metadata.deliverables?.needsClarification ?? []),
+    ].some((entry) => /documents/i.test(entry.phrase));
+    expect(documentsPhrase).toBe(true);
+
+    // What it must NOT have done is quietly require two more documents.
+    expect((metadata.deliverables?.required ?? []).some((r) => r.type === 'document')).toBe(false);
+  });
+
+  it('is satisfied by two briefs and a cover note, and the cover note inflates nothing', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    await updateSettings(
+      { acceptanceSemanticReviewEnabled: false },
+      { type: 'user', id: admin.user.id, label: admin.user.name },
+    );
+
+    const { runId, taskId } = await briefedRun(project.id, REQUEST_WITH_RESTATEMENT);
+
+    await createMemory(
+      {
+        scope: 'project',
+        projectId: project.id,
+        key: 'registry-state',
+        value: 'The PAC Project Registry is on the roadmap and has not been built.',
+        confidence: 1,
+      },
+      SYSTEM_ACTOR,
+    );
+
+    setModelProvider(twoBriefsAndACoverNoteModel());
+    await beginGeneralRun(runId);
+    await performResearchStep(runId);
+    await performResearchStep(runId);
+    await performResearchStep(runId);
+
+    const artefacts = await db.select().from(runArtefacts).where(eq(runArtefacts.runId, runId));
+    const produced = artefacts.filter((a) => a.artefactType === 'engineering_brief');
+    expect(produced).toHaveLength(2);
+    // The third artefact is real and is not an engineering brief.
+    expect(artefacts).toHaveLength(3);
+
+    const review = await reviewAcceptance(runId, { allowModel: false });
+
+    /*
+     * The cover note does not satisfy the brief criterion and does not inflate
+     * it either: two of type engineering_brief, two required. A `markdown_document`
+     * counting towards an `engineering_brief` criterion would be the mirror
+     * failure of defect 9, and is what the observed sentence rules out.
+     */
+    const briefsResult = review.results.find(
+      (r) => r.kind === 'artefact_type' && r.description.includes('engineering brief'),
+    );
+    expect(briefsResult?.observed).toBe('2 of type engineering_brief, 2 required');
+    expect(briefsResult?.verdict).toBe('satisfied');
+
+    // And the final state reflects only real unmet criteria — of which there are none.
+    expect(review.unmet).toEqual([]);
+    expect(review.state).toBe('satisfied');
+
+    const worker = await registerTestWorker(app.fastify, { name: 'defect9-worker', capabilities: ['general_task'] });
+    await db.update(runs).set({ status: 'running', workerId: worker.workerId }).where(eq(runs.id, runId));
+
+    const status = await completeRun(runId, { id: worker.workerId, name: 'defect9-worker' }, {
+      outcome: 'succeeded',
+      summary: 'Two engineering briefs and a cover note.',
+    });
+
+    expect(status).toBe('completed');
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId));
+    expect(task!.status).toBe('done');
+  });
+});
+
+describe('defect 9 — wording nothing can decide reaches a human before approval', () => {
+  const AMBIGUOUS = 'Provide two engineering briefs and documentation. Internal sources only.';
+
+  it('puts the ambiguity on the brief as an open question, and derives no criterion from it', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    const { briefId } = await briefedRun(project.id, AMBIGUOUS);
+
+    const [brief] = await db.select().from(handoffBriefs).where(eq(handoffBriefs.id, briefId));
+    const content = brief!.content as { openQuestions: Array<{ id: string; question: string; dimension: string }> };
+
+    /*
+     * The wiring, not the function.
+     *
+     * `deliverableClarifications` is unit-tested on its own; what this asserts
+     * is that its output actually reaches the artefact a person reads. A
+     * question computed and then dropped on the floor is worse than no question,
+     * because the code looks as though somebody was told.
+     */
+    const question = content.openQuestions.find((q) => q.id.startsWith('deliverable-ambiguity-'));
+    expect(question).toBeDefined();
+    expect(question!.dimension).toBe('acceptance_criteria');
+    expect(question!.question).toMatch(/documentation/i);
+
+    // And no artefact count was frozen from a guess in either direction.
+    const criteria = brief!.acceptance as Array<{ kind: string; artefactType?: string; minimum?: number }>;
+    const artefacts = criteria.filter((c) => c.kind === 'artefact_type');
+    expect(artefacts.map((c) => c.artefactType)).toEqual(['engineering_brief']);
+    expect(artefacts[0]!.minimum).toBe(2);
+  });
+
+  it('says so in the brief markdown, where every client reads it', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    const { briefId } = await briefedRun(project.id, AMBIGUOUS);
+
+    const response = await api(operator).get(`/api/briefs/${briefId}`);
+    expect(response.statusCode).toBe(200);
+    const { brief } = response.json() as { brief: { markdown: string } };
+
+    // Appended to the markdown rather than left as a field one client renders:
+    // a brief gets read on a phone, on paper and pasted into a pull request.
+    expect(brief.markdown).toContain('Deliverables unclear:');
+    expect(brief.markdown).toMatch(/documentation/i);
+  });
+
+  it('asks nothing when the wording is clear', async () => {
+    const project = await researchProject(['company_context', 'internal_only']);
+    const { briefId } = await briefedRun(
+      project.id,
+      'Produce two separate engineering briefs and two distinct documents. Internal sources only.',
+    );
+
+    const [brief] = await db.select().from(handoffBriefs).where(eq(handoffBriefs.id, briefId));
+    const content = brief!.content as { openQuestions: Array<{ id: string }> };
+
+    /*
+     * The other half of the rule, and the one that keeps it useful.
+     *
+     * A verifier that asks about everything is as useless as one that asks
+     * about nothing — it is the false gap again, moved one step earlier into
+     * discovery. This wording says what it means and must be decided, not
+     * queried.
+     */
+    expect(content.openQuestions.filter((q) => q.id.startsWith('deliverable-ambiguity-'))).toEqual([]);
+  });
+});

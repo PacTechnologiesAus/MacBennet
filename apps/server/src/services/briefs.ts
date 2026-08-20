@@ -16,6 +16,7 @@ import type { HandoffBriefRow } from '../db/schema.js';
 import { AppError } from '../http/errors.js';
 import { adviseExecution, parseConfidence } from '../domain/confidence.js';
 import { analyseGaps, deriveFromContext } from '../domain/gap-analysis.js';
+import { deliverableClarifications } from '../domain/acceptance.js';
 import { getSettings, toConfidencePolicy } from './settings.js';
 import { record, type Actor } from './audit.js';
 import { emit } from './events.js';
@@ -69,6 +70,14 @@ export async function briefDto(row: HandoffBriefRow, handle: DbHandle = db): Pro
   const noteMarkdown = [
     notes.scopeNote ? `\n\n> **Scope note:** ${notes.scopeNote}` : '',
     notes.researchGapNote ? `\n\n> **Research note:** ${notes.researchGapNote}` : '',
+    /*
+     * Commissioning defect 9, and in the markdown for the reason the comment
+     * above gives: a brief gets read on a phone, on paper and pasted into a pull
+     * request, and a judgement about how many artefacts are required that only
+     * one client renders is a judgement three readers never see.
+     */
+    notes.deliverableNote ? `\n\n> **Deliverables:** ${notes.deliverableNote}` : '',
+    notes.deliverableAmbiguityNote ? `\n\n> **Deliverables unclear:** ${notes.deliverableAmbiguityNote}` : '',
   ].join('');
 
   return {
@@ -208,6 +217,20 @@ export async function createBrief(
             answeredAt: null,
             answeredBy: null,
           })),
+        /*
+         * Phase 4, commissioning defect 9: deliverable wording nothing may decide.
+         *
+         * "provide two briefs and documentation" does not say whether the
+         * documentation IS the briefs. Both guesses are harmful — one drops a
+         * deliverable out of the contract, the other invents an artefact a
+         * correct run will be marked short for not producing — so no acceptance
+         * criterion is derived from it and the question is asked HERE, while the
+         * brief is still a draft. Criteria are frozen at approval; a count
+         * guessed before that is a guess nobody revisits.
+         */
+        ...deliverableClarifications({ brief: merged }).filter(
+          (question) => !merged.openQuestions.some((existing) => existing.id === question.id),
+        ),
       ],
     });
 

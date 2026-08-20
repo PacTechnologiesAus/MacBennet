@@ -12,8 +12,31 @@ import {
   type SourceClass,
   type TaskKind,
   type HandoffBriefContent,
+  type OpenQuestion,
 } from '@mac/protocol';
 import { assessCurrency } from './currency.js';
+import { analyseDeliverables, detectDeliverables, NEGATORS, type DeliverableMention } from './deliverables.js';
+
+/*
+ * Re-exported so that `domain/acceptance.js` stays the one import every caller
+ * and test already uses. Deliverable reading moved to its own module for
+ * defect 9; where it is imported FROM should not have to move with it.
+ */
+export {
+  analyseDeliverables,
+  detectDeliverables,
+  extractDeliverableCandidates,
+  normaliseDeliverables,
+} from './deliverables.js';
+export type {
+  DeliverableAmbiguity,
+  DeliverableAnalysis,
+  DeliverableCandidate,
+  DeliverableMention,
+  DeliverableRelationship,
+  DeliverableResolution,
+  NormalisedDeliverable,
+} from './deliverables.js';
 
 /**
  * Deriving acceptance criteria, and checking them (Phase 4 Part F).
@@ -53,102 +76,24 @@ import { assessCurrency } from './currency.js';
 // Reading what was asked for
 // ---------------------------------------------------------------------------
 
-const NUMBER_WORDS: Record<string, number> = {
-  a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5,
-  six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
-};
-
-/**
- * Nouns that name a deliverable, mapped to the artefact type that satisfies it.
+/*
+ * DELIVERABLES MOVED OUT — see `./deliverables.ts`.
  *
- * Ordered longest-phrase-first where it matters: "architecture recommendation"
- * must be read as an architecture note rather than matching the bare word
- * "recommendation" and losing the distinction.
- */
-const DELIVERABLE_NOUNS: Array<{ pattern: RegExp; type: ArtefactType; label: string }> = [
-  { pattern: /\barchitecture (recommendation|note|proposal|design)s?\b/i, type: 'architecture_note', label: 'architecture note' },
-  { pattern: /\b(engineering |technical )?briefs?\b/i, type: 'engineering_brief', label: 'engineering brief' },
-  { pattern: /\b(investigation|research|findings) reports?\b/i, type: 'investigation_report', label: 'investigation report' },
-  { pattern: /\brecommendations?\b/i, type: 'recommendation', label: 'recommendation' },
-  { pattern: /\b(task |work )?proposals?\b/i, type: 'task_proposal', label: 'task proposal' },
-  { pattern: /\bdiagrams?\b/i, type: 'diagram_description', label: 'diagram' },
-  { pattern: /\b(spreadsheets?|tables?|datasets?|structured data)\b/i, type: 'structured_data', label: 'structured data' },
-  { pattern: /\b(documents?|write[- ]?ups?|summar(?:y|ies)|notes?)\b/i, type: 'markdown_document', label: 'document' },
-  { pattern: /\breports?\b/i, type: 'investigation_report', label: 'report' },
-];
-
-export interface DeliverableMention {
-  type: ArtefactType;
-  count: number;
-  label: string;
-  /** The words that produced it, so a human can disagree with something real. */
-  phrase: string;
-}
-
-/**
- * Finds the deliverables a piece of text asks for, with counts.
+ * Commissioning defect 9. What used to live here was a single pass that turned
+ * every deliverable noun it recognised into an independent requirement and
+ * summed them, so "two engineering briefs and two distinct documents" required
+ * four artefacts and the run that produced the two briefs that were wanted was
+ * reported with a gap.
  *
- * "three separate engineering briefs" is the case that matters: the count is
- * carried by a word several tokens to the left of the noun, and a naive noun
- * scan produces "one brief" — which is exactly how five requested documents
- * became one.
+ * That is not a regex bug and it was not fixed as one. Extraction and
+ * NORMALISATION are now separate stages in their own module: extraction finds
+ * candidates positionally and decides nothing, normalisation decides what each
+ * candidate means relative to the others — additive, alias, explanatory,
+ * contains, or ambiguous — and only `additive` reaches a criterion.
+ *
+ * This file keeps the part that was always its own job: turning what a brief
+ * requires into criteria a machine can check.
  */
-export function detectDeliverables(text: string): DeliverableMention[] {
-  const body = text ?? '';
-  const found = new Map<ArtefactType, DeliverableMention>();
-
-  for (const noun of DELIVERABLE_NOUNS) {
-    const scan = new RegExp(noun.pattern.source, 'gi');
-    let match: RegExpExecArray | null;
-
-    while ((match = scan.exec(body)) !== null) {
-      // Look back a short way for a count: "three separate engineering briefs",
-      // "2 short reports", "a recommendation".
-      //
-      // The fallback is 1 even for a plural noun. "briefs" with no number in
-      // front of it asks for more than one and says nothing about how many, and
-      // guessing 2 would be inventing a requirement — the criterion has to
-      // trace to something somebody wrote.
-      const preceding = body.slice(Math.max(0, match.index - 40), match.index);
-      const count = countFrom(preceding, 1);
-
-      const existing = found.get(noun.type);
-      if (!existing || count > existing.count) {
-        found.set(noun.type, {
-          type: noun.type,
-          count,
-          label: noun.label,
-          phrase: `${preceding.trim().split(/\s+/).slice(-3).join(' ')} ${match[0]}`.trim().slice(0, 80),
-        });
-      }
-      if (match.index === scan.lastIndex) scan.lastIndex += 1;
-    }
-  }
-
-  return Array.from(found.values());
-}
-
-/** The nearest count immediately before a noun, or the fallback. */
-function countFrom(preceding: string, fallback: number): number {
-  // Only the last few words: "three systems, and a recommendation" must read
-  // one recommendation, not three.
-  const tail = preceding.trim().split(/\s+/).slice(-3);
-  for (let i = tail.length - 1; i >= 0; i -= 1) {
-    const word = (tail[i] ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (!word) continue;
-    if (/^\d+$/.test(word)) {
-      const value = Number(word);
-      if (value >= 1 && value <= 20) return value;
-    }
-    if (word in NUMBER_WORDS) return NUMBER_WORDS[word]!;
-    // A qualifier sits between the count and the noun: "three SEPARATE briefs".
-    if (['separate', 'distinct', 'individual', 'short', 'brief', 'detailed', 'engineering', 'technical'].includes(word)) {
-      continue;
-    }
-    break;
-  }
-  return fallback;
-}
 
 /**
  * Sections a piece of text names as required content.
@@ -214,7 +159,14 @@ const EXTERNAL_RESEARCH_CUES = [
  * to ignore gaps.
  * ---------------------------------------------------------------------------
  */
-const NEGATORS = ['no', 'not', 'never', 'without', 'avoid', 'exclude', 'excluding', 'skip', 'neither', 'nor'];
+/*
+ * One list, two windows.
+ *
+ * The words themselves are shared with the deliverable reader — a brief that
+ * refuses a thing refuses it the same way whether the thing is a search or a
+ * document. How far back each looks is NOT shared, and `negatedDeliverable`
+ * says why.
+ */
 
 /**
  * Whether a cue is negated where it appears.
@@ -311,27 +263,55 @@ export function deriveCriteria(input: DeriveCriteriaInput): AcceptanceCriterion[
   // What the acceptance criteria and the objective between them ask for. The
   // acceptance criteria come first because they are the human's own statement
   // of "done", and the objective is context.
-  const contractText = [brief.acceptanceCriteria.join('\n'), brief.proposedScope, brief.userObjective, brief.desiredBehaviour]
-    .filter(Boolean)
-    .join('\n');
+  const contractText = contractTextOf(brief);
 
   // --- Deliverables --------------------------------------------------------
 
-  const deliverables = detectDeliverables(contractText);
-  for (const deliverable of deliverables) {
+  /*
+   * Normalised first, then grouped by the artefact type that satisfies them.
+   *
+   * Two steps, and both matter. NORMALISATION is defect 9's fix: it decides
+   * which mentions name the same thing, so a generic container noun restating a
+   * specific deliverable stops adding artefacts nobody asked for.
+   *
+   * GROUPING is the other half. Several deliverable types share one artefact
+   * type — a summary document and a procedure are both `markdown_document` —
+   * and a criterion is keyed by artefact type, so "a summary document and a
+   * procedure" has to arrive as `markdown_document >= 2` rather than as two
+   * criteria of which the second silently overwrites the first.
+   */
+  const analysis = analyseDeliverables(contractText);
+
+  const byArtefact = new Map<ArtefactType, { minimum: number; labels: string[]; provenance: string[] }>();
+  for (const deliverable of analysis.deliverables) {
+    const entry = byArtefact.get(deliverable.artefactType) ?? { minimum: 0, labels: [], provenance: [] };
+    entry.minimum += deliverable.count;
+    entry.labels.push(deliverable.count > 1 ? `${deliverable.count} ${deliverable.label}s` : aOrAn(deliverable.label));
+    entry.provenance.push(deliverable.provenance);
+    byArtefact.set(deliverable.artefactType, entry);
+  }
+
+  for (const [artefactType, entry] of byArtefact) {
     push({
-      id: `artefact-${deliverable.type}`,
+      id: `artefact-${artefactType}`,
       kind: 'artefact_type',
-      description:
-        deliverable.count > 1
-          ? `Produce ${deliverable.count} ${deliverable.label}s`
-          : `Produce ${aOrAn(deliverable.label)}`,
+      description: `Produce ${entry.labels.join(' and ')}`,
       required: true,
       source: 'derived',
-      artefactType: deliverable.type,
-      minimum: deliverable.count,
+      artefactType,
+      minimum: Math.min(entry.minimum, 50),
+      /*
+       * The wording that produced it, and anything folded into it.
+       *
+       * Defect 9's normalisation makes judgements a human may want to overturn
+       * — "documents" meant the briefs — and a judgement nobody can see is a
+       * judgement nobody can correct.
+       */
+      provenance: entry.provenance.join(' ').slice(0, 1200),
     });
   }
+
+  const deliverables = analysis.deliverables;
 
   /*
    * A floor on the artefact count when the brief named none.
@@ -356,7 +336,17 @@ export function deriveCriteria(input: DeriveCriteriaInput): AcceptanceCriterion[
 
   // --- Named sections ------------------------------------------------------
 
-  for (const section of detectSections(brief.acceptanceCriteria.join('\n'))) {
+  /*
+   * Two sources, and the second one is defect 9's.
+   *
+   * `detectSections` finds the section names the brief asks for by phrase.
+   * `analysis.sections` adds the ones lifted out of a "containing …" clause —
+   * "one report containing a summary and a build order" requires a Summary
+   * heading, and used to require a second DOCUMENT instead.
+   */
+  const sectionNames = [...detectSections(brief.acceptanceCriteria.join('\n')), ...analysis.sections];
+
+  for (const section of sectionNames) {
     push({
       id: `section-${section.toLowerCase().replace(/\s+/g, '-')}`,
       kind: 'named_section',
@@ -461,6 +451,96 @@ const keyOf = (criterion: AcceptanceCriterion): string => {
 };
 
 const aOrAn = (noun: string): string => (/^[aeiou]/i.test(noun) ? `an ${noun}` : `a ${noun}`);
+
+/**
+ * The exact text `deriveCriteria` reads a brief's requirements out of.
+ *
+ * Shared so that the criteria, the clarifying questions and the note shown at
+ * approval are all derived from the same words. A question raised about a
+ * phrase that did not contribute to any criterion is a question about nothing.
+ */
+export function contractTextOf(brief: HandoffBriefContent): string {
+  return [brief.acceptanceCriteria.join('\n'), brief.proposedScope, brief.userObjective, brief.desiredBehaviour]
+    .filter(Boolean)
+    .join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Ambiguity, before approval freezes it
+// ---------------------------------------------------------------------------
+
+/**
+ * Deliverable wording nothing may decide, as questions for a human.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS A QUESTION AND NOT A DEFAULT
+ *
+ * "provide two briefs and documentation" does not say whether the documentation
+ * IS the briefs, and both available guesses are harmful. Reading it as an alias
+ * drops a deliverable out of the contract, which is exactly the failure Part F
+ * exists to stop. Reading it as an addition invents an artefact the run will be
+ * marked short for not producing, which is defect 9 all over again.
+ *
+ * So no criterion is derived from an ambiguous mention at all, and the question
+ * goes where the brief's other unknowns already go: `openQuestions`, during
+ * discovery, while a person can still change the answer. Criteria are frozen at
+ * approval, and a count frozen from a guess is a guess nobody will ever revisit.
+ * ---------------------------------------------------------------------------
+ */
+export function deliverableClarifications(input: {
+  brief: HandoffBriefContent;
+  description?: string | null;
+}): OpenQuestion[] {
+  const ambiguities = analyseDeliverables(contractTextOf(input.brief)).ambiguities;
+
+  return ambiguities.slice(0, 6).map((ambiguity, index) => ({
+    id: `deliverable-ambiguity-${index + 1}`,
+    question: ambiguity.question,
+    /*
+     * The dimension it genuinely belongs to.
+     *
+     * `acceptance_criteria` carries the heaviest weight in gap analysis (0.16)
+     * because not knowing what "done" means is the thing that makes autonomous
+     * work dangerous. Not knowing how many artefacts "done" is, is that.
+     */
+    dimension: 'acceptance_criteria',
+    /*
+     * Empty, deliberately. Nothing in the repository or the company context can
+     * answer what the person who wrote the sentence meant by it.
+     */
+    discoverableFrom: [],
+    answer: null,
+    answeredAt: null,
+    answeredBy: null,
+  }));
+}
+
+/** The same ambiguities as one sentence, for the approval card. */
+export function deliverableAmbiguityNote(brief: HandoffBriefContent): string | null {
+  const ambiguities = analyseDeliverables(contractTextOf(brief)).ambiguities;
+  if (ambiguities.length === 0) return null;
+
+  return (
+    `This brief does not settle how many artefacts it asks for. ${ambiguities
+      .map((a) => `"${a.phrase}" could mean ${a.readings.join(', or ')}`)
+      .join('; ')}. ` +
+    'No acceptance criterion was derived from it, because freezing a guessed count onto the run would ' +
+    'either drop a deliverable from the contract or mark a correct delivery short. Answer the open ' +
+    'question on this brief, or edit the criteria yourself, before approving.'
+  );
+}
+
+/** What normalisation folded together, and why, for the approval card. */
+export function deliverableNormalisationNote(brief: HandoffBriefContent): string | null {
+  const folded = analyseDeliverables(contractTextOf(brief)).resolutions.filter((r) => r.relationship !== 'contains');
+  if (folded.length === 0) return null;
+
+  return (
+    `Mac read some of this brief's wording as naming the same deliverable twice: ${folded
+      .map((r) => r.reason)
+      .join(' ')} ` + 'If that is wrong, edit the acceptance criteria before approving.'
+  );
+}
 
 // ---------------------------------------------------------------------------
 // The narrowing check
