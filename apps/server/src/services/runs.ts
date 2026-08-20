@@ -304,6 +304,20 @@ export async function createRun(input: CreateRunRequest, actor: Actor): Promise<
         confidence: input.confidence.toFixed(3),
         jobKind: job.job.kind,
         jobParams: job.job.params as Record<string, unknown>,
+        /*
+         * The brief the job names, on the run itself.
+         *
+         * `general_task` REQUIRES `briefId` in its parameters, and
+         * `freezeCriteriaForRun` reads `handoffBriefId` — so leaving the column
+         * null meant a run approved through this path had no criteria frozen
+         * and reported `not_assessed` however it turned out. Acceptance
+         * verification was inert for every run except the two paths that set
+         * the column by hand, which is every run an operator creates.
+         *
+         * Read from the VALIDATED parameters rather than the raw body: by this
+         * line the job schema has already refused a general_task without one.
+         */
+        handoffBriefId: briefIdFromJobParams(job.job.params),
         executionMode: input.executionMode,
         companyContextRevisionId: companyContext?.id ?? null,
         createdBy: actor.id,
@@ -1130,4 +1144,17 @@ export async function stopRunsPastOvernightCutoff(now: Date): Promise<string[]> 
     }
   }
   return stopped;
+}
+
+/**
+ * The handoff brief a job's parameters name, if it names one.
+ *
+ * Driven by the job's own contract rather than by looking up the task's latest
+ * brief: a run is bound to the brief it was created against, and "the newest
+ * brief for this task" is a different and changing thing.
+ */
+function briefIdFromJobParams(params: unknown): string | null {
+  if (!params || typeof params !== 'object') return null;
+  const value = (params as { briefId?: unknown }).briefId;
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }

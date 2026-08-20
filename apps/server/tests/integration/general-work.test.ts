@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { MODEL_PROVIDER_REQUIRED } from '@mac/protocol';
 import { db } from '../../src/db/client.js';
-import { generalRunState, mondayWrites, runArtefacts, runUsage, runs, tasks } from '../../src/db/schema.js';
+import { generalRunState, mondayWrites, runAcceptance, runArtefacts, runUsage, runs, tasks } from '../../src/db/schema.js';
 import { asUser, createAndLogin, resetDatabase, startTestApp, type Session, type TestApp } from '../helpers/harness.js';
 import { queryAuditEvents } from '../../src/services/audit-query.js';
 import { makeProject, makeTask, registerTestWorker } from '../helpers/fixtures.js';
@@ -424,6 +424,96 @@ describe('a general run produces artefacts, evidence and usage', () => {
 
     const writes = await db.select().from(mondayWrites);
     expect(writes).toHaveLength(0);
+  });
+});
+
+/*
+ * Commissioning defect 7.
+ *
+ * Every test in this file inserts its run directly, setting `handoffBriefId` by
+ * hand — so nothing ever exercised the code that is supposed to set it.
+ * `createRun` does not. It validates `jobParams` against a schema that REQUIRES
+ * `briefId` for a general_task, then writes the row without copying it to the
+ * column, and `freezeCriteriaForRun` reads the column.
+ *
+ * Observed on the real deployment: a brief carrying three acceptance criteria, a
+ * run approved through `POST /api/runs/:id/approve`, and a `run_acceptance` row
+ * with `criteria = []` and `state = not_assessed` on a run that reported
+ * `completed`. Acceptance verification — the centre of Phase 4 Part F — was
+ * inert for every run not created by the night-shift or coding paths.
+ */
+describe('a run created through the API is bound to the brief it names', () => {
+  async function briefFor(projectId: string) {
+    const task = await makeTask(app.fastify, operator, projectId, {
+      title: 'Investigate the PAC project registry',
+      taskKind: 'investigation',
+    });
+    const { discovery } = (await api(operator).post(`/api/tasks/${task.id}/discovery`, {})).json();
+    await api(operator).post(`/api/discovery/${discovery.id}/messages`, {
+      message:
+        'Produce two separate engineering briefs, one per system, each with a section "Purpose". ' +
+        'It is done when both exist.',
+    });
+    const brief = (await api(operator).post(`/api/discovery/${discovery.id}/brief`, {})).json().brief;
+    return { taskId: task.id, briefId: brief.id as string };
+  }
+
+  it('copies the brief from the job parameters onto the run', async () => {
+    const project = await internalProject();
+    const { taskId, briefId } = await briefFor(project.id);
+
+    const created = await api(operator).post('/api/runs', {
+      taskId,
+      jobKind: 'general_task',
+      jobParams: { briefId, taskKind: 'investigation', maxMinutes: 30, maxSteps: 8 },
+      confidence: 0.9,
+    });
+    expect(created.statusCode).toBe(201);
+    const runId = created.json().run.id as string;
+
+    const [row] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(row!.handoffBriefId).toBe(briefId);
+  });
+
+  it('freezes the brief’s criteria at approval, so completion has something to check', async () => {
+    const project = await internalProject();
+    const { taskId, briefId } = await briefFor(project.id);
+
+    const created = await api(operator).post('/api/runs', {
+      taskId,
+      jobKind: 'general_task',
+      jobParams: { briefId, taskKind: 'investigation', maxMinutes: 30, maxSteps: 8 },
+      confidence: 0.9,
+    });
+    const runId = created.json().run.id as string;
+
+    await api(operator).post(`/api/runs/${runId}/submit`, {});
+    const approved = await api(operator).post(`/api/runs/${runId}/approve`, { notes: 'Go.' });
+    expect(approved.statusCode).toBe(200);
+
+    const [frozen] = await db.select().from(runAcceptance).where(eq(runAcceptance.runId, runId));
+    expect(frozen).toBeDefined();
+    // The brief derives criteria; an empty set here means the run is measured
+    // against nothing and will report `not_assessed` whatever it produces.
+    expect((frozen!.criteria as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  it('leaves a job that names no brief alone', async () => {
+    // `noop` has no brief and must not acquire one. The binding is driven by the
+    // job's own parameters, not by guessing from the task.
+    const project = await internalProject();
+    const task = await makeTask(app.fastify, operator, project.id, { taskKind: 'investigation' });
+
+    const created = await api(operator).post('/api/runs', {
+      taskId: task.id,
+      jobKind: 'noop',
+      jobParams: {},
+      confidence: 0.9,
+    });
+    const runId = created.json().run.id as string;
+
+    const [row] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(row!.handoffBriefId).toBeNull();
   });
 });
 
