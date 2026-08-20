@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   frameUntrusted,
   isPrimarySource,
+  makeResearchSource,
   MAX_SOURCE_EXCERPT_CHARS,
   MODEL_EXCERPT_CHARS,
   truncationNotice,
@@ -225,27 +226,56 @@ describe('telling the model what it was not shown', () => {
     expect(truncationNotice(MODEL_EXCERPT_CHARS, MODEL_EXCERPT_CHARS)).toBe('');
   });
 
-  it('states both numbers when an excerpt was cut', () => {
-    const notice = truncationNotice(4000, MODEL_EXCERPT_CHARS);
-    expect(notice).toContain('1200');
-    expect(notice).toContain('4000');
+  it('states both numbers when the retrieved text was longer than the window', () => {
+    const notice = truncationNotice(24_574, MODEL_EXCERPT_CHARS);
+    expect(notice).toContain(String(MODEL_EXCERPT_CHARS));
+    expect(notice).toContain('24574');
   });
 
   it('says that re-fetching will not help, which is the part that cost a run', () => {
-    const notice = truncationNotice(4000, MODEL_EXCERPT_CHARS);
+    const notice = truncationNotice(24_574, MODEL_EXCERPT_CHARS);
     expect(notice).toMatch(/same opening window/i);
     expect(notice).toMatch(/fragment/i);
   });
 
   it('distinguishes "not in what you were shown" from "not in the source"', () => {
-    expect(truncationNotice(4000, MODEL_EXCERPT_CHARS)).toMatch(/rather than that the source does not contain it/i);
+    expect(truncationNotice(24_574, MODEL_EXCERPT_CHARS)).toMatch(
+      /rather than that the source does not contain it/i,
+    );
   });
 
-  it('shows the model less than is recorded, deliberately and knowably', () => {
-    // If these two ever become equal the notice becomes dead code, and if the
-    // model bound ever exceeds the stored one the record is no longer the
-    // fuller thing. Both are worth a test rather than a comment.
-    expect(MODEL_EXCERPT_CHARS).toBeLessThan(MAX_SOURCE_EXCERPT_CHARS);
+  /*
+   * The operator raised the model's window to match what is stored, so the two
+   * constants are equal on purpose. That makes the comparison the notice uses
+   * load-bearing: measured against the excerpt's own length it would now be
+   * permanently silent, because the excerpt is itself cut at capture. It has to
+   * be measured against what the retrieval produced.
+   */
+  it('shows the model everything that is stored', () => {
+    expect(MODEL_EXCERPT_CHARS).toBe(MAX_SOURCE_EXCERPT_CHARS);
+  });
+
+  it('defaults the retrieved length to "not recorded", so old state parses unchanged', () => {
+    // A run persisted before this field existed, and every internal source,
+    // report no truncation rather than a fabricated length.
+    const internal = makeResearchSource({ ref: 'company:AUTHORITY.md@83ac4a0', excerpt: 'x'.repeat(50) });
+    expect(internal.retrievedChars).toBe(0);
+  });
+
+  it('carries the retrieved length when a fetch recorded one', () => {
+    const fetched = makeResearchSource({
+      ref: 'https://www.postgresql.org/docs/16/runtime-config-connection.html',
+      excerpt: 'x'.repeat(MAX_SOURCE_EXCERPT_CHARS),
+      retrievedChars: 24_574,
+    });
+    expect(truncationNotice(fetched.retrievedChars, MODEL_EXCERPT_CHARS)).toContain('24574');
+  });
+
+  it('still warns when the PAGE was longer than what was stored', () => {
+    // The real case: 24,574 characters retrieved, 4,000 kept, 4,000 shown.
+    // Comparing 4,000 against 4,000 would report a complete document.
+    expect(truncationNotice(MAX_SOURCE_EXCERPT_CHARS, MODEL_EXCERPT_CHARS)).toBe('');
+    expect(truncationNotice(24_574, MODEL_EXCERPT_CHARS)).not.toBe('');
   });
 });
 

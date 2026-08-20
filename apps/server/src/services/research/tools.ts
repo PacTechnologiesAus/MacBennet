@@ -460,6 +460,8 @@ async function publicWebSearch(call: ResearchToolCall, context: ToolContext): Pr
         ref: result.url,
         label: result.title || result.url,
         excerpt: result.snippet.slice(0, MAX_SOURCE_EXCERPT_CHARS),
+        // A snippet is the whole of what the provider gave, not a cut document.
+        retrievedChars: 0,
         retrievedAt: now(),
         external: true,
         sourceClass: classifySource(result.url, { vendorDomains: context.vendorDomains ?? [] }),
@@ -539,6 +541,8 @@ async function publicDocFetch(call: ResearchToolCall, context: ToolContext): Pro
         ref: url.toString(),
         label: document.title,
         excerpt: document.text.slice(0, MAX_SOURCE_EXCERPT_CHARS),
+        // What the page actually gave us, so the prompt can say what it cut.
+        retrievedChars: document.text.length,
         retrievedAt: document.retrievedAt,
         // The flag that keeps an internet claim from being filed as a PAC fact.
         external: true,

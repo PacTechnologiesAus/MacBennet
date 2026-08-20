@@ -232,6 +232,15 @@ export const toModelSource = (dto: ResearchSourceDto): ResearchSource => ({
   ref: dto.ref,
   label: dto.title,
   excerpt: dto.excerpt,
+  /*
+   * Zero, deliberately.
+   *
+   * `research_sources` stores the excerpt and not the length of the text it came
+   * from, so a source rebuilt from the audit record cannot honestly say how much
+   * was cut. Zero reads as "not recorded" and the notice stays silent, rather
+   * than inventing a number that would look like evidence.
+   */
+  retrievedChars: 0,
   retrievedAt: dto.retrievedAt,
   external: dto.external,
   sourceClass: dto.sourceClass,

@@ -108,6 +108,23 @@ export const researchSourceSchema = z.object({
    * something the structure already prevents.
    */
   injectionSuspected: z.boolean().default(false),
+  /**
+   * How many characters the retrieval actually produced, before `excerpt` was cut.
+   *
+   * ---------------------------------------------------------------------------
+   * WITHOUT THIS, RAISING THE MODEL'S WINDOW JUST MOVES THE SILENCE
+   *
+   * `excerpt` is capped when the source is captured. If the prompt then compares
+   * what it shows against `excerpt.length`, a page cut from 24,574 characters
+   * down to 4,000 looks complete — the two numbers agree — and the model is told
+   * nothing, which is the defect commissioning found one level lower.
+   *
+   * So the length of the retrieved text travels with the source. Zero means "not
+   * applicable or not recorded": a search snippet is not a truncated document,
+   * and a run persisted before this field existed parses unchanged.
+   * ---------------------------------------------------------------------------
+   */
+  retrievedChars: z.number().int().min(0).default(0),
 });
 export type ResearchSource = z.infer<typeof researchSourceSchema>;
 

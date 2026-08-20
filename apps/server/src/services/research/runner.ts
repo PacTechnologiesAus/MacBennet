@@ -533,7 +533,7 @@ function buildPrompt(plan: ResearchPlan, state: ResearchState, decision: LoopDec
       if (!source.external) {
         lines.push(
           `  [${source.ref}] ${source.label}`,
-          `    ${source.excerpt.slice(0, MODEL_EXCERPT_CHARS)}${truncationNotice(source.excerpt.length, MODEL_EXCERPT_CHARS)}`,
+          `    ${source.excerpt.slice(0, MODEL_EXCERPT_CHARS)}${truncationNotice(retrievedLength(source), MODEL_EXCERPT_CHARS)}`,
         );
         continue;
       }
@@ -558,7 +558,7 @@ function buildPrompt(plan: ResearchPlan, state: ResearchState, decision: LoopDec
         frameUntrusted({
           label: source.label,
           url: source.url ?? source.ref,
-          text: source.excerpt.slice(0, MODEL_EXCERPT_CHARS) + truncationNotice(source.excerpt.length, MODEL_EXCERPT_CHARS),
+          text: source.excerpt.slice(0, MODEL_EXCERPT_CHARS) + truncationNotice(retrievedLength(source), MODEL_EXCERPT_CHARS),
         }),
       );
       if (source.injectionSuspected) {
@@ -1088,4 +1088,16 @@ export function buildToolContext(input: {
      */
     searchResultHosts: input.searchResultHosts,
   };
+}
+
+/**
+ * How long the retrieved text was, for the truncation notice.
+ *
+ * `retrievedChars` is zero for a search snippet, which is not a truncated
+ * document, and for any source persisted before the field existed. Falling back
+ * to the excerpt's own length makes those report no truncation, which is the
+ * right answer for both.
+ */
+function retrievedLength(source: ResearchSource): number {
+  return source.retrievedChars > 0 ? source.retrievedChars : source.excerpt.length;
 }

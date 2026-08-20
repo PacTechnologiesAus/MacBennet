@@ -385,9 +385,20 @@ export const MAX_SOURCE_EXCERPT_CHARS = 4_000;
  * So the number is named, and `truncationNotice` states the cut where the model
  * can see it. A bound is fine. A silent bound that the reader cannot distinguish
  * from "the page does not say" is not.
+ *
+ * It is now equal to what is stored, by the operator's decision at commissioning:
+ * one number rather than two, and an audit record that shows exactly what the
+ * model saw. The cost is real — up to sixty sources per step, each three times
+ * larger than before — and was accepted deliberately.
+ *
+ * That does NOT retire the notice. `excerpt` is itself cut when the source is
+ * captured, so the comparison that matters is against `retrievedChars`, the
+ * length of the text the retrieval actually produced. Comparing against the
+ * excerpt's own length would make a page cut from 24,574 characters to 4,000
+ * look complete, which is the same silence one level up.
  * ---------------------------------------------------------------------------
  */
-export const MODEL_EXCERPT_CHARS = 1_200;
+export const MODEL_EXCERPT_CHARS = MAX_SOURCE_EXCERPT_CHARS;
 
 /**
  * What to append when an excerpt was cut, or empty when it was not.
