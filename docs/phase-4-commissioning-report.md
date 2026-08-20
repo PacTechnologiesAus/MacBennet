@@ -1346,3 +1346,153 @@ mistake in three places:
 Each has unit tests. Each passes them. In each case the seam between the mechanism and the thing
 that feeds it had no test, because the tests supplied the input directly. None of the three was
 reachable from the suite, and all three were visible within minutes of driving the real system.
+---
+
+## Part D §20 — Deliverable verification, proven against the real deployment
+
+The question the brief asks: if a request names two distinct deliverables, does one consolidated
+report quietly count as two? Needs no search provider — artefact counting is deterministic and is
+the one thing a model cannot talk its way past.
+
+A task was created asking for **two separate engineering briefs**, one per system, from the PAC
+company context only, and run by the real worker and model. Run `2f2a5511…`.
+
+### D.20.1 The headline: it counts, and it refuses
+
+**Terminal state `completed_with_gaps`**, not `completed`. Per criterion:
+
+```
+satisfied  artefact-engineering_brief   2 of type engineering_brief, 2 required
+unmet      artefact-markdown_document   1 of type markdown_document, 2 required
+satisfied  section-assumptions          a heading matching "Assumptions" is present
+satisfied  evidence-grounded            18 grounded finding(s) at or above project_fact, 1 required
+unmet      external-sources             external_sources_used = 0, 1 required
+```
+
+**The deliverable requirement was enforced and met**: `2 of type engineering_brief, 2 required`.
+Mac produced two genuinely separate documents —
+
+```
+engineering_brief   Engineering Brief: PAC Project Registry
+engineering_brief   Engineering Brief: Project Document Controller
+markdown_document   Two Engineering Briefs (submitted together due to …)
+```
+
+— rather than one consolidated report, and the count criterion is what would have caught it had it
+not. **Part D §20 is proven, and DoD item 14 with it.**
+
+This also re-proves defect 7's fix end to end: before it, this run would have frozen zero criteria
+and reported `not_assessed` whatever it produced. The `run_acceptance` row now carries five frozen
+criteria and a real verdict per criterion.
+
+### D.20.2 Two of the three gaps were false, and both are findings
+
+An honest reading of that table is that **one gap is real and two are not**, which matters more than
+the headline: a verifier that cries wolf is the failure its own design warns about.
+
+**`external-sources` — defect 8, fixed.** See below. The brief forbade external research; the
+criterion demanded it.
+
+**`artefact-markdown_document` — defect 9, recorded and not fixed.** The request said *"two separate
+engineering briefs"* and *"two distinct documents"*, meaning the same two things. `detectDeliverables`
+matched both the specific noun (`briefs` → `engineering_brief`) and the generic one (`documents` →
+`markdown_document`), and derived **2 + 2 = 4 required artefacts** from a request for two.
+
+Mac produced two engineering briefs and one cover note, so the generic criterion reads
+`1 of type markdown_document, 2 required` and the run is marked short for a deliverable nobody
+separately asked for.
+
+Not fixed, because the correct fix is a judgement about the deliverable taxonomy rather than a bug
+to squash, and there is a genuine case on each side: *"two engineering briefs and a summary
+document"* really does want three artefacts, while *"two briefs, i.e. two documents"* wants two.
+Put to the operator as a decision (see the note at the end of this report).
+
+### D.20.3 Defect 8 — a brief that forbade external research was told to do some
+
+**Severity: medium-high. Found here; fixed; fix confirmed in production.**
+
+The brief said, in terms:
+
+> Use only the PAC company context — **no external research of any kind.**
+> … No external research, no web search, no document fetch.
+
+The derived criterion:
+
+> Retrieve at least one external source, **because the brief asks for research outside PAC**.
+
+**Root cause.** `EXTERNAL_RESEARCH_CUES` is a list of regexes and
+`\b(external|public|online|web|internet) (research|search|sources?|documentation)\b` matches the
+phrase inside its own negation. The cue layer had no notion of negation at all.
+
+This is the mirror of defect 3 and worse in one respect: defect 3 was a gap that went unmentioned,
+whereas this is a criterion a compliant run **cannot satisfy without disobeying its own brief**.
+Rule 2 of the derivation exists to prevent exactly that — *"a criterion that could not possibly be
+met is not derived at all… it would fail every run for a reason the run cannot do anything about,
+which trains everybody to ignore gaps."*
+
+**Fix.** `matchesUnnegated` checks the words immediately before each match against a small negator
+list. Deliberately shallow — reading negation properly is a parsing problem and this layer is
+already documented as approximate — and deliberately applied to **every** occurrence rather than the
+first, so one negated mention cannot hide a genuine request elsewhere in the same brief.
+
+**Confirmed in production.** The same wording, re-derived after deploying the fix (brief
+`7599b3fb…`):
+
+```
+artefact_type    artefact-engineering_brief   min=2
+artefact_type    artefact-markdown_document   min=2
+named_section    section-assumptions
+evidence_class   evidence-grounded            min=1
+
+external_sources derived?  False
+```
+
+**Regression tests** (`unit/acceptance.test.ts`): five negated phrasings return false; two genuine
+requests that merely contain a negation elsewhere still return true — *"Do not assume monday.com is
+being replaced. Research external vendor documentation."* must still ask for research, and does.
+
+---
+
+## Part I — Tests
+
+### I.1 Full suites, run on the VM against `mac_bennett_test`
+
+Moved to Linux for two reasons: the operator's local Docker database was shut down, and the two
+failures seen on Windows were `EBUSY: resource busy or locked` on a git mirror — a Windows
+file-locking artefact that passes 25/25 in isolation. Both files pass on Linux.
+
+| Suite | Result |
+|---|---|
+| Server | **1075 passed**, 62 skipped, 1 failed → **fixed**, see I.2 (988 s) |
+| Worker | **232 passed**, 4 skipped (67 s) |
+| Typecheck | clean, all four packages |
+| Web build | clean |
+
+Server totals rose from the Phase 4 baseline of 1055 as this commissioning added regression tests.
+The worker's 232/4 rather than 233/3 is the environment-gated sandbox-credential test, which
+"exists on every development laptop and deliberately does not exist on this VM" — the Oracle
+commissioning report's own words, and still true.
+
+### I.2 The one failure, which was the suite doing its job
+
+`web-research.test.ts > prompt injection > changes NOTHING about what Mac may do` failed with:
+
+```
++ "retrievedChars"
+```
+
+That test enumerates **every field on a tool-result source** and asserts the exact set, so that no
+new channel can appear between a web page and the model without somebody deciding it is safe. It is
+the structural half of the injection defence expressed as a test, and adding `retrievedChars` for
+defect 6 tripped it exactly as intended.
+
+It failed on the VM rather than locally because Docker was already down when that field was added,
+so the integration suite had not been re-run. Recorded rather than glossed: the gap between making
+that change and discovering it was several hours.
+
+The field was then argued for in place rather than merely added to the list — a count written by the
+fetcher and not by the page, consumed only by the sentence that says how much was withheld, movable
+by a page only by being longer or shorter. The comment asks the next person to make the same
+argument, because that is the only thing keeping the list a gate rather than a description.
+
+Re-run after the fix: `web-research`, `general-work` and `acceptance` together — **67 passed**.
