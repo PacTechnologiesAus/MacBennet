@@ -717,6 +717,131 @@ describe('the narrowing that happened before the run', () => {
     expect(note).toMatch(/engineering brief/i);
     expect(note).toMatch(/may be right/);
   });
+
+  /*
+   * Commissioning defect 4.
+   *
+   * The note above was computed correctly and reached exactly one reader: a
+   * Forja client, which does not exist yet. Its own comment claimed it was
+   * "surfaced on the task screen and in the approval card" and it was on
+   * neither, so the narrowing commissioning found would still have been
+   * invisible to the only person who currently approves anything.
+   */
+  it('puts the narrowing in front of whoever reads the brief, not only a Forja client', async () => {
+    const project = await researchProject();
+    const task = await makeTask(app.fastify, operator, project.id, {
+      title: 'Investigate three systems',
+      description: REQUEST,
+    });
+    const { discovery } = (await api(operator).post(`/api/tasks/${task.id}/discovery`, {})).json();
+    await api(operator).post(`/api/discovery/${discovery.id}/messages`, {
+      message: 'Just give me a single written recommendation covering all three, with a rough cost for each.',
+    });
+    const brief = (await api(operator).post(`/api/discovery/${discovery.id}/brief`, {})).json().brief;
+
+    // The human plane, which is where approvals actually happen today.
+    const read = (await api(operator).get(`/api/briefs/${brief.id}`)).json().brief;
+
+    expect(read.scopeNote).not.toBeNull();
+    expect(read.markdown).toMatch(/Scope note:/);
+    expect(read.markdown).toMatch(/narrower than the request/);
+  });
+});
+
+/*
+ * Commissioning defect 3.
+ *
+ * Observed on the real deployment: a brief requiring vendor documentation and
+ * currently-supported firmware versions derived four criteria, none of them
+ * about sources, carried confidence 0.806 in the `autonomous` band, and told
+ * nobody that external research was unavailable. The run it authorised would
+ * have completed FULLY SATISFIED having read nothing from outside PAC.
+ *
+ * Omitting the criterion is right — see `unmetResearchCapability`. Omitting it
+ * silently is the defect.
+ */
+describe('a brief that asks for research this deployment cannot do', () => {
+  const RESEARCH_REQUEST =
+    'Compare the current Siemens and Rockwell safety PLC families for a new PAC panel build. ' +
+    'This needs external research: use the vendor documentation for each, and say which firmware ' +
+    'versions are currently supported. Deliver a written comparison.';
+
+  async function briefAskingForResearch(capabilities: string[]) {
+    const project = await researchProject(capabilities);
+    const task = await makeTask(app.fastify, operator, project.id, {
+      title: 'Safety PLC comparison',
+      description: RESEARCH_REQUEST,
+    });
+    const { discovery } = (await api(operator).post(`/api/tasks/${task.id}/discovery`, {})).json();
+    await api(operator).post(`/api/discovery/${discovery.id}/messages`, {
+      message: RESEARCH_REQUEST,
+    });
+    return (await api(operator).post(`/api/discovery/${discovery.id}/brief`, {})).json().brief;
+  }
+
+  it('tells the approver so, when the project has no external_research capability', async () => {
+    await updateSettings({ externalResearchEnabled: true }, { type: 'user', id: admin.user.id, label: admin.user.name });
+    const brief = await briefAskingForResearch(['company_context', 'internal_only']);
+
+    const read = (await api(operator).get(`/api/briefs/${brief.id}`)).json().brief;
+
+    expect(read.researchGapNote).not.toBeNull();
+    expect(read.researchGapNote).toMatch(/not available in this deployment/i);
+    expect(read.markdown).toMatch(/Research note:/);
+
+    // And it is honest about the consequence rather than merely noting a fact.
+    expect(read.researchGapNote).toMatch(/rest on what he already holds/i);
+  });
+
+  it('tells the approver so, when the deployment setting is off', async () => {
+    await updateSettings(
+      { externalResearchEnabled: false },
+      { type: 'user', id: admin.user.id, label: admin.user.name },
+    );
+    const brief = await briefAskingForResearch(['company_context', 'internal_only', 'external_research']);
+
+    const read = (await api(operator).get(`/api/briefs/${brief.id}`)).json().brief;
+    expect(read.researchGapNote).not.toBeNull();
+  });
+
+  it('says nothing when the research can actually be done', async () => {
+    await updateSettings({ externalResearchEnabled: true }, { type: 'user', id: admin.user.id, label: admin.user.name });
+    const brief = await briefAskingForResearch(['company_context', 'external_research']);
+
+    const read = (await api(operator).get(`/api/briefs/${brief.id}`)).json().brief;
+
+    expect(read.researchGapNote).toBeNull();
+    expect(read.markdown).not.toMatch(/Research note:/);
+
+    // Because the criterion that can actually fail exists instead.
+    const [row] = await db.select().from(handoffBriefs).where(eq(handoffBriefs.id, brief.id));
+    const kinds = (row!.acceptance as Array<{ kind: string }>).map((c) => c.kind);
+    expect(kinds).toContain('external_sources');
+  });
+
+  it('records the gap in the audit trail beside the criteria it could not derive', async () => {
+    await updateSettings({ externalResearchEnabled: false }, { type: 'user', id: admin.user.id, label: admin.user.name });
+    const brief = await briefAskingForResearch(['company_context', 'internal_only']);
+
+    /*
+     * Filtered by task, not merely by event type.
+     *
+     * `audit_events` is trigger-protected against TRUNCATE, so `resetDatabase`
+     * leaves every event any earlier test ever wrote in place. A query on the
+     * type alone returns the oldest one in the database, which is somebody
+     * else's.
+     */
+    const [event] = await db
+      .select()
+      .from(auditEvents)
+      .where(
+        and(eq(auditEvents.taskId, brief.taskId), eq(auditEvents.eventType, 'acceptance.criteria_derived')),
+      );
+
+    expect((event!.metadata as { researchGap?: string | null }).researchGap).toMatch(
+      /not available in this deployment/i,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -19,7 +19,7 @@ import { analyseGaps, deriveFromContext } from '../domain/gap-analysis.js';
 import { getSettings, toConfidencePolicy } from './settings.js';
 import { record, type Actor } from './audit.js';
 import { emit } from './events.js';
-import { deriveCriteriaForBrief } from './acceptance.js';
+import { briefApprovalNotes, deriveCriteriaForBrief } from './acceptance.js';
 import { contextRefFor } from './company-context/service.js';
 
 /**
@@ -56,6 +56,21 @@ export async function briefDto(row: HandoffBriefRow, handle: DbHandle = db): Pro
    */
   const companyContext = await contextRefFor(row.companyContextRevisionId, handle);
 
+  /*
+   * The two sentences an approver has to read before deciding.
+   *
+   * Appended to the markdown rather than left as fields the UI might or might
+   * not render, because a brief gets read on a phone, on paper and pasted into
+   * a pull request, and a warning that only exists in one client is a warning
+   * that will be missed in the other three. They are returned as fields too,
+   * for anything that wants to style them.
+   */
+  const notes = await briefApprovalNotes(row.id, handle);
+  const noteMarkdown = [
+    notes.scopeNote ? `\n\n> **Scope note:** ${notes.scopeNote}` : '',
+    notes.researchGapNote ? `\n\n> **Research note:** ${notes.researchGapNote}` : '',
+  ].join('');
+
   return {
     id: row.id,
     taskId: row.taskId,
@@ -64,12 +79,15 @@ export async function briefDto(row: HandoffBriefRow, handle: DbHandle = db): Pro
     status: row.status as BriefStatus,
     content,
     companyContext,
-    markdown: renderBriefMarkdown(content, {
-      confidence,
-      companyContext: companyContext
-        ? { shortSha: companyContext.shortSha, contextVersion: companyContext.contextVersion }
-        : null,
-    }),
+    markdown:
+      renderBriefMarkdown(content, {
+        confidence,
+        companyContext: companyContext
+          ? { shortSha: companyContext.shortSha, contextVersion: companyContext.contextVersion }
+          : null,
+      }) + noteMarkdown,
+    scopeNote: notes.scopeNote,
+    researchGapNote: notes.researchGapNote,
     confidence,
     confidenceBand: advice.band,
     completeness,

@@ -806,6 +806,20 @@ export interface BriefDto {
     requiresExplicitScopeApproval: boolean;
     message: string;
   };
+  /**
+   * The two sentences an approver has to see before they decide.
+   *
+   * `scopeNote` says the brief commits to less than the request asked for.
+   * `researchGapNote` says the brief asks for research this deployment cannot
+   * do, so no acceptance criterion could be derived for it.
+   *
+   * Both are rendered into `markdown` as well, so they survive a brief being
+   * read on paper or pasted into a pull request. Neither blocks: narrowing a
+   * scope is often right, and so is proceeding without external research. What
+   * neither may be is invisible, which is what they both were.
+   */
+  scopeNote: string | null;
+  researchGapNote: string | null;
   contextSummary: string | null;
   /**
    * Sprint 3.2: the PAC company context revision that governed this work.

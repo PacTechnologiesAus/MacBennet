@@ -263,6 +263,9 @@ export interface ForjaBriefDto {
   structuredAcceptance: Array<{ id: string; kind: string; description: string }>;
   openQuestions: Array<{ id: string; question: string; answered: boolean }>;
   markdown: string;
+  /** Also rendered into `markdown`; separate so a client can style them. */
+  scopeNote: string | null;
+  researchGapNote: string | null;
   companyContextSha: string | null;
 }
 

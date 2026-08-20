@@ -19,6 +19,7 @@ import {
   evaluateDeterministic,
   requestsExternalResearch,
   requestsPrimarySources,
+  unmetResearchCapability,
   type AcceptanceEvidence,
 } from '../../src/domain/acceptance.js';
 
@@ -247,6 +248,85 @@ describe('the narrowing check', () => {
 });
 
 // ---------------------------------------------------------------------------
+
+/*
+ * Commissioning defect 3.
+ *
+ * `deriveCriteria` deliberately omits an `external_sources` criterion when the
+ * deployment cannot do external research, and the reasoning is right: a
+ * criterion that fails every run for a reason the run cannot act on teaches
+ * everybody to ignore gaps. The comment beside it said the shortfall "belongs
+ * at approval time as a blocker" — and nothing raised one, anywhere.
+ *
+ * Observed on the real deployment: a brief requiring vendor documentation and
+ * currently-supported firmware versions derived four criteria, none about
+ * sources, carried confidence 0.806 in the `autonomous` band, and said nothing
+ * to the approver about research being unavailable. The run it authorised would
+ * have completed as fully satisfied having read nothing outside PAC — which is
+ * the failure Phase 4 exists to fix, one layer up.
+ */
+describe('a brief that asks for research the deployment cannot do', () => {
+  const RESEARCH_REQUEST =
+    'Compare the current Siemens and Rockwell safety PLC families. Use the vendor documentation ' +
+    'for each and say which firmware versions are currently supported.';
+
+  it('says so, when external research is unavailable', () => {
+    const note = unmetResearchCapability({
+      brief: brief({ acceptanceCriteria: [RESEARCH_REQUEST] }),
+      description: RESEARCH_REQUEST,
+      externalResearchAvailable: false,
+    });
+
+    expect(note).not.toBeNull();
+    expect(note).toMatch(/external research/i);
+  });
+
+  it('says nothing when the research is available, because then the criterion carries it', () => {
+    const note = unmetResearchCapability({
+      brief: brief({ acceptanceCriteria: [RESEARCH_REQUEST] }),
+      description: RESEARCH_REQUEST,
+      externalResearchAvailable: true,
+    });
+
+    expect(note).toBeNull();
+
+    // And the criterion that replaces the note is the one that can actually fail.
+    const criteria = deriveCriteria({
+      taskKind: 'research',
+      brief: brief({ acceptanceCriteria: [RESEARCH_REQUEST] }),
+      description: RESEARCH_REQUEST,
+      externalResearchAvailable: true,
+      expectedArtefactTypes: ['markdown_document'],
+    });
+    expect(criteria.map((c) => c.kind)).toContain('external_sources');
+  });
+
+  it('says nothing about a brief that never wanted anything outside PAC', () => {
+    const internal = 'Summarise what our own handbook says about panel labelling.';
+
+    expect(
+      unmetResearchCapability({
+        brief: brief({ acceptanceCriteria: [internal] }),
+        description: internal,
+        externalResearchAvailable: false,
+      }),
+    ).toBeNull();
+  });
+
+  it('notices a question that is volatile even when nobody asked for research in so many words', () => {
+    // §19's currency rule: "which version is currently supported" turns on
+    // information that changes, whether or not the word "research" appears.
+    const volatile = 'Tell me which firmware version is currently supported for this controller.';
+
+    const note = unmetResearchCapability({
+      brief: brief({ acceptanceCriteria: [volatile] }),
+      description: volatile,
+      externalResearchAvailable: false,
+    });
+
+    expect(note).not.toBeNull();
+  });
+});
 
 describe('heading matching', () => {
   it('normalises case, punctuation and articles', () => {

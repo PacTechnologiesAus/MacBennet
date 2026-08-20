@@ -33,6 +33,7 @@ import {
   compareRequestToBrief,
   deriveCriteria,
   evaluateDeterministic,
+  unmetResearchCapability,
   type AcceptanceEvidence,
 } from '../domain/acceptance.js';
 import { record, SYSTEM_ACTOR, type Actor } from './audit.js';
@@ -122,6 +123,18 @@ export async function deriveCriteriaForBrief(
       briefId,
       count: criteria.length,
       kinds: criteria.map((c) => c.kind),
+      /*
+       * What could NOT be asked for, recorded next to what was.
+       *
+       * "No external_sources criterion" and "no external research was wanted"
+       * look identical in this event otherwise, and the first is a gap while
+       * the second is nothing at all.
+       */
+      researchGap: unmetResearchCapability({
+        brief: handoffBriefContentSchema.parse(row.brief.content),
+        description: row.description,
+        externalResearchAvailable: settings.externalResearchEnabled && capabilities.includes('external_research'),
+      }),
       // The divergence note, recorded alongside — see below.
       ...(row.description
         ? {
@@ -138,30 +151,69 @@ export async function deriveCriteriaForBrief(
 }
 
 /**
- * Whether the brief commits to less than the request asked for.
+ * The two notes an approver must see, in one query.
  *
- * Surfaced on the task screen and in the approval card, so the narrowing that
- * happened at commissioning would have been VISIBLE to whoever approved it.
- * It does not block: reducing five documents to one that covers the ground is
- * often the right call. What it must not be is invisible.
+ * ---------------------------------------------------------------------------
+ * WHY BOTH, AND WHY HERE
+ *
+ * `scopeNote` says the brief commits to less than the request asked for. It
+ * existed already and reached exactly one reader: a Forja client. Its own
+ * comment claimed it was "surfaced on the task screen and in the approval
+ * card", and it was on neither — so the narrowing that commissioning found
+ * would STILL have been invisible to the only person who currently approves
+ * anything, because they approve in the web UI.
+ *
+ * `researchGapNote` says the brief asks for research this deployment cannot do,
+ * so no `external_sources` criterion could be derived and completion will not
+ * be judged on evidence nobody could have gathered.
+ *
+ * They are computed together because they need the same two joins — the task's
+ * original wording and the project's capabilities — and a brief DTO should not
+ * cost three round trips to answer one question.
+ *
+ * Neither blocks. Reducing five documents to one that covers the ground is
+ * often right, and so is proceeding on what Mac already holds. What neither may
+ * be is invisible.
+ * ---------------------------------------------------------------------------
  */
-export async function briefNarrowing(
+export async function briefApprovalNotes(
   briefId: string,
   handle: DbHandle = db,
-): Promise<string | null> {
+): Promise<{ scopeNote: string | null; researchGapNote: string | null }> {
   const [row] = await handle
-    .select({ content: handoffBriefs.content, description: tasks.description })
+    .select({
+      content: handoffBriefs.content,
+      description: tasks.description,
+      capabilities: projects.capabilities,
+    })
     .from(handoffBriefs)
     .innerJoin(tasks, eq(tasks.id, handoffBriefs.taskId))
+    .innerJoin(projects, eq(projects.id, handoffBriefs.projectId))
     .where(eq(handoffBriefs.id, briefId))
     .limit(1);
 
-  if (!row?.description) return null;
+  if (!row) return { scopeNote: null, researchGapNote: null };
 
-  return compareRequestToBrief({
-    requestText: row.description,
-    brief: handoffBriefContentSchema.parse(row.content),
-  }).note;
+  const content = handoffBriefContentSchema.parse(row.content);
+  const settings = await getSettings(handle);
+  const capabilities = Array.isArray(row.capabilities) ? (row.capabilities as string[]) : [];
+
+  return {
+    scopeNote: row.description
+      ? compareRequestToBrief({ requestText: row.description, brief: content }).note
+      : null,
+    researchGapNote: unmetResearchCapability({
+      brief: content,
+      description: row.description,
+      // BOTH gates, exactly as `deriveCriteria` and the tool layer apply them.
+      externalResearchAvailable: settings.externalResearchEnabled && capabilities.includes('external_research'),
+    }),
+  };
+}
+
+/** The narrowing note alone, for callers that only want that one. */
+export async function briefNarrowing(briefId: string, handle: DbHandle = db): Promise<string | null> {
+  return (await briefApprovalNotes(briefId, handle)).scopeNote;
 }
 
 // ---------------------------------------------------------------------------

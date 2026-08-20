@@ -363,8 +363,6 @@ export async function getForjaBrief(briefId: string): Promise<ForjaBriefDto> {
     ? (row.acceptance as Array<{ id: string; kind: string; description: string }>)
     : [];
 
-  const narrowing = await briefNarrowing(briefId);
-
   return {
     id: dto.id,
     taskId: dto.taskId,
@@ -382,13 +380,16 @@ export async function getForjaBrief(briefId: string): Promise<ForjaBriefDto> {
       answered: q.answer !== null,
     })),
     /*
-     * The narrowing note, appended to the markdown Forja shows an approver.
+     * The scope note and the research note are already in `dto.markdown`.
      *
-     * This is the sentence that would have made commissioning's silent scope
-     * reduction visible to whoever approved it, and it belongs in front of the
-     * person deciding rather than in an audit event they will never read.
+     * They used to be appended here, which meant a Forja client was the only
+     * reader who ever saw them — the web UI, where every approval actually
+     * happens today, showed neither. They are rendered in `briefDto` now, so
+     * every reader of a brief gets the same sentences.
      */
-    markdown: narrowing ? `${dto.markdown}\n\n> **Scope note:** ${narrowing}` : dto.markdown,
+    markdown: dto.markdown,
+    scopeNote: dto.scopeNote,
+    researchGapNote: dto.researchGapNote,
     companyContextSha: dto.companyContext?.shortSha ?? null,
   };
 }

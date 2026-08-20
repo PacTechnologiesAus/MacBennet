@@ -497,6 +497,65 @@ export function compareRequestToBrief(input: {
   };
 }
 
+/**
+ * What the derivation could not ask for, because the deployment cannot do it.
+ *
+ * ---------------------------------------------------------------------------
+ * THE OTHER HALF OF RULE 2
+ *
+ * `deriveCriteria` omits an `external_sources` criterion when external research
+ * is unavailable, and that is right: a criterion that fails every run for a
+ * reason the run cannot act on teaches everybody to ignore gaps.
+ *
+ * But omitting it silently is worse than either alternative. A brief asking for
+ * vendor documentation and currently-supported firmware versions then derives
+ * four criteria, none of them about sources, and the run that satisfies all
+ * four is reported as fully satisfied having read nothing outside PAC. That is
+ * the shortfall this whole mechanism exists to make visible, one layer up: not
+ * "the run fell short of the brief" but "the brief asked for something this
+ * deployment cannot do, and nobody said so."
+ *
+ * So the requirement moves from the criteria to a sentence in front of the
+ * person approving, exactly as `compareRequestToBrief` does for a narrowed
+ * scope. It does not block. Approving research that will be done from what Mac
+ * already holds is often the right call at 17:00 on a Friday. What it must not
+ * be is invisible.
+ * ---------------------------------------------------------------------------
+ */
+export function unmetResearchCapability(input: {
+  brief: HandoffBriefContent;
+  description?: string | null;
+  externalResearchAvailable: boolean;
+}): string | null {
+  if (input.externalResearchAvailable) return null;
+
+  const contractText = [input.brief.acceptanceCriteria.join('\n'), input.brief.proposedScope, input.brief.userObjective]
+    .filter(Boolean)
+    .join('\n');
+  const description = input.description ?? '';
+
+  const asked = requestsExternalResearch(contractText) || requestsExternalResearch(description);
+  const primary = requestsPrimarySources(contractText) || requestsPrimarySources(description);
+  // The same currency judgement the criterion would have used, so a volatile
+  // question is caught whether or not anybody wrote the word "research".
+  const currency = assessCurrency([contractText, description].join('\n'));
+
+  if (!asked && !primary && currency.currency !== 'volatile') return null;
+
+  const because = asked
+    ? 'this brief asks for research outside PAC'
+    : primary
+      ? 'this brief asks for a conclusion resting on a primary source outside PAC'
+      : `this brief turns on information that changes over time (${currency.categories.join(', ')})`;
+
+  return (
+    `External research is not available in this deployment, and ${because}. ` +
+    'No acceptance criterion was derived for it, because a criterion no run could ever meet is ' +
+    'one everybody learns to ignore. Whatever Mac produces here will rest on what he already ' +
+    'holds — the company context and the project — and not on anything current from outside PAC.'
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Checking
 // ---------------------------------------------------------------------------
