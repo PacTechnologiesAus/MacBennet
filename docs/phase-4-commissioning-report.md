@@ -1269,3 +1269,80 @@ resumed without re-deriving it:
 2. **The fixtures must be recreated to resume Part C**, since they were deleted rather than left
    public. Their content is reproduced in C.4 and the generator scripts are in the session
    scratchpad; the nginx block is in this report's history.
+### D.8 Defect 7 — acceptance verification was inert for every run an operator creates
+
+**Severity: high. Found against the real deployment; fixed.**
+
+Part F is the centre of Phase 4: a run must be checked against the criteria a person approved. On
+this deployment it was checking nothing.
+
+**Observed.** Run `386b6fa4…` completed against brief `14a6cc01…`. The brief carries **three**
+derived acceptance criteria. The run's `run_acceptance` row:
+
+```
+run_id    state          criteria  artefacts_produced  external_sources_used
+386b6fa4  not_assessed   []        1                   5
+```
+
+Zero criteria frozen, on a run whose brief had three, reporting `completed`. And across the runs
+created during this commissioning:
+
+```
+386b6fa4  handoff_brief_id = NULL   job_params->>'briefId' = 14a6cc01-…
+4a992fe8  handoff_brief_id = NULL   job_params->>'briefId' = c6763995-…
+45a85f5d  handoff_brief_id = NULL   job_params->>'briefId' = c6763995-…
+3b505e16  handoff_brief_id = 0bb0b04a-…   (the earlier night-shift run — set)
+```
+
+**Root cause.** `freezeCriteriaForRun` joins `handoff_briefs` on `runs.handoff_brief_id`.
+`createRun` — the generic `POST /api/runs` path — never sets that column. It validates `jobParams`
+against a schema that **requires** `briefId` for a `general_task`, then writes the row without
+copying it across. A search for `handoffBriefId:` across the server finds exactly two writers:
+`createCodingRun` and the night-shift selector.
+
+So acceptance verification applied to coding runs and night-shift runs, and to nothing else. Every
+run an operator creates through the API froze an empty criteria set, and `not_assessed` — which the
+design correctly says "reads as a gap, never as a pass" — became the permanent verdict rather than
+the exception it was meant to be.
+
+**Why 1055 tests said nothing.** Every test in `general-work.test.ts` inserts its run directly:
+
+```ts
+const [run] = await db.insert(runs).values({
+  jobParams: { briefId: brief.id, taskKind: 'investigation', … },
+  handoffBriefId: brief.id,        // ← set by hand, by the test
+  …
+});
+```
+
+The column is populated by the test fixture, so the code that ought to populate it was never once
+exercised. This is the same shape as defect 2: **the tests construct the correct state instead of
+asking the system to produce it**, and the production path is then the only thing that has never
+been tried.
+
+**Fix.** `createRun` reads `briefId` out of the already-validated job parameters and writes it to
+`handoff_brief_id`. Driven by the job's own contract rather than by looking up the task's latest
+brief, because a run is bound to the brief it was created against and "the newest brief for this
+task" is a different and moving thing.
+
+**Regression tests** (`general-work.test.ts`, "a run created through the API is bound to the brief it
+names"): the brief reaches the column; approval freezes a non-empty criteria set; and a `noop` job,
+which names no brief, does not acquire one.
+
+The red state for these was observed in production rather than produced by reverting the code — the
+`criteria = []` row above is exactly what they assert against.
+
+### D.9 The pattern in three of these defects
+
+Worth naming, because it predicts where the next one will be. Defects 4, 5 and 7 are the same
+mistake in three places:
+
+| Mechanism | Built correctly | Wired to |
+|---|---|---|
+| The narrowing note (defect 4) | computed, tested | a Forja client that does not exist yet |
+| Source classification (defect 5) | correct, tested, refuses lookalike domains | the fetch allowlist, so everything fetchable was primary |
+| Acceptance criteria (defect 7) | derived, frozen, evaluated, all tested | a column nothing populated |
+
+Each has unit tests. Each passes them. In each case the seam between the mechanism and the thing
+that feeds it had no test, because the tests supplied the input directly. None of the three was
+reachable from the suite, and all three were visible within minutes of driving the real system.
