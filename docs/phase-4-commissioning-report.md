@@ -559,7 +559,115 @@ What a person must do, if Brave is chosen:
    tier; the free credits are the ceiling that keeps this at $0.
 3. Create an API key and send it by a means that is not email or chat.
 
-Nothing has been purchased and no account has been created by this commissioning.
+### The exact account and product
+
+| Item | Value |
+|---|---|
+| Vendor | Brave Search API — <https://brave.com/search/api/> |
+| Product | **Data for Search** |
+| Plan | **Free** — not "Base", not "Pro" |
+| Payment method | required at signup as anti-fraud; **not charged on the Free plan** |
+| Credential type | a subscription token, sent as the `x-subscription-token` request header |
+
+`google_cse` is not an option — the Custom Search JSON API is closed to new customers and is
+discontinued on 1 January 2027. SearXNG costs no vendor anything but requires PAC to run the
+service, and this VM has 954 MiB of RAM with no container runtime.
+
+### Charging and rate-limit model, and what Mac does at each limit
+
+The Free plan is metered per query, with a low queries-per-second ceiling and a monthly query
+allowance. **The plan page at signup is the authority on both numbers** — C.2's figure of roughly a
+thousand queries a month was read at comparison time and is not re-verified here. What matters for
+commissioning is not the exact number but that Mac's behaviour at each boundary is already defined
+and already tested:
+
+| Provider response | What Mac does |
+|---|---|
+| `401` / `403` | `WebResearchError('unauthorised')` — the token is wrong or the plan lapsed |
+| `429` | `WebResearchError('rate_limited')` — the run records the refusal, it does not retry blindly |
+| network timeout | `WebResearchError('timeout')` |
+| any other non-2xx | `WebResearchError('unreachable')` |
+| 2xx with no `web.results` array | `WebResearchError('malformed_response')` |
+| zero results | an empty result list, which is a finding and not an error |
+
+Every one of those is a **refusal recorded on the run**, not a silent empty answer — which is what
+lets an acceptance criterion requiring external evidence stay unmet rather than quietly passing.
+
+A provider named in settings whose credential is absent returns the **null provider**, so the
+failure reads "not configured" instead of arriving as an authentication error at 02:00.
+`missingSearchConfiguration('brave')` names the missing key.
+
+### Recommended conservative commissioning configuration
+
+Set for the first weeks of real use, and deliberately tighter than the defaults allow:
+
+| Setting | Value | Why |
+|---|---|---|
+| `settings.web_search_provider` | `brave` | the provider itself |
+| `settings.max_web_results_per_search` | **5** (default 8, max 25) | fewer results per query is fewer pages fetched, not fewer queries |
+| `settings.allow_fetch_from_search_results` | **false** (already the default) | a search provider that could choose what Mac retrieves would make the research-domain allowlist decorative — see defect 5 |
+| `settings.max_research_tool_calls` | **12** (default 40, hard cap 40) | the real per-run ceiling on queries |
+| `settings.external_research_enabled` | `true` | the global gate |
+| project `capabilities` | add `external_research` **per project** | the second gate; both must be on |
+
+The query ceiling that matters is the **per-run** one, and it is enforced in three places already:
+`RESEARCH_LIMITS.maxTotalToolCalls = 40`, `maxToolCallsPerStep = 6` and `maxSteps = 12`, with
+`settings.max_research_tool_calls` taking the lower of itself and the hard cap. At
+`max_research_tool_calls = 12` a single overnight research run cannot spend more than twelve tool
+calls in total, and only some of those are searches — the rest are fetches and internal lookups.
+That is the number to raise once a month of real usage exists to raise it against.
+
+**Both gates, not one.** External research requires `settings.external_research_enabled` *and* the
+project carrying the `external_research` capability. Turning the key on does not turn research on
+for every project.
+
+### Where the credential belongs, and which service needs it
+
+```
+/etc/mac-bennett/control-plane.env      root:mac, mode 0640
+
+MAC_SEARCH_API_KEY=<brave subscription token>
+```
+
+Then `systemctl restart mac-control-plane`.
+
+**The control plane, and only the control plane.** The search provider is constructed in
+`services/research/web.ts` inside the control-plane process; the worker never searches, never
+fetches, and has no code path that reads `MAC_SEARCH_API_KEY`.
+
+### How to verify the isolation, once the key exists
+
+The same three checks that proved it for the Teams and mail credentials in G.1, run after the
+restart:
+
+1. **The worker does not have it.** Read the live worker's environment directly:
+   ```sh
+   sudo tr '\0' '\n' < /proc/$(systemctl show -p MainPID --value mac-worker)/environ | grep -c MAC_SEARCH
+   ```
+   Expected: `0`. This is structural rather than disciplinary — `mac-worker.service` does not load
+   `control-plane.env` at all, so no configuration mistake can leak the key into the worker, and the
+   sandbox plan takes "values only, never `process.env`", so none can leak it into a sandbox.
+
+2. **Claude Code does not have it.** The coding agent runs inside the worker's sandbox, so (1)
+   covers it structurally; confirm the sandbox plan for a coding run still lists only
+   `MAC_SANDBOX_CREDENTIALS` and mounts nothing from `/etc/mac-bennett`.
+
+3. **Teams and Forja clients do not have it.** The key is never projected into any DTO. Confirm by
+   reading a Forja brief and a settings response as a scoped client and grepping for the token
+   value: the settings DTO publishes `webSearchProvider` — the provider's *name* — and never the
+   key. `GET /api/settings` returning the string `brave` is correct; returning anything that looks
+   like a token is not.
+
+4. **It does not enter evidence or audit logs.** `research_sources` stores URL, label, source class,
+   excerpt, retrieval time and `retrievedChars`, and no request header. Grep the audit trail and the
+   run logs for the token value after the first real search:
+   ```sh
+   sudo -u postgres psql mac_bennett -c "select count(*) from audit_events where metadata::text like '%<first 8 chars of token>%';"
+   ```
+   Expected: `0`.
+
+**Nothing has been purchased, no account has been created and no key has been requested by this
+commissioning.**
 
 ---
 
@@ -1393,7 +1501,7 @@ the headline: a verifier that cries wolf is the failure its own design warns abo
 **`external-sources` — defect 8, fixed.** See below. The brief forbade external research; the
 criterion demanded it.
 
-**`artefact-markdown_document` — defect 9, recorded and not fixed.** The request said *"two separate
+**`artefact-markdown_document` — defect 9, recorded here and fixed in §21.** The request said *"two separate
 engineering briefs"* and *"two distinct documents"*, meaning the same two things. `detectDeliverables`
 matched both the specific noun (`briefs` → `engineering_brief`) and the generic one (`documents` →
 `markdown_document`), and derived **2 + 2 = 4 required artefacts** from a request for two.
@@ -1402,10 +1510,17 @@ Mac produced two engineering briefs and one cover note, so the generic criterion
 `1 of type markdown_document, 2 required` and the run is marked short for a deliverable nobody
 separately asked for.
 
-Not fixed, because the correct fix is a judgement about the deliverable taxonomy rather than a bug
-to squash, and there is a genuine case on each side: *"two engineering briefs and a summary
-document"* really does want three artefacts, while *"two briefs, i.e. two documents"* wants two.
-Put to the operator as a decision (see the note at the end of this report).
+Not fixed *at the time*, because the correct fix is a judgement about the deliverable taxonomy
+rather than a bug to squash, and there is a genuine case on each side: *"two engineering briefs and
+a summary document"* really does want three artefacts, while *"two briefs, i.e. two documents"*
+wants two.
+
+**Now fixed — see Part D §21.** The taxonomy judgement was made rather than deferred further: a
+specific deliverable type defines artefact identity, a generic container noun may not add an
+artefact where the evidence shows it names one already derived, and where the evidence does not say,
+Mac asks rather than guesses. The same production wording now derives two required artefacts instead
+of four, and the third case the deferral did not name — wording that genuinely does not say — no
+longer resolves silently in either direction.
 
 ### D.20.3 Defect 8 — a brief that forbade external research was told to do some
 
@@ -1453,6 +1568,403 @@ being replaced. Research external vendor documentation."* must still ask for res
 
 ---
 
+---
+
+## Part D §21 — Defect 9, fixed
+
+**Severity: high. Found in production (Part D §20.2), recorded there and deliberately deferred;
+fixed here.** This is the defect §20.2 named and left open pending a taxonomy decision.
+
+### D.21.1 What it did
+
+The request behind run `2f2a5511…` named *"two separate engineering briefs"* and then
+*"two distinct documents, not one consolidated report"*, meaning the same two things.
+`detectDeliverables` matched both the specific noun (`briefs` → `engineering_brief`) and the generic
+one (`documents` → `markdown_document`) and derived **2 + 2 = 4 required artefacts** from a request
+for two.
+
+Mac produced exactly what was wanted — two engineering briefs plus a cover note — and the run was
+reported `completed_with_gaps` for `1 of type markdown_document, 2 required`.
+
+**Why that is the worst direction for this mechanism to fail in.** Defect 8 was a criterion no
+compliant run could satisfy. This is a criterion no *correct delivery* could satisfy. A gap that
+appears when the work was right is worse than no gap at all, because it teaches every reader that
+acceptance gaps are noise — and the entire value of Part F rests on them not being noise.
+
+### D.21.2 Root cause
+
+Not a regex bug, and it was not fixed as one.
+
+`detectDeliverables` was a single pass with **no reconciliation stage**. Each pattern independently
+created a mention keyed by *artefact type*, and `deriveCriteria` turned every surviving mention 1:1
+into an `artefact_type` criterion with `minimum = count`. Nothing anywhere in the pipeline modelled
+the **relationship between two mentions** — whether the second phrase adds artefacts, renames the
+first, or describes the first's contents. Because generic container nouns map to artefact types of
+their own, a restatement became an independent requirement, and the required artefact count was the
+**sum** of mentions rather than the **union** of deliverables.
+
+Reproduced before touching anything:
+
+| Text | Derived before | Required |
+|---|---|---|
+| two separate engineering briefs and two distinct documents | `engineering_brief×2` + `markdown_document×2` | **4** (should be 2) |
+| two engineering briefs, i.e. two documents | `engineering_brief×2` + `markdown_document×2` | **4** (should be 2) |
+| two engineering briefs and a summary document | `engineering_brief×2` + `markdown_document×1` | 3 (correct) |
+| one report containing a summary and a build order | `investigation_report×1` + `markdown_document×1` | **2** (should be 1 + sections) |
+| provide two briefs and documentation | `engineering_brief×2`, silently | 2, and the ambiguity never surfaced |
+| a document for the client and a document for the team | `markdown_document×1` | **1** (should be 2) |
+| Deliver two documents: two engineering briefs | both ×2 | **4** (should be 2) |
+
+The reproduction found **three facets the production observation had not**: container nouns `file`,
+`artefact`, `output`, `documentation`, `drawing` and `procedure` were not recognised at all; two
+genuinely distinct generic documents in one sentence under-counted to one, because same-type
+mentions were aggregated with `max`; and a generic noun appearing *before* the specific one it named
+was never reconciled in that direction.
+
+### D.21.3 The taxonomy rule chosen
+
+> **A specific deliverable type defines artefact identity. A generic container noun — document,
+> file, report, artefact, output — must not create an additional required artefact where the
+> evidence shows it names a deliverable already derived.**
+>
+> Generic nouns are not globally discarded. *"Write me two documents"* asks for two documents and
+> nothing may talk that down. What a generic noun may not do is silently double a count.
+
+Two vocabularies, kept apart deliberately:
+
+* **`ARTEFACT_TYPES`** is what Mac can *store* — eight values in a database enum shared with the
+  worker, the web client and every persisted artefact. **Unchanged by this fix.**
+* **Deliverable types** are what a requester can *name*, and are finer: `engineering_brief`,
+  `architecture_note`, `summary_document`, `test_report`, `investigation_report`, `recommendation`,
+  `task_proposal`, `drawing`, `diagram`, `procedure`, `structured_data`, against the containers
+  `document`, `documentation`, `file`, `artefact`, `output`, `report`, `note`, `write_up`.
+
+That split is what lets specific-over-generic be stated without touching the storage model. A test
+report and an investigation report are both stored `investigation_report`; a summary document and a
+procedure are both `markdown_document`; but they are different things to ask for, and collapsing
+them would make *"a summary and a procedure"* one artefact.
+
+`deliverable` is deliberately **not** a container noun. Briefs use that word as a heading far more
+often than as a countable noun, and a brief whose objective line is the word "Deliverables" would
+have required an artefact because of its own section title. The regression tests caught that on the
+first run.
+
+### D.21.4 Implementation
+
+`apps/server/src/domain/deliverables.ts` — new module, and the split is the point:
+
+**Stage 1, extraction.** Finds every candidate mention positionally and decides *nothing* about
+identity. Each candidate carries specific type, generic container type, count, **whether the count
+was explicit** (a bare plural is not a count), determiner, qualifiers, trailing words, the
+requester's verbatim phrase, its source span and its sentence index. Overlapping matches are
+resolved **longest-wins after the scan** rather than by table order — the old pass depended on row
+order, which is a rule that holds until somebody appends a row.
+
+Four things are excluded at extraction, each for a stated reason:
+* a container noun inside a **proper name** — *"the PAC Project **Document** Controller"* had been
+  quietly requiring a `markdown_document` because a system has that word in its name;
+* a container noun naming a **source to read** rather than an output to write — *"Research external
+  vendor documentation"*;
+* a deliverable noun under a **negation** — *"not one consolidated report"*;
+* a container noun used as a **verb** — *"Investigate and report back"*.
+
+The last two were found by the fix's own testing and are written up in D.21.6.
+
+**Stage 2, normalisation.** Decides what each candidate means relative to the others, and assigns
+one of five relationships:
+
+| Relationship | Meaning | Effect on criteria |
+|---|---|---|
+| `additive` | an independent deliverable | creates a requirement |
+| `alias` | explanatory wording — `i.e.`, `namely`, a colon, a definite back-reference | none |
+| `explanatory` | counts out the same deliverables already required | none |
+| `contains` | inside a "containing …" clause; content of another deliverable | becomes a **section** criterion |
+| `ambiguous` | nothing here may decide | **none, and a question is raised** |
+
+Only `additive` reaches a criterion. Aggregation is **max across sentences, sum within one** — the
+contract text is the brief's acceptance criteria, scope, objective and desired behaviour
+concatenated, and those restate the same request three or four times, so summing across them would
+multiply every count by the number of fields mentioning it. Within one sentence the opposite holds,
+and the signal is that the two mentions carry *different modifiers*.
+
+Extraction and normalisation are separate functions in separate stages. `deriveCriteria` then groups
+the normalised deliverables **by artefact type** and sums, so two deliverable types sharing one
+artefact type arrive as `markdown_document >= 2` rather than as two criteria of which the second
+silently overwrote the first.
+
+### D.21.5 Ambiguity, and what is done with it
+
+*"provide two briefs and documentation"* does not say whether the documentation **is** the briefs,
+and both available guesses are harmful. Reading it as an alias drops a deliverable out of the
+contract, which is the exact failure Part F exists to prevent. Reading it as an addition invents an
+artefact a correct run will be marked short for — defect 9 again.
+
+So **no criterion is derived from an ambiguous mention at all**, and the question goes where a
+brief's other unknowns already go: `openQuestions`, during **discovery**, on dimension
+`acceptance_criteria` (the heaviest weight in gap analysis, 0.16), with `discoverableFrom` empty
+because nothing in the repository can answer what the person who wrote the sentence meant. That
+emits `question_required` exactly as any other unanswered gap does, so it reaches the Forja inbox
+and the web UI before approval freezes anything.
+
+The question Mac asks:
+
+> The brief asks for 2 engineering briefs and then says "documentation". Is that the same 2
+> engineering briefs, or documentation in addition? Acceptance criteria are frozen when the brief is
+> approved, so this needs an answer first.
+
+`required_count = a guessed number` is the outcome this refuses to produce. `needs_clarification` is
+the correct output when the text does not say.
+
+### D.21.6 Five defects the fix's own testing exposed
+
+None of these came from the tidy one-sentence cases. They came from running the fix against the
+**real production brief**, and then against thirty ordinary brief wordings of the kind PAC engineers
+actually write. Every one would have shipped. Recorded rather than quietly corrected, because the
+lesson is the one this whole commissioning keeps relearning: **the convenient example is not the
+test that matters.**
+
+**1. "Deliverables" as a heading required an artefact.** `deliverable` was in the container-noun
+list, and a brief whose objective line is the word "Deliverables" — which is how briefs are titled —
+required a `markdown_document` because of its own section title. Caught by the regression tests on
+their first run, which is what they are for. The noun was removed: it is a heading far more often
+than a countable thing.
+
+**2. A negated deliverable became a phantom requirement.** *"Two distinct documents, **not one
+consolidated report**"* produced a candidate `report` and a clarifying question about a phrase that
+was never a request. This is defect 8's trap one layer down, and the fix is defect 8's mechanism:
+the shared `NEGATORS` list, applied to deliverable nouns.
+
+The **window differs and the difference is deliberate**: the research-cue check looks back six
+words, this one looks back three. A cue can be negated at a distance; a deliverable negation is
+attached directly to its noun. Suppressing a cue wrongly costs an unnecessary criterion; suppressing
+a *deliverable* wrongly costs a requirement dropped from the contract — the original Part F failure,
+five requested documents becoming one — so this window is the narrow one. Tested in both directions:
+*"No consolidated report — produce two engineering briefs"* still requires two briefs.
+
+**3. Cross-line restatement fell through to ambiguity.** A brief is a *list*. Its acceptance
+criteria are separate lines, and the real wording put the two phrases on two of them. Requiring the
+restatement to share a sentence made the production brief undecidable — Mac would have asked a human
+about a brief nobody would call unclear. Normalisation now falls back to the nearest preceding
+sentence that holds a specific deliverable.
+
+**4. The ambiguity rule asked about seven briefs in ten.** The worst of the five, and the one that
+would have been hardest to notice in production because its symptom is a *question*, which looks
+like diligence.
+
+The first cut called a generic noun undecidable whenever a specific deliverable preceded it and
+nothing pointed backwards. Probed against ordinary wordings it raised a clarifying question for:
+
+```
+Produce a brief and a note.                            ASK
+Produce an engineering brief and a document.           ASK
+Produce two engineering briefs and a document.         ASK
+Produce two engineering briefs and three documents.    ASK   <- the counts plainly differ
+Write a recommendation and a report on the trial.      ASK
+Deliver an architecture note and a file for the client. ASK
+Produce engineering briefs and documents.              ASK
+```
+
+Seven of ten, including *"two engineering briefs and three documents"*, where no English speaker
+would hesitate. **That is the false gap again, moved one step earlier into discovery**, and it is
+just as corrosive there: a brief blocked on a question nobody should have had to answer is a brief
+blocked, and a system that asks about everything is one whose questions stop being read.
+
+The principle that replaced it is how English introduces things. A container noun carrying **its own
+count or article** is a new deliverable — *"and a document"* announces a document. It is a
+restatement only when something points backwards, which the earlier branches already test for. That
+leaves exactly two undecidable shapes:
+
+* a **repeated count above one** with nothing to resolve it — *"two engineering briefs and two
+  documents"*. The repetition is itself the signal. Two singulars both carrying the count 1 is a
+  coincidence, not evidence;
+* a **bare container** — no article, no count, nothing introducing it as new and nothing pointing
+  back — *"two briefs and documentation"*.
+
+Both of the brief's required ambiguity cases still ask. Nothing else does.
+
+**5. Container nouns used as verbs became requirements.** Six of the eight containers are also
+everyday verbs, and a brief is usually written in the imperative:
+
+```
+Investigate and report back.                     -> required a report
+Write up your findings as a recommendation.      -> required a write-up AND a recommendation
+```
+
+Defect 9's own failure direction, reintroduced by the fix for it. The rule is grammatical rather
+than lexical — an English noun phrase needs a determiner in the singular, so *"a report"* is a thing
+and bare *"report"* is an instruction. Plurals need no determiner and are not filtered;
+`documentation` and `artefact`, which are nouns in every tense, are exempt.
+
+Fixing that exposed a **sixth, smaller** coupling worth naming because of what it says about the
+design: the determiner test was first written against the count scan's `explicit` flag, and that
+flag is false whenever an adjective the qualifier list has never heard of sits in the way — so
+*"a **scoping** document"* read as having no determiner and the document went missing. Widening the
+qualifier list word by word is precisely the phrase-by-phrase accumulation this module exists to
+avoid, so the determiner is now looked for directly, and it governs its noun phrase only until a
+conjunction breaks it — which is why *"Produce a brief and note the risks"* does not hand the "a" to
+"note".
+
+All thirty probe wordings are kept as regression tests.
+
+### D.21.7 Provenance — the evidence is not consumed by the decision that used it
+
+A human reviewing a normalised criterion must be able to see *why* Mac decided "documents" refers to
+the engineering briefs. Three places, none of which erases the requester's words:
+
+1. **On the criterion itself.** `AcceptanceCriterion.provenance` — a new optional field carrying the
+   phrases that produced the criterion, verbatim, plus one sentence saying what was folded into
+   what. Optional rather than defaulted so criteria stored before this field existed stay valid.
+   Repeated phrases are deduplicated by their words: a brief that says "two separate engineering
+   briefs" in three fields cites itself once, because three identical quotations is not more
+   provenance.
+2. **In the audit event.** `acceptance.criteria_derived` now carries `deliverables.required`,
+   `deliverables.normalised` (phrase, span, relationship, what it resolved to, and the reason) and
+   `deliverables.needsClarification` — including, deliberately, the phrases that produced **no**
+   criterion because nothing could decide them.
+3. **In the brief markdown, at approval.** Two new note lines, appended to the markdown for the same
+   reason the scope and research notes are: a brief gets read on a phone, on paper and pasted into a
+   pull request, and a judgement only one client renders is a judgement three readers never see.
+   `> **Deliverables:**` says what was folded together; `> **Deliverables unclear:**` says what could
+   not be decided. Neither blocks. Mac notices, a person chooses.
+
+### D.21.8 Before and after, on the real production wording
+
+The brief from run `2f2a5511…`, re-derived through the fixed derivation. **Before** is the table
+observed on the VM and recorded in §20.2 and D.20.3:
+
+```
+BEFORE
+artefact_type    artefact-engineering_brief   min=2
+artefact_type    artefact-markdown_document   min=2      <- nobody asked for this
+named_section    section-assumptions
+evidence_class   evidence-grounded            min=1
+external_sources derived?  False   (after defect 8)
+```
+
+```
+AFTER
+artefact_type    artefact-engineering_brief   engineering_brief  min=2
+named_section    section-assumptions          Assumptions
+evidence_class   evidence-grounded            project_fact min=1
+
+external_sources derived?  false
+```
+
+Required artefacts: **4 → 2.** And the reasoning, recorded rather than assumed:
+
+```
+required: ["engineering_brief x2"]
+[explanatory] "Two distinct documents" -> engineering_brief
+    "Two distinct documents" counts out the same 2 already required as engineering
+    briefs, and adds no kind of its own, so it restates them.
+
+provenance on artefact-engineering_brief:
+    From "Two separate engineering briefs", "Two engineering briefs". "Two distinct
+    documents" counts out the same 2 already required as engineering briefs, and adds
+    no kind of its own, so it restates them.
+
+clarifying questions: []
+```
+
+No question is asked, because this wording is not ambiguous. The phrase saying what *not* to
+produce — "not one consolidated report" — produced nothing.
+
+### D.21.9 The acceptance path, end to end
+
+`tests/integration/acceptance.test.ts` runs the whole path against the real database: a task whose
+description carries the restatement, discovery, a brief, derived criteria, criteria frozen onto the
+run, a real research loop writing artefacts, and a real acceptance review.
+
+| Proof required | Result |
+|---|---|
+| required engineering briefs = 2 | `artefact-engineering_brief min=2` |
+| no duplicate generic-document criterion | artefact criteria are exactly `['engineering_brief']`, total minimum **2** |
+| produced engineering briefs = 2 | two `engineering_brief` rows in `run_artefacts`, three artefacts in total |
+| the cover note does not falsely satisfy or inflate the brief criterion | observed reads exactly `2 of type engineering_brief, 2 required` |
+| final gap state reflects only real unmet criteria | `review.unmet = []`, state `satisfied`, run `completed`, task `done` |
+| the wording survives the decision | the `documents` phrase is present in the audit event, and `document` is absent from `deliverables.required` |
+
+The middle row is the one worth reading twice. A `markdown_document` counting *towards* an
+`engineering_brief` criterion would be the mirror failure of defect 9, and `2 of type
+engineering_brief, 2 required` is what rules it out: the cover note is a real artefact, it is
+counted as an artefact, and it is not counted as a brief.
+
+**And the ambiguous path, through the same real database.** Three further integration tests prove
+the *wiring*, not just the function — a question computed and then dropped on the floor is worse
+than no question, because the code looks as though somebody was told:
+
+| Proof | Result |
+|---|---|
+| an ambiguous brief carries the question | an `openQuestion` with id `deliverable-ambiguity-1`, dimension `acceptance_criteria`, naming the phrase |
+| and no count is frozen from a guess | artefact criteria are exactly `['engineering_brief']`, minimum 2 — the ambiguous phrase adds nothing and removes nothing |
+| every client can see it | `GET /api/briefs/:id` returns markdown containing `Deliverables unclear:` |
+| clear wording is decided, not queried | the Case A brief carries **no** `deliverable-ambiguity-*` question at all |
+
+The last row is what keeps the mechanism useful. A verifier that asks about everything is as useless
+as one that asks about nothing — that is the false gap again, moved one step earlier into discovery.
+
+### D.21.10 Regression tests
+
+`tests/unit/deliverable-normalisation.test.ts` — 48 tests. Every case the brief asked for:
+
+| # | Case | Covered by |
+|---|---|---|
+| 1 | specific + explanatory generic noun | Case A — `two separate engineering briefs and two distinct documents` → 2 |
+| 2 | `i.e.` alias | Case B → 2 |
+| 3 | additive summary document | Case C → 3, `engineering_brief×2` + `markdown_document×1` |
+| 4 | one report containing sections | Case D → 1 artefact, `Summary` and `Build order` as section criteria |
+| 5 | two genuinely distinct generic documents | "a document for the client and a document for the internal team" → 2 |
+| 6 | ambiguous wording | Case E, plus "and two documents" on a matching count alone → question, no criterion |
+| 7 | generic before specific | "Deliver two documents: two engineering briefs" → 2, generic retracted |
+| 8 | multiple specific deliverable types | brief + architecture note + drawing + procedure → 4, none consuming another |
+| 9 | singular/plural variants | singular and plural reach the same deliverable **type** — brief/briefs, drawing/drawings, procedure/procedures — asserted across six wordings |
+| 10 | **no regression of defect 8** | the negated-research brief still derives no `external_sources` criterion |
+
+What plurality does **not** normalise away is stated separately rather than smoothed over, because
+the fix deliberately treats the two differently: *"an engineering brief and a document"* introduces
+the document with its own article, which is how English announces a new thing, so it is additive;
+*"engineering briefs and documents"* introduces it with nothing at all, and that bare form is how a
+restatement is written, so it is asked about. The two sentences are not the same sentence and are
+not forced to the same verdict.
+
+Plus: the production wording itself as a fixture; every one of the five defects the fix's own
+testing exposed (D.21.6), including all thirty probe wordings as `it.each` cases; provenance
+deduplication; and mass-noun grammar in the question a human has to read.
+
+The four "no regression in what was already read correctly" tests keep the original Part F
+behaviour honest: three separate engineering briefs still count as three, an architecture
+recommendation is still not a bare recommendation, a count still cannot attach to a noun it was
+never in front of, and vendor documentation Mac must READ is still not a deliverable he must WRITE.
+
+### D.21.11 The prompt-injection structural test — not weakened, and not touched
+
+`web-research.test.ts > prompt injection > changes NOTHING about what Mac may do` enumerates every
+field on a **tool-result source** and asserts the exact set. It is intact and passing, with the same
+ten fields it had before this work.
+
+**Defect 9 adds no tool-result field.** It adds three things, and none of them is on that path:
+
+| New field | Where it lives | Reaches the reasoning model? |
+|---|---|---|
+| `AcceptanceCriterion.provenance` | the brief's `acceptance` JSON, and the run's frozen criteria | **No** |
+| `deliverables.*` in audit metadata | `audit_events.metadata` | **No** |
+| `deliverableNote`, `deliverableAmbiguityNote` | server-side note computation and the brief markdown | **No** |
+
+The semantic-review prompt is built at `services/acceptance.ts` from `c.id` and
+`c.statement ?? c.description` and nothing else — `provenance` is never serialised into it, and only
+`artefact_type` criteria carry provenance while only `semantic` criteria are sent to a model, so the
+two sets do not intersect.
+
+**Justifying the one field a hostile input could reach at all.** `provenance` is assembled from the
+BRIEF's own wording. A brief is written by a human through discovery, is read by a human at
+approval, and is already reproduced verbatim in the agent's task prompt — so nothing in
+`provenance` is text the model could not already see, from a source it could not already see. It is
+bounded at 1200 characters, it is not a source excerpt, and no web page can write into it: the
+deliverable reader never runs over retrieved content. If a later change makes any of those three
+sentences false, the field needs arguing for again.
+
+---
+
 ## Part I — Tests
 
 ### I.1 Full suites, run on the VM against `mac_bennett_test`
@@ -1496,3 +2008,236 @@ by a page only by being longer or shorter. The comment asks the next person to m
 argument, because that is the only thing keeping the list a gate rather than a description.
 
 Re-run after the fix: `web-research`, `general-work` and `acceptance` together — **67 passed**.
+
+### I.3 Full suites, re-run after defect 9
+
+Run on a **Windows workstation against a local Docker PostgreSQL 16**, not on the VM — the SSH key
+for `161.33.80.88` is not available in this session, so nothing below is a Linux figure and none of
+it is claimed as one. See J.4.
+
+| Suite | Result | Where |
+|---|---|---|
+| Server | **1137 passed**, 61 skipped, **0 failed** (830 s) | Windows + Docker PG 16 |
+| Worker | **233 passed**, 3 skipped (33 s) | Windows |
+| Typecheck | clean, all four packages | Windows |
+| Web build | clean, 93 modules, 411.86 kB | Windows |
+| Unit subset alone | **647 passed**, 0 failed (5 s) | Windows, no database |
+
+Reading the deltas honestly. The Phase 4 baseline was **1075 passed / 62 skipped** on the VM.
+Defect 9 added **54 tests** — 48 unit, 6 integration — which accounts for 1075 → 1129. The remaining
+**+8** is environment rather than work: the local `.env` enables opt-in tests the VM leaves skipped,
+which is also why skipped falls 62 → 61. That +8 is not a guess; it was the same +8 in an earlier
+run of this session that carried a different number of new tests (1075 + 17 observed as 1100), which
+is what makes it attributable to the environment rather than to anything added here.
+
+The worker's 232 → 233 is the sandbox-credential test that I.1 already predicted "exists on every
+development laptop and deliberately does not exist on this VM". This is a laptop. Nothing in
+defect 9 touches the worker.
+
+**Zero deadlocks in this run**, confirmed against the PostgreSQL server log for the whole run window
+— the check that distinguishes a real result from the corrupted one described in I.4. The run was
+launched detached so that a stopped shell could not orphan it, exactly **one** `vitest` process was
+confirmed by command line while it ran, and its exit was confirmed by `Get-Process` before these
+numbers were read.
+
+### I.4 An incident, recorded because the brief specifically warned about it
+
+The commissioning brief said: *"Because previous database corruption came from overlapping suites,
+run database-mutating suites sequentially where required. Do not repeat that failure mode."*
+
+**I repeated it.** Not by launching two suites deliberately, but by stopping one badly.
+
+Three full server runs were stopped mid-flight during this pass — the first because I had edited
+source underneath it, the next two because probing found real defects that made the run pointless.
+Stopping the *task* killed the shell it was launched from. It did **not** kill the `vitest` child
+processes, which went on running against `mac_bennett_test`. When the next run started, two test
+processes were resetting the same database at once.
+
+PostgreSQL named it precisely:
+
+```
+ERROR:  deadlock detected
+DETAIL: Process 6166 waits for RowShareLock on relation 1743904; blocked by process 6148.
+        Process 6148 waits for AccessExclusiveLock on relation 1744143; blocked by process 6166.
+        Process 6166:  INSERT INTO settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING
+        Process 6148:  TRUNCATE TABLE run_logs, run_usage, approvals, runs, tasks, projects, ...
+```
+
+Two backends both inside `resetDatabase`: one holding the TRUNCATE's `AccessExclusiveLock`, the
+other holding the `settings` upsert's `RowShareLock`, each waiting on the other. Because
+`settings.updated_by` references `users`, the TRUNCATE's CASCADE removes the settings singleton, and
+the window between removing it and reinserting it is exactly where a second process reads
+`SETTINGS_MISSING`. That cascaded into 288 failures across 16 files, most of them in tests defect 9
+never touches.
+
+The postgres log shows deadlocks continuously from 12:53 to 13:35 UTC — the whole period in which I
+believed I was running one suite at a time.
+
+**Three things worth keeping from this:**
+
+* `TaskStop` on a shell is not a stop of what the shell spawned. Verifying "nothing is running"
+  needs a check for the actual process — `Get-CimInstance Win32_Process | Where CommandLine -like
+  '*vitest*'` — not `ps aux | grep vitest`, which on Git-Bash for Windows sees nothing and returns a
+  confident zero. I ran the useless check and believed it.
+* The symptom did not look like its cause. 288 failures in files unrelated to the change reads as a
+  broken fix; it was a broken *environment*, and the only way to tell was to stop guessing and read
+  the database's own deadlock report.
+* The corrupted state left no trace afterwards. By the time the run finished, `settings` and `users`
+  were both back to one row and the database looked healthy, which is precisely why the incident
+  needed the server log rather than an inspection of the tables.
+
+The run reported in I.3 was started only after confirming, by command line, that exactly **one**
+`vitest` process existed, and it was not interrupted. It came back **1137 passed, 0 failed**, with
+zero deadlocks in the server log.
+
+One further trap, recorded because it is the same class of mistake and it caught me twice in one
+session. Waiting for that run, the first `until` loop was written as
+`until ! powershell "...exit 1 if running"` — the negation inverts the sense of `until`, so the loop
+terminated immediately and printed *"vitest 45408 exited"* while the process was still running with
+rising CPU. Two process checks in one night reported a confident falsehood: `ps aux | grep vitest`,
+which cannot see Windows processes at all, and a wait loop whose condition was backwards. Both were
+caught only by asking `Get-Process` directly.
+
+The rule taken from this: **a suite result is not reportable until the process that produced it has
+been observed to exit**, by a check that can actually see the process. Every number in I.3 was read
+only after `Get-Process -Id 4772` returned nothing.
+
+A second, smaller confounder is recorded for completeness: a `tsx watch src/index.ts` dev server
+belonging to the operator has been running since 18 August. Every edit to `apps/server/src` restarts
+it. It connects to `mac_bennett`, never to `mac_bennett_test`, so it did not take part in the
+deadlocks, but it does compete for CPU on a 2-core-equivalent workstation and it is part of why the
+corrupted run took 1177 s against a healthy run's 862 s. It was left running: it is the operator's
+process, not this commissioning's to kill.
+
+---
+
+## Part J — Commissioning state after defect 9
+
+### J.1 What is proven, and at what strength
+
+The distinction the brief asks for, kept strictly. **Linux-proven** means observed on
+`161.33.80.88`; **locally proven** means observed against a real database and a real HTTP surface on
+a workstation; **third-party proven** means exercised against the real external service.
+
+| Item | State |
+|---|---|
+| Defect 9 root cause reproduced | **Locally proven** — reproduced before any fix, seven wordings, D.21.2 |
+| Defect 9 fix | **Locally proven** — 48 unit tests, 6 integration tests against a real database |
+| Defect 9 real acceptance path | **Locally proven** — criteria derived, frozen, run, artefacts written, review satisfied, D.21.9 |
+| Defect 9 against the production wording | **Locally proven** — the brief from run `2f2a5511…`, verbatim, derives 2 not 4 |
+| Defect 9 **re-derived on the VM** | **NOT PROVEN — needs deployment.** See J.4 |
+| Defect 8 non-regression | **Locally proven** — asserted on the real wording, not a convenient stand-in |
+| Prompt-injection structural gate | **Locally proven, intact** — same ten fields, D.21.11 |
+| Deliverable counting (Part D §20) | **Linux-proven** — run `2f2a5511…`, unchanged by this work |
+| Real external web retrieval | **Third-party proven** — Part C (continued), real pages, real refusals |
+| Real external **search** | **BLOCKED** — no provider credential |
+| Real Teams inbound/outbound | **BLOCKED** — no Azure Bot registration |
+
+### J.2 Azure Bot / Teams — `BLOCKED — HUMAN MICROSOFT CONFIGURATION REQUIRED`
+
+**Unchanged by this work, and still blocked.** Nothing in defect 9 touches the Teams plane. The
+eight human steps, the exact messaging endpoint
+`https://mac.pac-technologies.com.au/api/teams/messages`, the tenant id, the single-tenant login
+authority that is easy to miss, the app package build command and the authorisation model are set
+out in full above and are not restated here.
+
+Not faked, not simulated, and not partially claimed. The nine Teams proofs the brief lists — real
+inbound PAC message, real outbound reply, persistent Teams ↔ web conversation, discovery Q&A,
+explicit approval code, ambiguous-approval refusal, blocker notification, duplicate/retry behaviour,
+audit records — remain **entirely unproven against Microsoft** and will stay so until a human
+completes the registration. No paid Microsoft resource was created and no permission was broadened.
+
+### J.3 Brave Search — `BLOCKED — HUMAN FINANCIAL / PROVIDER ACTION REQUIRED`
+
+**Still blocked, and now specified in full.** The section above was extended during this pass with
+the four things it was missing and the brief requires: the exact account and API product, the
+charging and rate-limit model together with what Mac does at each boundary, a recommended
+conservative commissioning configuration, the exact file and mode the credential belongs in, which
+service needs it, and how to verify the isolation once it exists.
+
+Nothing was purchased, no account was created, and no key was requested.
+
+The nine external-research proofs the brief lists remain unproven **at the search half**. The
+*retrieval* half is separately third-party proven against real pages in Part C (continued) —
+including §16 injection resistance and §17 bad-source refusal — and that proof stands on its own.
+The last of the nine, *"an acceptance criterion requiring external research cannot pass without
+external evidence"*, is already proven deterministically: `external_sources_used = 0` against a
+minimum of 1 is `unmet`, observed on the real deployment in D.20.1.
+
+### J.4 The one new human gate this pass reached
+
+**`BLOCKED — DEPLOYMENT ACCESS REQUIRED`.**
+
+Defect 9's fix is proven against a real database, a real HTTP surface and the real production
+wording — but on a workstation. Re-deriving the criteria for brief `7599b3fb…` **on the VM**, which
+is what would make it Linux-proven, needs SSH to `161.33.80.88`, and no private key for that host
+exists in this session (`~/.ssh` holds `known_hosts` only).
+
+This is a smaller gate than the other two and it is a genuine one. The exact actions:
+
+1. Provide the SSH key for `ubuntu@161.33.80.88`, or run the four commands below on the VM.
+2. On the VM, in `/opt/mac-bennett`:
+   ```sh
+   sudo -u mac git fetch origin
+   sudo -u mac git checkout commissioning/phase-4-teams-web
+   sudo -u mac git pull --ff-only
+   sudo -u mac npm ci && sudo systemctl restart mac-control-plane
+   ```
+3. Re-run the full suites against `mac_bennett_test` on the VM, to convert I.3's numbers from
+   locally proven to Linux-proven.
+4. Re-derive the criteria for the brief from run `2f2a5511…` and confirm the AFTER table in D.21.8
+   — one `artefact_type` criterion, `engineering_brief min=2`, and no `markdown_document` criterion.
+
+**No migration is required.** Defect 9 adds no table and no column: `provenance` lives inside the
+existing `handoff_briefs.acceptance` JSON and `run_acceptance.criteria` JSON, and is optional, so
+criteria written before this change parse unchanged.
+
+### J.4a The live deployment, re-checked from off-host
+
+Requires no credential, so it was done rather than assumed. From a Windows workstation outside the
+VM's network, during this pass:
+
+| Check | Result |
+|---|---|
+| `GET https://mac.pac-technologies.com.au/api/health` | `200`, `{"ok":true,"service":"mac-bennett-control-plane"}` |
+| TLS certificate verification | passed (`ssl_verify_result = 0`) |
+| `POST /api/teams/messages`, no `Authorization` | `401 TEAMS_REJECTED` |
+| `POST /api/teams/messages`, `Bearer not.a.token` | `401 TEAMS_REJECTED`, *"Teams is not enabled in this deployment."* |
+
+Unchanged from A.4 and G.2. The ingress boundary has not drifted, TLS is still valid, and the Teams
+endpoint still refuses before it reads a token — the correct order, and still the reason the ten JWT
+rejection classes cannot yet be exercised against the live endpoint.
+
+What this check **cannot** establish is which commit the VM is running, which needs SSH. The
+deployed code is therefore still assumed to predate defect 9's fix, and J.4 stands.
+
+### J.5 Security — re-verified for what this pass changed
+
+The authority boundaries were not touched. What this pass added was checked against each one:
+
+| Boundary | State after defect 9 |
+|---|---|
+| Teams credentials do not reach worker sandboxes | Unchanged — `mac-worker.service` does not load `control-plane.env`; G.1 |
+| Brave credential does not reach Claude Code | Unchanged, and the verification method is now written down; see the Brave section |
+| Brave credential does not reach Teams/Forja clients | Unchanged — the settings DTO publishes the provider *name*, never the key |
+| Company context credentials remain isolated | Unchanged — not touched |
+| Web content cannot modify Mac authority | Unchanged — the deliverable reader never runs over retrieved content, only over the brief |
+| Web content cannot invoke arbitrary commands | Unchanged — no new tool, no new tool-result field |
+| Secrets do not enter evidence or audit logs | **Re-checked.** The new `deliverables.*` audit metadata carries phrases from the brief and nothing else — no environment value, no header, no credential. A brief is human-written and already reproduced verbatim in the agent prompt and the audit trail, so this adds no new class of content to the log |
+| `main` remains untouched | **Verified.** `main` is `107aa5b`, identical to `origin/main`; all work is on `commissioning/phase-4-teams-web` |
+
+### J.6 Phase 4 readiness
+
+**Phase 4 is not commissioned, and this pass does not move that verdict.** Two of the four
+completion criteria are met and two are not:
+
+* Defect 9 fixed and proven — **met**, at local strength; VM re-derivation outstanding (J.4).
+* Full regression green — **met**, at local strength.
+* Real Teams proven against the PAC tenant — **not met, blocked on a human**.
+* Real external search proven, and acceptance verified against real external evidence — **not met,
+  blocked on a human**.
+
+Phase 5 was not started. No unrelated feature was added, and the three findings previously recorded
+as deliberate technical debt — the Forja `structuredAcceptance` projection (D.6), the Inbox approval
+card not showing the brief's notes (D.7) and the URL-fragment source duplication (C.10) — were left
+exactly as their authors decided, rather than reopened under cover of this defect.
