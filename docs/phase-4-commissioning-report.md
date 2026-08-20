@@ -554,3 +554,91 @@ What a person must do, if Brave is chosen:
 
 Nothing has been purchased and no account has been created by this commissioning.
 
+---
+
+## Part E — Forja contract regression
+
+Driven by a test client (`scratchpad/forja_client.py`, 37 checks) against the **real deployment**
+over the real HTTP surface. Forja itself was not built, and nothing in this section implements any
+part of it.
+
+Two clients were issued through the admin plane: one with all four scopes, one with `read` only.
+Both API keys were written to `0600` files on the VM and neither appears in any transcript.
+
+### E.1 Result — 36 of 37, then 37 of 37
+
+The first run found a defect (E.2). After the fix, every check passes. The one remaining red in the
+final run was an error in the *client's* assertion, not in the contract — it looked for a field
+called `acceptance` where the contract publishes `structuredAcceptance`, which is present and
+populated. Confirmed separately by reading `GET /api/forja/briefs/{id}`:
+
+```
+structuredAcceptance = [
+  { id: "artefact-markdown_document", kind: "artefact_type",   description: "Produce a document" },
+  { id: "evidence-grounded",          kind: "evidence_class",  description: "Establish at least one finding a reader can check, with a source" }
+]
+```
+
+| Part E §21 requirement | Observed |
+|---|---|
+| authenticated API key works | `GET /api/forja/projects` → `200` with the key; `401` with none; `401` with a wrong key |
+| create/read conversation | conversation `46e44afc…` created **and Mac replied in the same response**; a second message accepted `201` |
+| create task | task `75bc36c7…` created `201`, `contractVersion 1` |
+| discovery state | `status=open` on creation, `brief_drafted` after an answer |
+| approval state | request `AP-QN45`, `authority=accept_brief`, visible in the pending list, decided → `approved` |
+| run state | `GET /tasks/{id}/runs` → `200` (0 runs; the brief was approved, not executed) |
+| artefact retrieval | `GET /artefacts?taskId=…` → `200` |
+| event cursor | 9 events after the pre-work cursor, `seq` 1–9 strictly increasing, and a mid-cursor resumed with the 4 later events and none repeated |
+| no access outside the key's scope | read-only key: `403` on write, `403` on events, `200` on read; and `403` on an approval decision, which needs the separate `approve` scope |
+
+Event types emitted by that one exchange: `task_created`, `discovery_started`, `question_required`,
+`brief_ready`, `approval_required`, `approval_decided`, `conversation_message`.
+
+Two further properties held against the real deployment:
+
+* **Forja is never an agent.** `GET /api/forja/agents` returned `Mac`, `Otto`,
+  `Project Document Controller`, `Sales Engineer` — and no Forja.
+* **Every write names a person.** `onBehalfOf: nobody-at-all@example.com` was refused `403`
+  rather than degraded to a system actor.
+* **The contract stays narrower than the internal DTO.** The task projection carries
+  `understandingConfidence` and does **not** carry `userInitialConfidence`.
+
+### E.2 Defect 2 — a task kind the contract invented and the database refused
+
+**Severity: high. Found against the real deployment; fixed on `commissioning/phase-4-teams-web`
+(`ff85fc7`).**
+
+`POST /api/forja/tasks` returned **`500 INTERNAL_ERROR`** for any `taskKind` outside the seven the
+schema permits. Observed in the journal:
+
+```
+DatabaseError: new row for relation "tasks" violates check constraint "tasks_task_kind_check"
+  at apps/server/src/services/tasks.ts:127
+  at apps/server/src/http/routes/forja.ts:285
+```
+
+**Root cause.** `forjaCreateTaskRequestSchema` published `taskKind` as `z.string().max(40)` and the
+route cast it `as never` into `createTask`. Every other plane in this system validates the same
+field with `taskKindSchema` — a `z.enum(TASK_KINDS)`. Forja alone defeated the type checker at
+exactly the boundary whose job is to refuse, so the value travelled to the `CHECK` constraint on
+`tasks.task_kind` and came back as an unhandled `DatabaseError`.
+
+Two things were wrong and only one of them is the status code:
+
+* a client reading the published contract was told any string up to forty characters would do, and
+  had no way to discover the real set except by provoking server errors;
+* a `500` from a published API says *Mac is broken* when the truth is *you sent something Mac never
+  accepted* — the more expensive of the two to diagnose from outside.
+
+**Why 1055 green tests said nothing about it.** The only test that had ever exercised the field —
+`forja.test.ts` — sends `taskKind: 'investigation'`, a valid value, in both places it appears. The
+free-string schema was never given a string the database would reject.
+
+**Fix:** `taskKind: taskKindSchema.optional()` in the protocol, and the `as never` removed from the
+route because there is no longer anything for it to silence. A `ZodError` already maps to
+`400 VALIDATION_FAILED`, so the correct status came with the correct schema.
+
+**Regression test** (`forja.test.ts`, "refuses a task kind that is not one of the permitted kinds,
+as a validation error") reproduces the production failure locally — asserted red at `500`, green at
+`400` after the fix. Full Forja suite: **21 passed**. Typecheck clean across all four packages.
+
