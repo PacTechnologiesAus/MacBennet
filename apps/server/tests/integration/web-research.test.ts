@@ -343,6 +343,20 @@ describe('prompt injection', () => {
      * a tool call or an approval — so there is nothing for a page to write into.
      */
     expect(Object.keys(outcome).sort()).toEqual(['argument', 'at', 'performed', 'refusalReason', 'sources', 'tool']);
+    /*
+     * This list is a GATE, not a description, and it did its job during
+     * commissioning: adding `retrievedChars` to fix defect 6 failed here, which
+     * is the point. Every field added to a source has to be argued for.
+     *
+     * `retrievedChars` is a count of characters the retrieval produced. It is a
+     * number, it is written by the fetcher rather than by the page, and its only
+     * consumer is the sentence that tells the model how much it was not shown.
+     * A page can influence it only by being longer or shorter, which carries no
+     * instruction, no command, no permission and no approval.
+     *
+     * If you are here because you added a field: say what a hostile page could
+     * do with it before you add it to this list.
+     */
     expect(Object.keys(outcome.sources[0]!).sort()).toEqual([
       'excerpt',
       'external',
@@ -351,9 +365,13 @@ describe('prompt injection', () => {
       'publishedAt',
       'ref',
       'retrievedAt',
+      'retrievedChars',
       'sourceClass',
       'url',
     ]);
+
+    // And the number a page cannot write into: a snippet is not a cut document.
+    expect(outcome.sources[0]!.retrievedChars).toBe(0);
   });
 
   it('does not let a page close its own quotation', async () => {
