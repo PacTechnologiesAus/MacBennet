@@ -1,0 +1,32 @@
+-- Phase 4 commissioning: separate "Mac may fetch this host" from
+-- "this host is authoritative vendor documentation".
+--
+-- ---------------------------------------------------------------------------
+-- WHY THIS COLUMN EXISTS
+--
+-- `allowed_research_domains` is an OPERATIONAL permission: an administrator
+-- deciding which hosts Mac is allowed to make an HTTPS request to. Commissioning
+-- found it being passed to `classifySource` as `vendorDomains`, which is an
+-- EPISTEMIC claim: that a host publishes authoritative vendor documentation.
+--
+-- Conflating them inverted the whole source-quality mechanism. Because
+-- `vendorDomains` is checked first and `official_vendor_docs` is a primary
+-- class, EVERY host an administrator allowed became a primary source by virtue
+-- of being fetchable — a forum, a blog, a deliberately wrong test fixture.
+-- Observed during commissioning: a page written to look like a low-quality
+-- forum thread was recorded as `official_vendor_docs` alongside PostgreSQL's
+-- own documentation, which is precisely the averaging that spec §18 exists to
+-- prevent.
+--
+-- The classifier's own comment says it best: "the whole value of the
+-- primary/secondary split is that it cannot be claimed by the source itself."
+-- It must not be claimable by an allowlist entry either.
+--
+-- Empty by default, and deliberately NOT backfilled from
+-- `allowed_research_domains`: backfilling would preserve the defect under a new
+-- name. An administrator who genuinely wants a supplier's documentation host
+-- treated as primary now has to say so.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE settings
+    ADD COLUMN vendor_documentation_domains jsonb NOT NULL DEFAULT '[]'::jsonb;

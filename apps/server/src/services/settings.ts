@@ -63,6 +63,7 @@ export interface Settings {
   maxResearchToolCalls: number;
   externalResearchEnabled: boolean;
   allowedResearchDomains: string[];
+  vendorDocumentationDomains: string[];
   // --- Phase 4 ---
   teamsEnabled: boolean;
   teamsAuthorisedUsers: string[];
@@ -127,6 +128,7 @@ export async function getSettings(handle: DbHandle = db): Promise<Settings> {
     maxResearchToolCalls: row.maxResearchToolCalls,
     externalResearchEnabled: row.externalResearchEnabled,
     allowedResearchDomains: asStringArray(row.allowedResearchDomains),
+    vendorDocumentationDomains: asStringArray(row.vendorDocumentationDomains),
     teamsEnabled: row.teamsEnabled,
     teamsAuthorisedUsers: asStringArray(row.teamsAuthorisedUsers),
     teamsNotifyBlockers: row.teamsNotifyBlockers,
@@ -196,6 +198,7 @@ export const toSettingsDto = (s: Settings): SettingsDto => ({
   maxResearchToolCalls: s.maxResearchToolCalls,
   externalResearchEnabled: s.externalResearchEnabled,
   allowedResearchDomains: s.allowedResearchDomains,
+  vendorDocumentationDomains: s.vendorDocumentationDomains,
   teamsEnabled: s.teamsEnabled,
   teamsAuthorisedUsers: s.teamsAuthorisedUsers,
   teamsNotifyBlockers: s.teamsNotifyBlockers,
@@ -353,6 +356,9 @@ export async function updateSettings(
         ...(patch.maxResearchToolCalls !== undefined && { maxResearchToolCalls: patch.maxResearchToolCalls }),
         ...(patch.externalResearchEnabled !== undefined && {
           externalResearchEnabled: patch.externalResearchEnabled,
+        }),
+        ...(patch.vendorDocumentationDomains !== undefined && {
+          vendorDocumentationDomains: patch.vendorDocumentationDomains,
         }),
         ...(patch.allowedResearchDomains !== undefined && {
           allowedResearchDomains: patch.allowedResearchDomains,

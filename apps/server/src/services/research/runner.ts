@@ -4,6 +4,8 @@ import {
   artefactContentSchema,
   deliverableOutlineSchema,
   frameUntrusted,
+  MODEL_EXCERPT_CHARS,
+  truncationNotice,
   emptyResearchState,
   handoffBriefContentSchema,
   RESEARCH_LIMITS,
@@ -35,7 +37,7 @@ import {
   type LoopDecision,
 } from '../../domain/research.js';
 import { record, SYSTEM_ACTOR, type Actor } from '../audit.js';
-import { getSettings } from '../settings.js';
+import { getSettings, type Settings } from '../settings.js';
 import { requireReasoningProvider } from '../model/provider.js';
 import { createArtefact } from '../artefacts.js';
 import { appendSystemLog } from '../logs.js';
@@ -313,28 +315,14 @@ export async function performResearchStep(
   let toolCallsMade = state.toolCallsMade;
 
   if (!finalising) {
-    const toolContext: ToolContext = {
+    const toolContext = buildToolContext({
       runId,
       taskId: context.taskId,
       projectId: context.projectId,
       companyContextRevisionId: context.companyContextRevisionId,
-      allowedResearchDomains: settings.allowedResearchDomains,
-      externalResearchEnabled: settings.externalResearchEnabled,
-      // Phase 4: resolved from settings HERE, so the model cannot name a
-      // provider, widen a result count, or ask to fetch outside the allowlist.
-      webSearchProvider: settings.webSearchProvider,
-      maxWebResults: settings.maxWebResultsPerSearch,
-      allowFetchFromSearchResults: settings.allowFetchFromSearchResults,
-      vendorDomains: settings.allowedResearchDomains,
-      /*
-       * Hosts this run has already seen in its OWN search results.
-       *
-       * Read once per step rather than per call, and read from the persisted
-       * record rather than from the in-memory state, so a run that reconnected
-       * mid-night does not silently lose the widening it had earned.
-       */
+      settings,
       searchResultHosts: settings.allowFetchFromSearchResults ? await searchResultHostsFor(runId) : [],
-    };
+    });
 
     for (const call of output.toolCalls.slice(0, RESEARCH_LIMITS.maxToolCallsPerStep)) {
       const refusal = refuseToolCall({
@@ -543,7 +531,10 @@ function buildPrompt(plan: ResearchPlan, state: ResearchState, decision: LoopDec
   } else {
     for (const source of state.sources.slice(0, 60)) {
       if (!source.external) {
-        lines.push(`  [${source.ref}] ${source.label}`, `    ${source.excerpt.slice(0, 1200)}`);
+        lines.push(
+          `  [${source.ref}] ${source.label}`,
+          `    ${source.excerpt.slice(0, MODEL_EXCERPT_CHARS)}${truncationNotice(source.excerpt.length, MODEL_EXCERPT_CHARS)}`,
+        );
         continue;
       }
 
@@ -567,7 +558,7 @@ function buildPrompt(plan: ResearchPlan, state: ResearchState, decision: LoopDec
         frameUntrusted({
           label: source.label,
           url: source.url ?? source.ref,
-          text: source.excerpt.slice(0, 1200),
+          text: source.excerpt.slice(0, MODEL_EXCERPT_CHARS) + truncationNotice(source.excerpt.length, MODEL_EXCERPT_CHARS),
         }),
       );
       if (source.injectionSuspected) {
@@ -1041,5 +1032,60 @@ export async function getGeneralRunState(runId: string, handle: DbHandle = db) {
     modelName: row.modelName,
     inputTokens: row.inputTokens,
     outputTokens: row.outputTokens,
+  };
+}
+
+
+/**
+ * Every tool-scope decision a step makes, resolved from settings in one place.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS A FUNCTION AND NOT AN OBJECT LITERAL INSIDE THE STEP
+ *
+ * It was a literal, and one line of it was wrong in a way no test could reach:
+ * `vendorDomains` was fed `allowedResearchDomains`, so a host an administrator
+ * permitted Mac to FETCH was classified as authoritative vendor DOCUMENTATION.
+ * The classifier had a test. The classifier was correct. The wiring had no
+ * seam, so nothing asserted on it, and the defect survived 1055 green tests
+ * until a real page came back labelled `official_vendor_docs` that was written
+ * to look like an anonymous forum post.
+ *
+ * Scope is resolved HERE and never taken from the model: it cannot name a
+ * provider, widen a result count, or ask to fetch outside the allowlist.
+ * ---------------------------------------------------------------------------
+ */
+export function buildToolContext(input: {
+  runId: string;
+  taskId: string;
+  projectId: string;
+  companyContextRevisionId: string | null;
+  settings: Settings;
+  searchResultHosts: readonly string[];
+}): ToolContext {
+  const { settings } = input;
+  return {
+    runId: input.runId,
+    taskId: input.taskId,
+    projectId: input.projectId,
+    companyContextRevisionId: input.companyContextRevisionId,
+    /** Permission to make a request. An operational decision. */
+    allowedResearchDomains: settings.allowedResearchDomains,
+    externalResearchEnabled: settings.externalResearchEnabled,
+    webSearchProvider: settings.webSearchProvider,
+    maxWebResults: settings.maxWebResultsPerSearch,
+    allowFetchFromSearchResults: settings.allowFetchFromSearchResults,
+    /**
+     * A claim that a host publishes authoritative documentation. An EPISTEMIC
+     * decision, and deliberately not the list above — see the note on the
+     * migration that separated them.
+     */
+    vendorDomains: settings.vendorDocumentationDomains,
+    /**
+     * Hosts this run has already seen in its OWN search results.
+     *
+     * Read from the persisted record rather than from memory, so a run that
+     * reconnected mid-night does not silently lose the widening it had earned.
+     */
+    searchResultHosts: input.searchResultHosts,
   };
 }

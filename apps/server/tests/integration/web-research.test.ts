@@ -12,8 +12,10 @@ import { asUser, createAndLogin, resetDatabase, startTestApp, type Session, type
 import { makeProject, makeTask } from '../helpers/fixtures.js';
 import { runTool, type ToolContext } from '../../src/services/research/tools.js';
 import { setWebSearchProvider } from '../../src/services/research/web.js';
+import { buildToolContext } from '../../src/services/research/runner.js';
+import { classifySource } from '../../src/domain/source-quality.js';
 import { persistToolSources, tallySources } from '../../src/services/research/sources.js';
-import { updateSettings } from '../../src/services/settings.js';
+import { getSettings, updateSettings } from '../../src/services/settings.js';
 
 /**
  * Controlled external web research (Phase 4 Part E).
@@ -388,6 +390,84 @@ describe('prompt injection', () => {
 });
 
 // ---------------------------------------------------------------------------
+
+/*
+ * Commissioning defect 5 — the wiring, not the classifier.
+ *
+ * `classifySource` was correct and had tests. The line that fed it was wrong
+ * and had no seam, so nothing asserted on it: `vendorDomains` was given
+ * `allowedResearchDomains`, which made "Mac may fetch this host" mean "this
+ * host publishes authoritative documentation". Because that check runs before
+ * every other rule and `official_vendor_docs` is a primary class, every
+ * allowlisted host became a primary source.
+ *
+ * Observed on the real deployment before the fix: five retrieved documents,
+ * five `official_vendor_docs` — PostgreSQL's own documentation and two PAC test
+ * fixtures, one of which says in its own text that its claim is deliberately
+ * wrong.
+ */
+describe('what an administrator allowed, and what they vouched for', () => {
+  it('does not turn the fetch allowlist into a claim of vendor authority', async () => {
+    await updateSettings(
+      {
+        externalResearchEnabled: true,
+        allowedResearchDomains: ['stackoverflow.com', 'some-host.example'],
+        vendorDocumentationDomains: [],
+      },
+      { type: 'user', id: admin.user.id, label: admin.user.name },
+    );
+
+    const built = buildToolContext({
+      runId: '00000000-0000-4000-8000-00000000000d',
+      taskId: '00000000-0000-4000-8000-00000000000b',
+      projectId: '00000000-0000-4000-8000-00000000000c',
+      companyContextRevisionId: null,
+      settings: await getSettings(),
+      searchResultHosts: [],
+    });
+
+    // Fetchable, yes.
+    expect(built.allowedResearchDomains).toContain('stackoverflow.com');
+    // Authoritative, no.
+    expect(built.vendorDomains).toEqual([]);
+    expect(classifySource('https://stackoverflow.com/questions/1', { vendorDomains: built.vendorDomains })).toBe(
+      'forum_community',
+    );
+    expect(classifySource('https://some-host.example/docs/x', { vendorDomains: built.vendorDomains })).toBe('unknown');
+  });
+
+  it('still lets an administrator vouch for a supplier, deliberately and separately', async () => {
+    await updateSettings(
+      {
+        externalResearchEnabled: true,
+        allowedResearchDomains: ['acme-drives.example'],
+        vendorDocumentationDomains: ['acme-drives.example'],
+      },
+      { type: 'user', id: admin.user.id, label: admin.user.name },
+    );
+
+    const built = buildToolContext({
+      runId: '00000000-0000-4000-8000-00000000000d',
+      taskId: '00000000-0000-4000-8000-00000000000b',
+      projectId: '00000000-0000-4000-8000-00000000000c',
+      companyContextRevisionId: null,
+      settings: await getSettings(),
+      searchResultHosts: [],
+    });
+
+    expect(built.vendorDomains).toEqual(['acme-drives.example']);
+    expect(classifySource('https://acme-drives.example/manual', { vendorDomains: built.vendorDomains })).toBe(
+      'official_vendor_docs',
+    );
+  });
+
+  it('defaults to vouching for nobody', async () => {
+    // Not backfilled from the fetch allowlist: that would preserve the defect
+    // under a new column name.
+    const settings = await getSettings();
+    expect(settings.vendorDocumentationDomains).toEqual([]);
+  });
+});
 
 describe('settings', () => {
   it('keeps external search off by default', async () => {

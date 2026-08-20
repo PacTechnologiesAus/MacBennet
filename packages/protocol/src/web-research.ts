@@ -360,5 +360,49 @@ export interface ResearchSourceDto {
 }
 
 export const MAX_SOURCE_EXCERPT_CHARS = 4_000;
+
+/**
+ * How much of a source's excerpt is put in front of the reasoning model.
+ *
+ * ---------------------------------------------------------------------------
+ * SMALLER THAN WHAT IS STORED, AND THAT HAS TO BE SAID OUT LOUD
+ *
+ * `MAX_SOURCE_EXCERPT_CHARS` is what `research_sources` keeps for a human
+ * auditing the run. This is what the model is shown per source per step, and it
+ * is smaller because sixty sources at four thousand characters is a prompt
+ * nobody can afford.
+ *
+ * Commissioning found the gap the expensive way. A run was asked for the
+ * default value of a PostgreSQL setting; the parameter sits at character 2,045
+ * of the retrieved page, inside the 4,000 characters recorded and outside the
+ * 1,200 shown. The model reported, correctly and repeatedly, that the excerpt
+ * did not reach the parameter — then spent its entire step budget re-fetching
+ * the same URL with different anchors, because nothing told it that a re-fetch
+ * returns the same window. The run delivered no artefacts and failed, while the
+ * answer sat in the database where a reviewer would find it and conclude the
+ * model had been careless.
+ *
+ * So the number is named, and `truncationNotice` states the cut where the model
+ * can see it. A bound is fine. A silent bound that the reader cannot distinguish
+ * from "the page does not say" is not.
+ * ---------------------------------------------------------------------------
+ */
+export const MODEL_EXCERPT_CHARS = 1_200;
+
+/**
+ * What to append when an excerpt was cut, or empty when it was not.
+ *
+ * States the two facts a model needs to stop guessing: that there is more, and
+ * that fetching the same URL again will not produce it.
+ */
+export function truncationNotice(fullLength: number, shown: number): string {
+  if (fullLength <= shown) return '';
+  return (
+    `
+[Excerpt truncated: ${shown} of ${fullLength} retrieved characters shown. ` +
+    'Re-fetching the same URL returns this same opening window, including with a different #fragment. ' +
+    'If what you need is not here, say that it was not in the portion you were shown rather than that the source does not contain it.]'
+  );
+}
 export const MAX_DOCUMENT_BYTES = 2_000_000;
 export const MAX_DOCUMENT_TEXT_CHARS = 200_000;

@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   frameUntrusted,
   isPrimarySource,
+  MAX_SOURCE_EXCERPT_CHARS,
+  MODEL_EXCERPT_CHARS,
+  truncationNotice,
   sanitiseUntrusted,
   SOURCE_CLASSES,
   UNTRUSTED_CLOSE,
@@ -66,6 +69,27 @@ describe('classifying where a source came from', () => {
   it('lets an administrator name PAC’s own suppliers', () => {
     expect(classifySource('https://acme-drives.example/manual', { vendorDomains: ['acme-drives.example'] })).toBe(
       'official_vendor_docs',
+    );
+  });
+
+  /*
+   * Commissioning defect 5.
+   *
+   * `runner.ts` passed `settings.allowedResearchDomains` as `vendorDomains`.
+   * That check runs before every other rule and `official_vendor_docs` is a
+   * primary class, so every host an administrator allowed Mac to FETCH became a
+   * primary SOURCE. Observed on the real deployment: a page written to look
+   * like an anonymous forum thread, whose own text says its claim is
+   * deliberately wrong, was recorded as `official_vendor_docs` beside
+   * PostgreSQL's own documentation.
+   */
+  it('does not let a host earn vendor authority merely by being on some other list', () => {
+    // A forum stays a forum even when an administrator allows Mac to fetch it.
+    expect(classifySource('https://stackoverflow.com/questions/1', { vendorDomains: [] })).toBe('forum_community');
+
+    // And an unremarkable host stays unknown, whatever else it may be permitted.
+    expect(classifySource('https://mac.pac-technologies.com.au/commissioning/x.html', { vendorDomains: [] })).toBe(
+      'unknown',
     );
   });
 
@@ -184,6 +208,46 @@ describe('detecting injection in retrieved content', () => {
 });
 
 // ---------------------------------------------------------------------------
+
+/*
+ * Commissioning defect 6.
+ *
+ * `research_sources` keeps 4,000 characters of a source; the model was shown
+ * `slice(0, 1200)` with nothing saying so. A run asked for the default value of
+ * a PostgreSQL setting found the parameter at character 2,045 — recorded, never
+ * shown — reported that the excerpt "did not reach" it, spent its whole step
+ * budget re-fetching the same URL with different anchors, and failed with no
+ * artefacts while the answer sat in the database.
+ */
+describe('telling the model what it was not shown', () => {
+  it('says nothing when nothing was cut', () => {
+    expect(truncationNotice(900, MODEL_EXCERPT_CHARS)).toBe('');
+    expect(truncationNotice(MODEL_EXCERPT_CHARS, MODEL_EXCERPT_CHARS)).toBe('');
+  });
+
+  it('states both numbers when an excerpt was cut', () => {
+    const notice = truncationNotice(4000, MODEL_EXCERPT_CHARS);
+    expect(notice).toContain('1200');
+    expect(notice).toContain('4000');
+  });
+
+  it('says that re-fetching will not help, which is the part that cost a run', () => {
+    const notice = truncationNotice(4000, MODEL_EXCERPT_CHARS);
+    expect(notice).toMatch(/same opening window/i);
+    expect(notice).toMatch(/fragment/i);
+  });
+
+  it('distinguishes "not in what you were shown" from "not in the source"', () => {
+    expect(truncationNotice(4000, MODEL_EXCERPT_CHARS)).toMatch(/rather than that the source does not contain it/i);
+  });
+
+  it('shows the model less than is recorded, deliberately and knowably', () => {
+    // If these two ever become equal the notice becomes dead code, and if the
+    // model bound ever exceeds the stored one the record is no longer the
+    // fuller thing. Both are worth a test rather than a comment.
+    expect(MODEL_EXCERPT_CHARS).toBeLessThan(MAX_SOURCE_EXCERPT_CHARS);
+  });
+});
 
 describe('framing untrusted content', () => {
   it('strips the delimiter so a page cannot close its own quotation', () => {

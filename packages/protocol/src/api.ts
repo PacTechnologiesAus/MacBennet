@@ -479,6 +479,7 @@ export const updateSettingsRequestSchema = z
     maxResearchToolCalls: z.number().int().min(1).max(200).optional(),
     externalResearchEnabled: z.boolean().optional(),
     allowedResearchDomains: z.array(z.string().min(1).max(253)).max(100).optional(),
+    vendorDocumentationDomains: z.array(z.string().min(1).max(253)).max(100).optional(),
 
     // --- Sprint 3 ---
     /** When true, a coding run is not dispatched to a worker without a sandbox. */
@@ -580,6 +581,7 @@ export interface SettingsDto {
   maxResearchToolCalls: number;
   externalResearchEnabled: boolean;
   allowedResearchDomains: string[];
+  vendorDocumentationDomains: string[];
   // --- Phase 4 ---
   teamsEnabled: boolean;
   teamsAuthorisedUsers: string[];

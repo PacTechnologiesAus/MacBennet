@@ -241,6 +241,15 @@ export const settings = pgTable('settings', {
    */
   externalResearchEnabled: boolean('external_research_enabled').notNull().default(false),
   allowedResearchDomains: jsonb('allowed_research_domains').notNull().default(sql`'[]'::jsonb`),
+  /**
+   * Hosts an administrator asserts publish authoritative vendor documentation.
+   *
+   * Deliberately separate from `allowedResearchDomains`. One is permission to
+   * make a request; the other is a claim about authority, and commissioning
+   * found the first being used as the second — which made every fetchable host
+   * a primary source.
+   */
+  vendorDocumentationDomains: jsonb('vendor_documentation_domains').notNull().default(sql`'[]'::jsonb`),
 
   // --- Phase 4 ---
   /** Off, like every integration that reaches outside this process. */
