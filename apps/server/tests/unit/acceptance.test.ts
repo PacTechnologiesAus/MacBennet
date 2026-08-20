@@ -106,6 +106,41 @@ describe('reading what was asked for', () => {
     expect(requestsPrimarySources('check the vendor documentation for the supported firmware')).toBe(true);
     expect(requestsPrimarySources('have a think about it')).toBe(false);
   });
+
+  /*
+   * Commissioning defect 8.
+   *
+   * A brief saying "no external research of any kind" derived the criterion
+   * "Retrieve at least one external source, because the brief asks for research
+   * outside PAC". The cue matched the phrase inside its own negation, and a run
+   * that obeyed its brief was measured short for it.
+   *
+   * That is the mirror of defect 3 and it is worse in one way: a criterion that
+   * fails a compliant run is the thing the derivation's own rules say must not
+   * exist, because it teaches everybody to ignore gaps.
+   */
+  it('does not read a refusal of external research as a request for it', () => {
+    expect(requestsExternalResearch('Use only the PAC company context — no external research of any kind.')).toBe(
+      false,
+    );
+    expect(requestsExternalResearch('No external research, no web search, no document fetch.')).toBe(false);
+    expect(requestsExternalResearch('Do not use external sources.')).toBe(false);
+    expect(requestsExternalResearch('This must be done without external research.')).toBe(false);
+    expect(requestsExternalResearch('Never search the web for this.')).toBe(false);
+  });
+
+  it('still recognises a genuine request that happens to contain a negation elsewhere', () => {
+    // The negation has to be attached to the cue, not merely present in the text.
+    expect(
+      requestsExternalResearch('Do not assume monday.com is being replaced. Research external vendor documentation.'),
+    ).toBe(true);
+    expect(requestsExternalResearch('Check the vendor documentation. Do not implement anything.')).toBe(true);
+  });
+
+  it('does not read a refusal of primary sources as a request for one', () => {
+    expect(requestsPrimarySources('No vendor documentation is available for this.')).toBe(false);
+    expect(requestsPrimarySources('check the vendor documentation for the supported firmware')).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

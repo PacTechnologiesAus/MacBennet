@@ -197,8 +197,61 @@ const EXTERNAL_RESEARCH_CUES = [
   /\bthird[- ]party (documentation|sources?)\b/i,
 ];
 
+/**
+ * Words that turn a cue into its own refusal.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS
+ *
+ * A brief reading "Use only the PAC company context — no external research of
+ * any kind" derived the criterion "Retrieve at least one external source,
+ * because the brief asks for research outside PAC". The cue matched the phrase
+ * inside its own negation, and a run that obeyed its brief was then measured
+ * short for obeying it.
+ *
+ * That is the exact thing rule 2 of the derivation forbids: a criterion the run
+ * could not meet — here, could not meet WITHOUT DISOBEYING — teaches everybody
+ * to ignore gaps.
+ * ---------------------------------------------------------------------------
+ */
+const NEGATORS = ['no', 'not', 'never', 'without', 'avoid', 'exclude', 'excluding', 'skip', 'neither', 'nor'];
+
+/**
+ * Whether a cue is negated where it appears.
+ *
+ * Looks only at the words immediately before the match, so a negation attached
+ * to something else in the same text does not suppress a genuine request:
+ * "Do not assume monday.com is being replaced. Research external vendor
+ * documentation." still asks for research.
+ *
+ * Deliberately shallow. Reading negation properly is a parsing problem, and the
+ * regex cue layer is already known to be approximate — see the technical debt
+ * on the intent classifier. What this catches is the common, direct form, which
+ * is the form that actually appeared.
+ */
+function negatedAt(text: string, index: number): boolean {
+  // Six words is enough for "no", "do not", "must not be done without".
+  const preceding = text.slice(Math.max(0, index - 40), index).toLowerCase();
+  const words = preceding.split(/[^a-z']+/).filter(Boolean).slice(-6);
+  return words.some((word) => NEGATORS.includes(word));
+}
+
+/** True when a cue matches somewhere it is not being refused. */
+function matchesUnnegated(text: string, patterns: readonly RegExp[]): boolean {
+  const haystack = text ?? '';
+  return patterns.some((pattern) => {
+    // `g` so every occurrence is considered: one negated mention must not hide
+    // a genuine request elsewhere in the same brief.
+    const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+    for (const match of haystack.matchAll(global)) {
+      if (match.index !== undefined && !negatedAt(haystack, match.index)) return true;
+    }
+    return false;
+  });
+}
+
 export const requestsExternalResearch = (text: string): boolean =>
-  EXTERNAL_RESEARCH_CUES.some((pattern) => pattern.test(text ?? ''));
+  matchesUnnegated(text, EXTERNAL_RESEARCH_CUES);
 
 /** Text asking for a conclusion that should rest on a primary source. */
 const PRIMARY_SOURCE_CUES = [
@@ -209,7 +262,7 @@ const PRIMARY_SOURCE_CUES = [
 ];
 
 export const requestsPrimarySources = (text: string): boolean =>
-  PRIMARY_SOURCE_CUES.some((pattern) => pattern.test(text ?? ''));
+  matchesUnnegated(text, PRIMARY_SOURCE_CUES);
 
 // ---------------------------------------------------------------------------
 // Deriving criteria
