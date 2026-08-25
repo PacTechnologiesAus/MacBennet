@@ -1869,6 +1869,16 @@ clarifying questions: []
 No question is asked, because this wording is not ambiguous. The phrase saying what *not* to
 produce — "not one consolidated report" — produced nothing.
 
+> **CORRECTION, recorded 2026-08-25 — see Part K.** The wording quoted throughout §21 as the
+> production wording is a **paraphrase**. No brief in the database contains the sentence "Two
+> distinct documents, not one consolidated report". The two briefs behind run `2f2a5511…` are
+> `47ff5d0f…` and `7599b3fb…`, and the refusal they actually carry is written on the *other* side of
+> its noun: *"A single combined document covering both is explicitly NOT what is wanted."* The AFTER
+> table above is what the fixed derivation produced **for the paraphrase**. Against the real wording
+> it did not hold, and the gap between those two facts is commissioning defect 10. The table is left
+> here as written because what it records — that a tidy case passed — is exactly the thing worth
+> knowing.
+
 ### D.21.9 The acceptance path, end to end
 
 `tests/integration/acceptance.test.ts` runs the whole path against the real database: a task whose
@@ -2166,6 +2176,12 @@ minimum of 1 is `unmet`, observed on the real deployment in D.20.1.
 
 ### J.4 The one new human gate this pass reached
 
+> **SUPERSEDED 2026-08-21 — see Part K.** This gate was cleared. `/opt/mac-bennett` was
+> fast-forwarded to `e8a804e` on branch `commissioning/phase-4-teams-web`, dependencies installed and
+> the control plane restarted; the suites were re-run on the VM. Re-verified independently on
+> 2026-08-25: the VM reports `e8a804e`, that branch, and `mac-control-plane` `active`. Step 4 of the
+> four below — the re-derivation — did **not** confirm D.21.8, and that is defect 10.
+
 **`BLOCKED — DEPLOYMENT ACCESS REQUIRED`.**
 
 Defect 9's fix is proven against a real database, a real HTTP surface and the real production
@@ -2241,3 +2257,235 @@ Phase 5 was not started. No unrelated feature was added, and the three findings 
 as deliberate technical debt — the Forja `structuredAcceptance` projection (D.6), the Inbox approval
 card not showing the brief's notes (D.7) and the URL-fragment source duplication (C.10) — were left
 exactly as their authors decided, rather than reopened under cover of this defect.
+
+---
+
+## Part K — The third pass: the deployment, and defect 10
+
+**Dates:** deployment and VM suites 2026-08-21; defect 10 found the same day, fixed 2026-08-25.
+
+### K.1 The deployment gate, cleared
+
+J.4 recorded `BLOCKED — DEPLOYMENT ACCESS REQUIRED`. It is no longer blocked.
+
+| Step | Result |
+|---|---|
+| `/opt/mac-bennett` fast-forwarded | `4063ace` → `e8a804e`, branch `commissioning/phase-4-teams-web` |
+| `npm ci` | clean |
+| `mac-control-plane` restarted | `active`; `/api/health` `200`; `POST /api/teams/messages` `401 TEAMS_REJECTED` |
+
+Re-verified independently on 2026-08-25 over SSH: the VM reports `e8a804e`, that branch, and the
+unit `active`.
+
+**This retires the standing baseline fact from A.1.** The deployment is no longer running the
+Phase 4 *base* branch. Conversations, the Teams plane, approval requests, Forja, `research_sources`
+and acceptance verification exist in the running process for the first time.
+
+### K.2 The suites, on the VM
+
+Recorded by the pass that performed the deployment on 2026-08-21, against `mac_bennett_test`:
+
+| Suite | Result |
+|---|---|
+| Server | **1137 passed**, 61 skipped, **0 failed** (1076 s) |
+| Worker | **233 passed**, 3 skipped |
+| Typecheck | clean, all four packages |
+| Web build | clean — required `NODE_OPTIONS=--max-old-space-size=800`; the VM has 954 MiB of RAM |
+| Deadlocks | **0**, confirmed against the PostgreSQL log |
+
+Identical to the local numbers in I.3. Everything defect 9 touched is therefore **Linux-proven** as
+of that date. Defect 10's fix is **not** — see K.8.
+
+### K.3 The re-derivation that did not confirm D.21.8
+
+Step 4 of J.4 was to re-derive the criteria for the brief from run `2f2a5511…` and confirm the
+AFTER table. It did not match. Both production briefs derived a `markdown_document` criterion that
+D.21.8 says should not exist.
+
+The reason sits underneath the mismatch and matters more than it does. **§21 was proven against a
+paraphrase.** No brief in the database contains the sentence "Two distinct documents, not one
+consolidated report". Read back verbatim, the two briefs are:
+
+`47ff5d0f-2608-4f1b-811f-ff1603a3c49c` — acceptance criteria:
+
+```
+Two separate brief documents exist, one for the PAC Project Registry and one for the
+  Project Document Controller.
+Each brief contains a section titled 'Purpose'.
+Each brief contains a section titled 'Assumptions and unknowns'.
+No content or research from outside the PAC company context is used.
+No single document merges both systems.
+```
+
+and, in `proposedScope` and `userObjective` both:
+
+```
+Write TWO separate engineering briefs about PAC's own internal tooling, using only the PAC
+company context — no external research of any kind. Brief 1: the PAC Project Registry.
+Brief 2: the Project Document Controller. A single combined document covering both is
+explicitly NOT what is wanted. Each brief needs a section 'Purpose' and a section
+'Assumptions and unknowns'.
+```
+
+`7599b3fb-f4a7-4dc3-9465-b5e410139e85` — the same scope without the refusal sentence, and
+acceptance criteria beginning:
+
+```
+Two separate documents exist, each dedicated to one system
+Each document contains a 'Purpose' section
+Each document contains an 'Assumptions and unknowns' section
+```
+
+The refusal is real, and it is written **after** the noun it refuses. The paraphrase moved it in
+front, which is the one position the derivation could see.
+
+### K.4 Defect 10 — three faults
+
+Named as one defect because they share a cause: a rule was written for the half of the language the
+example happened to show.
+
+**1. The negation test is one-sided.** `negatedDeliverable` reads three words backward from the
+noun. "A single combined document covering both is explicitly NOT what is wanted" therefore required
+a combined document — a sentence declining a deliverable creating it, which is defect 8's trap one
+layer down and defect 9's failure direction.
+
+**2. The backward pass inspected one generic per specific.** It walked specifics and looked at the
+single generic immediately preceding each. Brief `7599b3fb…` walks straight past that: two "Each
+document" mentions sit between the mention carrying the count and the scope naming its kind, so the
+mention that mattered was three candidates back. Nothing folded, and defect 9's four-artefact false
+gap returned in full.
+
+**3. One quantity was measured two ways.** "How many were already asked for" was the sum over the
+nearest sentence holding a specific; aggregation derived the requirement as MAX across sentences and
+SUM within one. For `7599b3fb…` the nearest sentence was "Each brief needs a section 'Purpose'",
+giving one, so the closing "Two distinct documents are created" matched nothing and became two more
+required artefacts.
+
+**Fault 3 was invisible to every wording written by hand.** It needs a brief whose fields mention
+the same deliverable four times with a section sentence last, which is what a real brief looks like
+and what an example never does. That is the same lesson §21.6 recorded, arriving a second time
+because the first fix was measured against a tidied quotation.
+
+### K.5 The fix
+
+`apps/server/src/domain/deliverables.ts` only. No migration, no protocol change, no new
+tool-result field, and the prompt-injection structural test is untouched.
+
+* **`refusedAfterDeliverable`** — the refusal idiom following a noun, bounded to the noun's own
+  clause. Anchored on the *wanting* word (`wanted`, `required`, `needed`, `necessary`, `expected`,
+  `acceptable`, `sought`) and **not** on the negator. A bare trailing negation would have dropped
+  "a report that is not longer than five pages" and "the report is not final until reviewed", both
+  of which genuinely ask for a report. Dropping a requested deliverable is the Part F failure and
+  the worse of the two directions, so anything less certain keeps the deliverable.
+* **A mirror backward pass** over every generic rather than one per specific, carrying the forward
+  pass's own restatement branches and no weaker evidence: a generic that points back and carries no
+  count of its own, or that points back or enumerates while carrying the same count as the specific
+  beside it. A generic whose count differs, or which introduces itself with only its own article,
+  still survives untouched.
+* **`aggregateCount`** — one definition of how many artefacts a set of mentions requires, used by
+  both aggregation and the restatement tests.
+* **`each` joins `BACK_REFERENCE_WORDS`** — it distributes over a set already introduced, which is
+  what every other word there has in common.
+
+### K.6 Before and after, on both briefs, verbatim
+
+```
+BEFORE (47ff5d0f)                       BEFORE (7599b3fb)
+artefact_type  engineering_brief min=2  artefact_type  markdown_document min=2
+artefact_type  markdown_document min=2  artefact_type  engineering_brief min=2
+```
+
+```
+AFTER (both)
+artefact_type  engineering_brief min=2
+named_section  Assumptions
+evidence_class grounded min=1
+external_sources derived?  false          (defect 8, still not reopened)
+clarifying questions: []
+```
+
+Required artefacts: **4 → 2**, on the wording the database holds rather than on a quotation of it.
+
+### K.7 Tests
+
+19 tests added to `tests/unit/deliverable-normalisation.test.ts`, written before the fix and watched
+to fail for their stated reasons. Both production briefs are quoted in full and untidied — the
+capitalised `TWO`, the em dash, the colons after "Brief 1", the proper name "Project Document
+Controller" with a container noun inside it, and both refusals as typed.
+
+| Suite | Result, this workstation, 2026-08-25 |
+|---|---|
+| Server | **1156 passed**, 61 skipped, **0 failed** (577 s) |
+| Worker | **233 passed**, 3 skipped |
+| Typecheck | clean, all four packages |
+| Web build | clean |
+| Deadlocks | **0**, confirmed against the PostgreSQL log |
+
+Baseline was 1137 / 61. The whole of the difference is the 19 new tests. Suites were launched
+detached, confirmed a single instance by command line, and observed to exit, per the rules I.4
+produced.
+
+### K.8 What this pass proved, and at what strength
+
+| Item | State |
+|---|---|
+| Deployment of the Phase 4 branch to the VM | **Linux-proven**, K.1 |
+| Everything defect 9 touched | **Linux-proven**, K.2 |
+| Defect 10 root cause reproduced | **Locally proven** — three faults, each reproduced before any fix |
+| Defect 10 fix | **Locally proven** — 19 tests, full suites green |
+| Defect 10 against the verbatim production wording | **Locally proven** — both briefs, K.6 |
+| Defect 10 **re-derived on the VM** | **NOT PROVEN — the branch has not been redeployed since the fix** |
+| Real external search | **BLOCKED** — unchanged, J.3 |
+| Real Teams inbound/outbound | **BLOCKED** — unchanged, J.2 |
+
+### K.9 Two defects found while proving this, and deliberately not fixed
+
+Recorded rather than folded into defect 10, because a commissioning fix that quietly repairs
+whatever it passes stops being reviewable.
+
+**Defect 11 — a section the brief names in so many words reaches no acceptance criterion.**
+`SECTION_PHRASES` in `apps/server/src/domain/acceptance.ts` is a fixed vocabulary: Build order,
+Cost, Risks, Options, Timeline, Next steps, Assumptions, Effort, Dependencies. Nothing reads a
+section the brief *names*. Both briefs above ask, in so many words, for a `'Purpose'` section; the
+derived criteria contain `named_section Assumptions` and nothing else — and that one is present only
+because the word "assumptions" happens to be in the list. A run that omits the Purpose section
+entirely is accepted as complete and the requester has no gap to read. **This is a requirement
+dropped rather than invented — the Part F direction, and the worse one.** Verified as pre-existing:
+it reproduces identically with defect 10's fix stashed. Also open within it: the derived section is
+`Assumptions` while the brief asked for `Assumptions and unknowns`, so whether heading matching is
+exact, prefix or fuzzy needs deciding in the same change.
+
+**`.env.example` produces a control plane that will not boot.** `MAC_COMPANY_CONTEXT_TIMEOUT_MS`,
+`MAC_FORJA_WEBHOOK_TIMEOUT_MS` and `MAC_SEARCH_TIMEOUT_MS` are set to an empty value. All three are
+`z.coerce.number().int().min(1000)`, and an empty string is not absent: it coerces to `0` and fails
+the minimum. Following the documented setup — `cp .env.example .env` — therefore yields
+`Invalid environment configuration` at `config.ts:178`, under the hint *"Did you copy .env.example
+to .env?"*, which is precisely what the reader just did. The schema already carries correct
+defaults, so the keys only need to be absent.
+
+### K.10 Security — re-verified for what this pass changed
+
+No authority boundary was touched. The change is confined to one domain module that reads the brief
+and derives counts from it.
+
+| Boundary | State after defect 10 |
+|---|---|
+| Teams credentials do not reach worker sandboxes | Unchanged — not touched |
+| Brave credential does not reach Claude Code, Teams or Forja clients | Unchanged — not touched |
+| Web content cannot modify Mac authority | Unchanged — the deliverable reader runs over the brief, never over retrieved content |
+| Web content cannot invoke arbitrary commands | Unchanged — no new tool, no new tool-result field |
+| Secrets do not enter evidence or audit logs | Unchanged — `deliverables.*` audit metadata still carries brief phrases only |
+| Prompt-injection structural gate | **Intact** — same ten fields, `git diff` on `web-research.test.ts` empty |
+| `main` remains untouched | **Verified** — `107aa5b`, identical to `origin/main`; all work on `commissioning/phase-4-teams-web` |
+
+### K.11 Phase 4 readiness after defect 10
+
+Unchanged in verdict, and one criterion moved forward.
+
+* Defect 9 fixed and proven — **met**, and now **Linux-proven** (K.2).
+* Defect 10 fixed and proven — **met at local strength**; VM re-derivation outstanding.
+* Full regression green — **met**, Linux-proven for defect 9's state, locally proven for defect 10's.
+* Real Teams proven against the PAC tenant — **not met, blocked on a human**.
+* Real external search proven — **not met, blocked on a human**.
+
+Phase 5 was not started.

@@ -1,25 +1,28 @@
 # Phase 4 Commissioning — Handover
 
 **For:** whoever picks this up next, human or agent
-**Branch:** `commissioning/phase-4-teams-web`, pushed, at `49ff9f6`
+**Branch:** `commissioning/phase-4-teams-web`, at `bb0d291`
 **Default branch:** `main` **untouched**, still at `107aa5b`
-**Written:** 2026-08-21, at a human-only gate. Nothing here is waiting on more code.
+**Deployed on the VM:** `e8a804e` — one commit behind this branch, see §4
+**Written:** 2026-08-25, at a human-only gate. Nothing here is waiting on more code except §4.
 
 Read `docs/phase-4-commissioning-report.md` for the findings in full — it is the evidence record and
-it governs. This document is the operational picture: what is done, what is blocked, what to do
-next, and the two things that cost me most of a night so they cost you none.
+it governs. Part K is the most recent pass. This document is the operational picture: what is done,
+what is blocked, what to do next, and the things that cost previous passes hours so they cost you
+none.
 
 ---
 
 ## 1. Where Phase 4 actually is
 
 **Not commissioned.** Two of the four completion criteria are met and two are not, and the gap in
-both cases is a human action in someone else's system, not work left undone here.
+both remaining cases is a human action in someone else's system, not work left undone here.
 
 | Completion criterion | State |
 |---|---|
-| Defect 9 fixed and proven | **Met**, at local strength. VM re-derivation outstanding — §4 |
-| Full regression green | **Met**, at local strength — §2 |
+| Defect 9 fixed and proven | **Met, and now Linux-proven** — K.2 |
+| Defect 10 fixed and proven | **Met at local strength.** VM re-derivation outstanding — §4 |
+| Full regression green | **Met** — Linux-proven for defect 9's state, locally proven for defect 10's |
 | Real Teams proven against the PAC tenant | **Not met — blocked on a human** — §5 |
 | Real external search proven, acceptance verified against real external evidence | **Not met — blocked on a human** — §6 |
 
@@ -30,82 +33,83 @@ Keep the four strengths apart, because the report does and the distinction is th
 * **Linux-proven** — observed on `161.33.80.88`;
 * **third-party proven** — exercised against the real external service.
 
-Everything Defect 9 touches is **locally tested** and not yet Linux-proven, for the single reason in
-§4. Real web *retrieval* is already third-party proven (Part C continued); real web *search* is not.
+Real web *retrieval* is third-party proven (Part C continued); real web *search* is not.
 
 **Phase 5 was not started.** Do not start it.
 
 ---
 
-## 2. What was done this pass
+## 2. What has happened since the last handover
 
-**Defect 9 — acceptance artefact double counting — is fixed.** Part D §21 of the report has the
-whole account. In one paragraph: a brief asking for *"two separate engineering briefs and two
-distinct documents"* derived `engineering_brief × 2` **and** `markdown_document × 2`, so a run that
-produced exactly the two briefs wanted was reported with a gap. The old pass had no concept of two
-mentions referring to the same thing — it turned every noun it recognised into an independent
-requirement and summed them.
+### 2.1 The deployment gate is cleared
 
-Extraction and normalisation are now separate stages in `apps/server/src/domain/deliverables.ts`.
-Extraction finds candidates positionally, with the words and the source span that produced them, and
-decides nothing. Normalisation decides what each one means relative to the others — `additive`,
-`alias`, `explanatory`, `contains`, `ambiguous` — and only `additive` reaches a criterion. Where the
-wording genuinely does not say, **nothing is guessed**: no criterion is derived and a question goes
-onto the brief during discovery, while a person can still change the answer.
+The previous handover's §4 said `BLOCKED — DEPLOYMENT ACCESS REQUIRED`. It no longer is. SSH to
+`ubuntu@161.33.80.88` works from the current session. On 2026-08-21 `/opt/mac-bennett` was
+fast-forwarded `4063ace → e8a804e`, `npm ci` run and `mac-control-plane` restarted, and the suites
+were re-run on the VM: server **1137 passed / 61 skipped / 0 failed** (1076 s), worker **233 / 3
+skipped**, typecheck and web build clean, **0 deadlocks**.
 
-On the real production wording, required artefacts went **4 → 2**.
+**This retires the standing baseline fact from Part A.** The deployment is no longer running the
+Phase 4 *base* branch. Conversations, the Teams plane, approval requests, Forja and acceptance
+verification are in the running process for the first time — which is what makes §5 actionable
+rather than theoretical.
 
-`ARTEFACT_TYPES` is unchanged. Deliverable types are a separate, finer vocabulary, which is what let
-specific-over-generic be stated without touching the storage model.
+The web build on the VM needs `NODE_OPTIONS=--max-old-space-size=800`. The VM has 954 MiB of RAM.
 
-### Final suite state, all on this workstation
+### 2.2 Defect 10 — found by that deployment, fixed on 2026-08-25
+
+Re-deriving the criteria on the VM did **not** confirm the D.21.8 AFTER table. Part K has the whole
+account. In one paragraph: **defect 9 was proven against a paraphrase.** No brief in the database
+contains the sentence the report quoted, "Two distinct documents, not one consolidated report". The
+real briefs put the refusal on the *other* side of its noun — *"A single combined document covering
+both is explicitly NOT what is wanted"* — which is the one position the derivation could not see.
+
+Three faults, all in `apps/server/src/domain/deliverables.ts`:
+
+1. `negatedDeliverable` reads three words **backward**, so a refusal written after the noun was
+   invisible and a sentence declining a combined document required one.
+2. The backward pass inspected only the generic immediately preceding each specific, and brief
+   `7599b3fb…` walks straight past it.
+3. "How many were already asked for" was measured two ways — the nearest sentence holding a
+   specific, and what aggregation actually derives. For `7599b3fb…` those disagreed, and the gap
+   became two more required artefacts.
+
+Fault 3 was invisible to every wording written by hand. It needs a brief whose fields mention the
+same deliverable four times with a section sentence last — which is what a real brief looks like and
+what an example never does.
+
+Both production briefs now derive `engineering_brief min=2` and no `markdown_document` criterion,
+**on the wording the database holds**. Both are quoted verbatim and untidied in
+`tests/unit/deliverable-normalisation.test.ts`.
+
+### 2.3 Suite state, on this workstation
 
 | Suite | Result |
 |---|---|
-| Server | **1137 passed**, 61 skipped, **0 failed** (830 s) |
+| Server | **1156 passed**, 61 skipped, **0 failed** (577 s) |
 | Worker | **233 passed**, 3 skipped |
 | Typecheck | clean, all four packages |
 | Web build | clean |
 | Deadlocks during the run | **0**, confirmed against the PostgreSQL server log |
 
-Baseline was 1075 / 62 skipped on the VM. Defect 9 added **54 tests** (48 unit, 6 integration) →
-1129. The remaining **+8** is environmental — the local `.env` enables opt-in tests the VM leaves
-skipped, which is also why skipped falls 62 → 61 — and it is attributable rather than assumed: an
-earlier run in the same session carrying a *different* number of new tests showed the same +8.
+Baseline was 1137 / 61. The whole of the difference is the 19 new tests.
 
-### Files changed
-
-```
-apps/server/src/domain/deliverables.ts                 NEW  — extraction + normalisation
-apps/server/src/domain/acceptance.ts                        — derivation, clarifications, notes
-apps/server/src/services/acceptance.ts                      — audit provenance, approval notes
-apps/server/src/services/briefs.ts                          — ambiguity → openQuestions
-packages/protocol/src/acceptance.ts                         — AcceptanceCriterion.provenance (optional)
-apps/server/tests/unit/deliverable-normalisation.test.ts NEW — 48 tests
-apps/server/tests/integration/acceptance.test.ts            — 6 defect-9 tests
-docs/phase-4-commissioning-report.md                        — Part D §21, I.3, I.4, Part J
-```
-
-**No migration.** `provenance` is optional and lives inside the existing `handoff_briefs.acceptance`
-and `run_acceptance.criteria` `jsonb` columns, so criteria written before this change parse
-unchanged.
-
-**The prompt-injection structural test is untouched** — same ten fields, `git diff` on
-`web-research.test.ts` is empty. Defect 9 adds no tool-result field, and `provenance` never reaches
-the reasoning model: the semantic prompt is built from `id` and `statement ?? description` only.
+**No migration.** No protocol change, no new tool-result field, and the prompt-injection structural
+test is untouched — `git diff` on `web-research.test.ts` is empty.
 
 ---
 
-## 3. Two things that cost me hours. Read these before you run anything.
+## 3. Things that cost previous passes hours. Read these before you run anything.
 
 ### 3.1 Stopping a suite does not stop `vitest`
 
 The commissioning brief said, in terms: *"Because previous database corruption came from overlapping
 suites, run database-mutating suites sequentially. Do not repeat that failure mode."*
 
-**I repeated it.** Not by launching two suites deliberately. I stopped three full runs mid-flight,
-and stopping the *task* killed the shell but **not** the `vitest` child processes, which went on
-running against `mac_bennett_test`. The next run then had company. PostgreSQL named it exactly:
+A previous pass repeated it. Not by launching two suites deliberately — by stopping three full runs
+mid-flight, where stopping the *task* killed the shell but **not** the `vitest` child processes,
+which went on running against `mac_bennett_test`. The next run then had company. PostgreSQL named it
+exactly:
 
 ```
 ERROR:  deadlock detected
@@ -116,7 +120,7 @@ ERROR:  deadlock detected
 Two backends both inside `resetDatabase`. Because `settings.updated_by` references `users`, the
 TRUNCATE's CASCADE removes the settings singleton, and the window before it is reinserted is where
 the other process reads `SETTINGS_MISSING`. Result: **288 failures across 16 files**, most in tests
-Defect 9 never touches. It read as a broken fix and was a broken environment.
+the change never touched. It read as a broken fix and was a broken environment.
 
 **The corrupt state left no trace.** By the time the run finished, `settings` and `users` were back
 to one row each and the tables looked healthy. Only the server log could tell the difference.
@@ -124,81 +128,91 @@ to one row each and the tables looked healthy. Only the server log could tell th
 ### 3.2 Two process checks reported confident falsehoods
 
 * `ps aux | grep -c vitest` returned `0` **while vitest was running**. On Git-Bash for Windows it
-  cannot see Windows processes at all. That false zero is what let 3.1 happen — I ran the check and
-  believed it.
+  cannot see Windows processes at all. That false zero is what let 3.1 happen.
 * A wait loop written `until ! powershell "...exit 1 if running"` inverts the sense of `until`. It
   terminated immediately and printed *"vitest 45408 exited"* while the process was running with
   rising CPU.
 
 ### 3.3 So, the rules for running suites here
 
-1. Launch long runs **detached** (`nohup … &`) so a stopped shell cannot orphan them.
+1. Launch long runs **detached** so a stopped shell cannot orphan them.
 2. Confirm exactly one instance, by command line, not by `ps`:
    ```powershell
    Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object { $_.CommandLine -like '*vitest*' }
    ```
-3. Do not report a suite result until the process has been **observed to exit** —
-   `Get-Process -Id <pid>` returning nothing.
+3. Do not report a suite result until the process has been **observed to exit**.
 4. After any interrupted run, check the server log before trusting a result:
    ```sh
    docker logs mac-bennett-db --since 30m 2>&1 | grep -ci "deadlock detected"
    ```
    Expected: `0`.
 
-### 3.4 Two known local artefacts, neither a defect
+These rules were followed for every run recorded in §2.3, and the deadlock count says so.
 
-* **`company-context-*` tests flake on Windows under load.** All four failed in one run with
-  `spawnSync('git', …)` returning non-zero and *empty* stdout and stderr — the signature of a
-  process that never launched. Verified three ways: 25/25 succeed in isolation; every
-  `company-context-*` file passed **with these changes present** in a 470-test integration run; and
-  I.1 of the report already documents this same Windows file-locking artefact for these same files,
-  which pass on Linux. The final run passed them.
-* **A `tsx watch src/index.ts` dev server** belonging to the operator has been running since
-  18 August and restarts on every edit under `apps/server/src`. It connects to `mac_bennett`, never
-  `mac_bennett_test`, so it took no part in the deadlocks, but it competes for CPU. **Left running —
-  it is the operator's process.** If suite timings look inflated, that is the first thing to check.
+### 3.4 Setting up a fresh checkout — two traps, both real
 
-Housekeeping done: 348 leftover `mac-company-*` directories in `%TEMP%` were removed. They were
-litter from the corrupted runs, whose cleanup handlers threw.
+* **`cp .env.example .env` gives you a control plane that will not boot.**
+  `MAC_COMPANY_CONTEXT_TIMEOUT_MS`, `MAC_FORJA_WEBHOOK_TIMEOUT_MS` and `MAC_SEARCH_TIMEOUT_MS` are
+  set to an *empty value*, and `z.coerce.number().int().min(1000)` turns `""` into `0`. You get
+  `Invalid environment configuration` under the hint *"Did you copy .env.example to .env?"* — which
+  is exactly what you just did. Comment the three keys out; the schema defaults are correct. Logged
+  as MACB-13.
+* **`npm ci` first.** A fresh checkout has no `node_modules`, and `npx vitest` will cheerfully
+  install a *different* vitest outside the workspace and then fail to resolve `vitest/config`. Use
+  `node_modules/.bin/vitest` once dependencies are installed.
+
+Then `docker compose up -d`, `npm run db:wait`, `npm run migrate` — ten migrations, through
+`0010_commissioning_vendor_domains.sql`.
+
+### 3.5 Two known local artefacts, neither a defect
+
+* **`company-context-*` tests flake on Windows under load**, with `spawnSync('git', …)` returning
+  non-zero and *empty* stdout and stderr — the signature of a process that never launched. I.1
+  documents the same Windows file-locking artefact for these same files, which pass on Linux.
+* **A `tsx watch src/index.ts` dev server** belonging to the operator may be running and restarting
+  on every edit under `apps/server/src`. It connects to `mac_bennett`, never `mac_bennett_test`, so
+  it takes no part in deadlocks, but it competes for CPU. If suite timings look inflated, check it.
 
 ---
 
-## 4. `BLOCKED — DEPLOYMENT ACCESS REQUIRED` (new, smallest, do this first)
+## 4. `NEXT — REDEPLOY AND RE-DERIVE` (smallest, do this first)
 
-Defect 9's fix is proven against a real database, a real HTTP surface and the real production
-wording — but on a workstation. Making it **Linux-proven** needs SSH to `161.33.80.88`, and no
-private key for that host exists in the session that did this work (`~/.ssh` holds `known_hosts`
-only).
+Defect 10's fix is proven against a real database, a real HTTP surface and the real production
+wording — but on a workstation. Making it **Linux-proven** needs the branch redeployed. SSH works;
+there is no access gate any more.
 
-Exact actions:
-
-1. Provide the SSH key for `ubuntu@161.33.80.88`, or run steps 2–4 on the VM yourself.
-2. In `/opt/mac-bennett`:
+1. Push `commissioning/phase-4-teams-web` (currently at `bb0d291`, one ahead of the VM).
+2. On the VM, in `/opt/mac-bennett`:
    ```sh
    sudo -u mac git fetch origin
-   sudo -u mac git checkout commissioning/phase-4-teams-web
-   sudo -u mac git pull --ff-only          # expect 49ff9f6
+   sudo -u mac git pull --ff-only          # expect bb0d291
    sudo -u mac npm ci
    sudo systemctl restart mac-control-plane
    ```
-3. Re-run the full suites against `mac_bennett_test` on the VM, to convert §2's numbers from
-   *locally proven* to *Linux-proven*.
-4. Re-derive the criteria for the brief from run `2f2a5511…` and confirm the AFTER table in
-   D.21.8 — one `artefact_type` criterion, `engineering_brief min=2`, and **no**
-   `markdown_document` criterion.
+3. Re-run the full suites against `mac_bennett_test` on the VM, to convert §2.3's numbers from
+   *locally proven* to *Linux-proven*. Remember `NODE_OPTIONS=--max-old-space-size=800` for the web
+   build.
+4. Re-derive the criteria for briefs `47ff5d0f…` and `7599b3fb…` and confirm K.6 — one
+   `artefact_type` criterion, `engineering_brief min=2`, and **no** `markdown_document` criterion,
+   for **both**.
 
-**No migration is required** (§2).
+**No migration is required.**
 
-Note the standing baseline fact from Part A: the deployment has been running the Phase 4 *base*
-branch. Anything Phase 4 — conversations, the Teams plane, acceptance verification — is not in the
-running process until a Phase 4 branch is actually deployed.
+Reading the briefs back, which is how the paraphrase was caught and how step 4 is checked:
+
+```sh
+sudo -u postgres psql -d mac_bennett -tAc \
+  "select id::text, content->'acceptanceCriteria', content->>'proposedScope' \
+   from handoff_briefs where id::text like '47ff5d0f%' or id::text like '7599b3fb%'"
+```
 
 ---
 
 ## 5. `BLOCKED — HUMAN MICROSOFT CONFIGURATION REQUIRED`
 
-Unchanged by this pass; nothing in Defect 9 touches the Teams plane. The eight steps are in the
-report and are not restated here. The essentials to have in hand:
+Unchanged by the last two passes; nothing in defect 9 or 10 touches the Teams plane. What **has**
+changed is that the Phase 4 code is now actually deployed (§2.1), so this is ready to be done rather
+than waiting on anything here.
 
 | Item | Value |
 |---|---|
@@ -224,17 +238,17 @@ object ids up in advance: enable Teams, send one message, read the sender's AAD 
 **Do not create paid Microsoft resources or broaden permissions without approval.** Nothing here
 needs a Microsoft Graph permission.
 
-Once configured, the nine proofs to run are listed in the brief and in Part B — real inbound PAC
+Once configured, re-prove the ten JWT rejection classes against the **live** endpoint first — they
+are currently covered offline only (G.2) — then the nine proofs the brief lists: real inbound PAC
 message, real outbound reply, persistent Teams ↔ web conversation, discovery Q&A, explicit approval
 code, ambiguous-approval refusal, blocker notification, duplicate/retry behaviour, audit records.
-The first thing to do is re-prove the ten JWT rejection classes against the **live** endpoint; they
-are currently covered only offline (G.2).
 
 ---
 
 ## 6. `BLOCKED — HUMAN FINANCIAL / PROVIDER ACTION REQUIRED`
 
-Still blocked, and now fully specified — this pass added the four things the section was missing.
+Still blocked, and fully specified. This is the cheapest gate on the board and has been open since
+2026-08-21.
 
 | Item | Value |
 |---|---|
@@ -275,45 +289,57 @@ Verify isolation after installing the key — full commands in the report:
 
 ---
 
-## 7. Deliberate technical debt — left alone on purpose
+## 7. Open findings, left alone on purpose
 
-Three items were recorded by earlier passes as debt with stated reasons. This pass did **not**
-reopen them, because commissioning findings are not a licence for unrelated refactors:
+Recorded as debt with stated reasons. None were reopened under cover of defect 10, because a
+commissioning fix that quietly repairs whatever it passes stops being reviewable.
+
+**New, and the one worth arguing about:**
+
+* **Defect 11 (MACB-12) — a section the brief names reaches no acceptance criterion.**
+  `SECTION_PHRASES` is a fixed vocabulary, so the `'Purpose'` section **both** production briefs ask
+  for in so many words produces no criterion. A run that omits it is accepted as complete and the
+  requester has no gap to read. This is a requirement **dropped** rather than invented — the Part F
+  direction, and the worse one. It is not one of the four completion criteria, but shipping
+  commissioning with it open repeats exactly the pattern defect 10 taught: the tidy cases pass and
+  the real wording does not. K.9 has the evidence.
+* **`.env.example` will not boot (MACB-13)** — §3.4.
+
+**Older, and correctly deferred:**
 
 * **D.6** — the Forja `structuredAcceptance` projection drops `required`, `minimum`, `source`,
   `artefactType`. Fixing it widens the contract and moves `FORJA_CONTRACT_VERSION`; no Forja client
   exists yet.
 * **D.7** — the Inbox approval card renders from `approval_requests` and never loads the brief, so
-  the scope, research and (now) deliverable notes do not reach someone approving from the Inbox.
-  Recommended fix is a UI change: link the card to the brief and say the criteria and notes live
-  there.
+  the scope, research and deliverable notes do not reach someone approving from the Inbox.
 * **C.10** — a re-fetch of the same page with a different `#fragment` creates a new
   `research_sources` row. Cosmetic; inflates a source count rather than corrupting a conclusion.
-
-Also still open and correctly deferred: **Part F**, conversation summarisation. Nothing generates a
-summary; measured on the deployment, no thread is within a factor of five of the threshold.
-**Re-measure once Teams has been in real use for a few weeks** — a Teams thread with a colleague is
-the first conversation shape likely to run long.
+* **Part F** — conversation summarisation. Nothing generates a summary; measured on the deployment,
+  no thread is within a factor of five of the threshold. **Re-measure once Teams has been in real use
+  for a few weeks** — a Teams thread with a colleague is the first conversation shape likely to run
+  long.
 
 ---
 
 ## 8. Security position
 
-No authority boundary was changed. What this pass added was checked against each:
+No authority boundary was changed by defect 9 or defect 10. Both are confined to domain code that
+reads the brief.
 
 | Boundary | State |
 |---|---|
 | Teams credentials do not reach worker sandboxes | Unchanged — `mac-worker.service` does not load `control-plane.env` |
-| Brave credential does not reach Claude Code | Unchanged; verification method now written down |
-| Brave credential does not reach Teams/Forja clients | Unchanged — DTO publishes the provider name, never the key |
+| Brave credential does not reach Claude Code | Unchanged; verification method written down in §6 |
+| Brave credential does not reach Teams/Forja clients | Unchanged — the DTO publishes the provider name, never the key |
 | Company context credentials remain isolated | Unchanged — not touched |
 | Web content cannot modify Mac authority | Unchanged — the deliverable reader runs over the brief, never over retrieved content |
 | Web content cannot invoke arbitrary commands | Unchanged — no new tool, no new tool-result field |
-| Secrets do not enter evidence or audit logs | **Re-checked** — new `deliverables.*` audit metadata carries brief phrases only |
+| Secrets do not enter evidence or audit logs | **Re-checked** — `deliverables.*` audit metadata carries brief phrases only |
+| Prompt-injection structural gate | **Intact** — same ten fields |
 | `main` remains untouched | **Verified** — `107aa5b`, identical to `origin/main` |
 
-Live boundary re-checked off-host during this pass: `/api/health` → `200`, TLS valid,
-`POST /api/teams/messages` → `401 TEAMS_REJECTED`. Unchanged from A.4 and G.2.
+Live boundary re-checked off-host: `/api/health` → `200`, TLS valid, `POST /api/teams/messages` →
+`401 TEAMS_REJECTED`. Unchanged from A.4 and G.2.
 
 ---
 
@@ -324,15 +350,21 @@ Live boundary re-checked off-host during this pass: `/api/health` → `200`, TLS
 * The report is the governing record. Its rule is inherited and absolute: **never describe simulated
   behaviour as proven.** Where something was not exercised against the real third party, say so and
   name what is missing.
-* If a real defect turns up: capture evidence, reproduce it, add a regression test, make the
-  smallest robust fix, re-run the failed real path, and document it as the next numbered
-  commissioning defect. Defect 9 is the highest number used.
-* When you reach a human-only gate, stop there and give exact next actions. Do not fake a third
-  party to keep moving.
+* If a real defect turns up: capture evidence, reproduce it, add a regression test, make the smallest
+  robust fix, re-run the failed real path, and document it as the next numbered commissioning defect.
+  **Defect 11 is the highest number used** — it is logged and unfixed, so the next new one is 12.
+* When you reach a human-only gate, stop there and give exact next actions. Do not fake a third party
+  to keep moving.
 
-One thing Defect 9 is worth generalising. Testing the fix against the **real** production brief and
-thirty ordinary wordings found **five defects in the fix itself** — none of which the tidy
-one-sentence cases caught. The worst had the ambiguity rule asking about seven briefs in ten, which
-is the false gap moved one step earlier into discovery, and it is hard to notice in production
-because its symptom is a *question*, and a question looks like diligence. Probe against real input
-early, not after you believe you are finished.
+Two things worth generalising, both learned the expensive way.
+
+**Probe against real input, not against your record of it.** Defect 9's fix was tested against the
+wording the *report* quoted. It passed. The database held a different sentence, and the first thing
+the real data did was fail. Fault 3 of defect 10 could not have been found any other way: it needs a
+brief that mentions the same deliverable four times across four fields with a section sentence last,
+which is what a real brief looks like and what a hand-written example never is.
+
+**A rule written from one example encodes the half of the language that example showed.** All three
+faults in defect 10 are that: a negation test that only looked backward, a pass that only looked at
+one neighbour, a quantity defined once for the general case and once for the local one. None were
+wrong about the case that produced them.
