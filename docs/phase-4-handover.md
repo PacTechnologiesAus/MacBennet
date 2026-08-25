@@ -24,7 +24,7 @@ both remaining cases is a human action in someone else's system, not work left u
 | Defect 10 fixed and proven | **Met at local strength.** VM re-derivation outstanding — §4 |
 | Full regression green | **Met** — Linux-proven for defect 9's state, locally proven for defect 10's |
 | Real Teams proven against the PAC tenant | **Not met — blocked on a human** — §5 |
-| Real external search proven, acceptance verified against real external evidence | **Not met — blocked on a human** — §6 |
+| Real external search proven, acceptance verified against real external evidence | **Part met.** Credential installed and third-party proven; Mac's own tool path not yet exercised — §6 |
 
 Keep the four strengths apart, because the report does and the distinction is the point:
 
@@ -245,10 +245,38 @@ code, ambiguous-approval refusal, blocker notification, duplicate/retry behaviou
 
 ---
 
-## 6. `BLOCKED — HUMAN FINANCIAL / PROVIDER ACTION REQUIRED`
+## 6. `UNBLOCKED 2026-08-25 — configured and credential-proven`
 
-Still blocked. **It is a commercial decision with a recurring cost, not the free signup earlier
-passes described** — see K.12. Brave withdrew its free tier in February 2026, six months before the
+The operator created the account and installed the key. **What is proven is that the credential
+works against Brave; what is not proven is Mac's own `public_web_search` path.** Those are different
+claims — see §6.1 for what remains.
+
+Verified on the deployment, without the key value ever being printed: control plane has it (`1`),
+**worker does not** (`0`, and `mac-worker.service` carries an explicit "Deliberately NOT loading
+control-plane.env"), the settings DTO has no `apiKey` field at all, and `audit_events` contains no
+key-shaped string. A live probe returned **HTTP 200** with a real result list.
+
+Applied settings: `web_search_provider=brave`, `max_web_results_per_search=5`,
+`max_research_tool_calls=12`, `allow_fetch_from_search_results=false`,
+`external_research_enabled=true`. The project already carried the `external_research` capability, so
+both gates are open. Settings are read fresh per request, so no restart is needed after a change.
+
+**A false negative worth remembering:** `sudo tr ... < /proc/PID/environ` has the *shell* perform the
+redirect as the unprivileged user, so it returns permission-denied as an empty result. Use
+`sudo sh -c`. Same family as the `ps` false zero in §3.2.
+
+### 6.1 What remains
+
+Raise a **`research`**-kind task (not `coding` — a coding task derives a `test_run` criterion that no
+research delivery can meet), run discovery, confirm the brief carries `external_sources min ≥ 1`,
+approve, and check the run performs real queries and records real `research_sources`. The last of the
+nine proofs — *an acceptance criterion requiring external evidence cannot pass without it* — is
+already proven deterministically in D.20.1.
+
+### 6.2 The commercial position, unchanged
+
+**It was a commercial decision with a recurring cost, not the free signup earlier passes
+described** — see K.12. Brave withdrew its free tier in February 2026, six months before the
 comparison in Part C was written, so C.3 recommends a plan that cannot be subscribed to.
 
 | Item | Value |
