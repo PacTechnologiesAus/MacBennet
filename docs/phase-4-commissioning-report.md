@@ -392,6 +392,8 @@ page says about itself.
   — which is precisely the failure mode Sprint 3.3's refusal wording exists to prevent a model from
   misreading.
 * **Brave Search API — $0 at PAC's expected volume, but a card must be on file.**
+  *(**CORRECTED 2026-08-25 — see K.12. There is no free tier and has not been since February 2026.
+  The paragraph below was wrong on the day it was written.**)*
   [Brave's pricing](https://brave.com/search/api/) applies **$5 of free monthly credits** against a
   $5-per-1,000-request rate, so roughly **1,000 queries a month at no charge**, at up to 50 queries
   per second. A credit card is required as an anti-fraud measure and is **not charged** on the free
@@ -540,6 +542,11 @@ the object id out of the audit trail, add it, and carry on.
 ## BLOCKED — HUMAN FINANCIAL / PROVIDER DECISION REQUIRED
 
 Commissioning stops here for Part C. The comparison is C.1–C.2 and the recommendation is C.3.
+
+> **CORRECTED 2026-08-25 — see K.12.** Brave withdrew its free tier in **February 2026**, six months
+> before this comparison was written. There is no "Free" plan and no "Data for Search" product; the
+> recommendation below therefore names a thing that cannot be subscribed to. The revised
+> recommendation is still Brave, for different reasons and at a real price of about **$5 a month**.
 
 **Recommended: Brave Search API, free tier.** ~1,000 queries/month at no charge; a credit card is
 required as anti-fraud and is not charged on the free plan; no infrastructure; returns publication
@@ -2489,3 +2496,79 @@ Unchanged in verdict, and one criterion moved forward.
 * Real external search proven — **not met, blocked on a human**.
 
 Phase 5 was not started.
+
+### K.12 The search provider comparison was stale on the day it was written
+
+**Recorded 2026-08-25, when a human tried to follow C.3 and found the plan did not exist.**
+
+C.3 recommended "Brave Search API, free tier — ~1,000 queries/month at no charge; a credit card is
+required as anti-fraud and is **not charged** on the free plan." None of that is now true, and none
+of it was true when Part C was written on 2026-08-19.
+
+**Brave withdrew the free tier in February 2026**, six months earlier. This is not drift. It is a
+vendor fact that entered an evidence record without being checked against the vendor — the same
+failure as the D.21.8 paraphrase corrected earlier the same day, and worth naming as a pair, because
+both slipped past the report's governing rule by reading like background rather than like claims.
+
+**The rule is about third parties, and these were claims about third parties.**
+
+Checked against `https://brave.com/search/api/` on 2026-08-25:
+
+| C.3 said | Actually |
+|---|---|
+| Subscribe to the **Free** plan of the **Data for Search** product | Neither exists. Plans are Search / Answers / Spellcheck / Autosuggest / Enterprise |
+| ~1,000 queries/month at no charge | ~1,000/month covered by a **$5 renewing monthly credit** on a paid plan |
+| Card required as anti-fraud, **not charged** | Card becomes a **live billing instrument** once the credit is spent |
+| — | The credit is **conditional on public attribution** of Brave on the project's website or about pages |
+
+Rate is **$5 per 1,000 requests**, up to 50 queries per second. Whether a hard spending cap can be
+set in the dashboard could not be established from outside the account; sources disagree, and it is
+the difference between a capped $5 and an uncapped card. It is the first thing to check at signup.
+
+#### The comparison, redone
+
+| Provider | Free at ~1,000/month | Card | `publishedAt` | Client exists |
+|---|---|---|---|---|
+| **Brave** — Search plan | Only via the conditional $5 credit | **Yes, live billing** | **Yes**, from `age` | **Yes** |
+| **Tavily** — Researcher | **Yes**, 1,000 credits/month | **No card required** | **No** date field; `time_range` filters only | No |
+| **Exa** | $10/month credit ≈ 1,400 searches | Credit-based | Partial | No |
+| **SearXNG** | Free, but PAC hosts it | None | No | **Yes** |
+| **Google CSE** | 100/day | — | — | Yes, but **dead** — closed to new customers, discontinued 2027-01-01 |
+
+Bing is no longer a candidate either: the Web Search API was **retired on 2025-08-11**, and
+Microsoft's migration path is Grounding with Bing inside Azure AI Foundry — a platform commitment
+rather than an API swap.
+
+#### Revised recommendation: still Brave, for different reasons, at about $5 a month
+
+Not because it is free. It is not.
+
+* **The client is already written and tested**, and its error mapping — `401/403` → `unauthorised`,
+  `429` → `rate_limited`, timeout → `timeout`, other non-2xx → `unreachable`, missing list →
+  `malformed_response` — is already part of the commissioning proofs.
+* **It is the only candidate that answers "how old is this source".** `WebSearchResult.publishedAt`
+  is nullable so any provider degrades gracefully, but spec §19 asks Mac to weigh currency, and a
+  provider that cannot say when a page was published cannot support that judgement. Tavily's
+  documented response schema carries no publication date at all — it offers `time_range` and
+  `start_date`/`end_date` request filters instead.
+* **Query text is confidential.** Mac's searches are derived from internal engineering briefs, which
+  makes vendor handling of the *query* a real criterion and not a checkbox. Brave runs its own index
+  and states it does not log API queries. Tavily advertises zero data retention, but that appears
+  attached to enterprise positioning and could not be confirmed for the free Researcher tier.
+* **$5 a month is noise** against the half day of engineering, new tests and a protocol enum change
+  that adding a provider costs — to save sixty dollars a year and lose publication dates.
+
+**Do not take the attribution.** A standing public obligation to advertise a vendor on PAC's website,
+in exchange for a $5 credit, is a worse trade than the $5.
+
+**Fallback, if the card cannot be capped and an uncapped card is unacceptable:** Tavily's Researcher
+tier, which requires no card at all and matches PAC's volume exactly. That is a new
+`WebSearchProviderClient`, a fourth value in `WEB_SEARCH_PROVIDERS`, an entry in
+`WEB_SEARCH_PROVIDER_REQUIREMENTS`, and its own tests — contained, because the abstraction already
+exists and was built for exactly this. It costs `publishedAt`.
+
+#### What this changes about the gate
+
+§6 of the handover and J.3 stop being "a free signup a human has not got round to" and become **a
+commercial decision with a recurring cost**. That is a smaller gate than Teams but a different kind
+of one, and it should be described as what it is.

@@ -247,17 +247,28 @@ code, ambiguous-approval refusal, blocker notification, duplicate/retry behaviou
 
 ## 6. `BLOCKED — HUMAN FINANCIAL / PROVIDER ACTION REQUIRED`
 
-Still blocked, and fully specified. This is the cheapest gate on the board and has been open since
-2026-08-21.
+Still blocked. **It is a commercial decision with a recurring cost, not the free signup earlier
+passes described** — see K.12. Brave withdrew its free tier in February 2026, six months before the
+comparison in Part C was written, so C.3 recommends a plan that cannot be subscribed to.
 
 | Item | Value |
 |---|---|
-| Vendor / product | Brave Search API → **Data for Search**, **Free** plan |
-| Payment method | required at signup as anti-fraud, **not charged** on Free |
+| Vendor / product | Brave Search API, **Search** plan. There is no Free plan and no "Data for Search" product |
+| Cost | **$5 per 1,000 requests**, ~50 q/s. A $5 renewing monthly credit covers ~1,000 queries, but only if you publicly attribute Brave — **don't**; pay the $5 |
+| Payment method | a **live billing instrument** once the credit is spent. Set a dashboard spending cap to $5 if the control exists — check this at signup |
+| Expected spend | **~$5/month** at commissioning volumes |
 | Credential | subscription token, sent as `x-subscription-token` |
 | Env key | `MAC_SEARCH_API_KEY` |
 | File | `/etc/mac-bennett/control-plane.env`, `root:mac`, `0640` |
 | Needed by | **the control plane, and only the control plane** |
+
+Install it with `sudo -e`, which keeps the key out of shell history, and never through a chat client
+or a session transcript. The provider stays Brave because its client is already written and tested,
+because it is the only candidate that returns publication ages — which spec §19's currency judgement
+needs — and because query text drawn from confidential briefs should go to an index that does not log
+it. **Fallback if an uncapped card is unacceptable:** Tavily's Researcher tier, 1,000 credits/month
+with no card at all, at the cost of a new provider client and of `publishedAt`. K.12 has the full
+comparison.
 
 Recommended conservative commissioning configuration:
 
