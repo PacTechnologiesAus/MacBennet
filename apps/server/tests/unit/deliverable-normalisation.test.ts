@@ -618,3 +618,249 @@ describe('defect 9 — verbs are not deliverables', () => {
     expect(analyseDeliverables('Investigate the PAC Project Document Controller.').deliverables).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Commissioning defect 10 — what re-deriving defect 9 ON THE VM found.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS AND WHY IT IS TWO DEFECTS IN ONE
+ *
+ * Defect 9's fix was proven against the production wording as the report quoted
+ * it. The report quoted it as "Two distinct documents, not one consolidated
+ * report". The database does not hold that sentence. It holds the refusal on
+ * the OTHER side of the noun:
+ *
+ *   "A single combined document covering both is explicitly NOT what is wanted."
+ *
+ * So the local proof passed against a paraphrase, and the first thing the real
+ * data did was fail. Both mechanisms below are that same failure seen twice.
+ *
+ * 1. `negatedDeliverable` looks three words BACKWARD from the noun. A refusal
+ *    written after the thing it refuses is invisible, and the sentence saying
+ *    "not this" became a requirement for exactly this.
+ *
+ * 2. The forward pass resolves a generic noun against the nearest preceding
+ *    sentence holding a specific, because a brief is a LIST and its criteria
+ *    sit on separate lines. The backward pass never got that treatment: it
+ *    requires the generic and the specific to share a sentence. `contractTextOf`
+ *    concatenates acceptanceCriteria, then proposedScope, then userObjective,
+ *    then desiredBehaviour — so whether a mention falls before or after its
+ *    specific is decided by WHICH FIELD it landed in, not by how anyone wrote
+ *    it. A discovery-authored acceptance line therefore reopened defect 9 in
+ *    full: engineering_brief x2 AND markdown_document x2, four artefacts for a
+ *    request for two.
+ *
+ * The rule the fix restores is that the two passes must agree. The same words
+ * in the same order of mention must derive the same contract whichever brief
+ * field carried them.
+ * ---------------------------------------------------------------------------
+ */
+describe('defect 10 — a refusal written after the noun it refuses', () => {
+  it('does not require the single combined document the brief explicitly refuses', () => {
+    const analysis = analyseDeliverables(
+      'Two separate engineering briefs, one per system. ' +
+        'A single combined document covering both is explicitly NOT what is wanted.',
+    );
+
+    expect(analysis.deliverables.map((d) => d.type)).not.toContain('document');
+    expect(analysis.deliverables.find((d) => d.type === 'engineering_brief')?.count).toBe(2);
+  });
+
+  it.each([
+    'A single combined document covering both is explicitly NOT what is wanted.',
+    'One consolidated report is not what is wanted here.',
+    'A combined write-up is not required.',
+  ])('reads the refusal in %s rather than a request', (text) => {
+    expect(analyseDeliverables(text).deliverables).toEqual([]);
+  });
+
+  /*
+   * The guard that matters more than the fix.
+   *
+   * Dropping a requested deliverable is the original Part F failure and is
+   * worse than keeping a spurious one, so a negation anywhere in the vicinity
+   * must not be allowed to swallow a deliverable that is genuinely asked for.
+   */
+  it.each([
+    ['Produce two separate engineering briefs. Do not use external research.', 'engineering_brief'],
+    ['Deliver a summary document. Do not implement anything.', 'summary_document'],
+    ['Produce one report on the migration. The migration is not finished.', 'report'],
+  ])('still requires the deliverable in %s', (text, type) => {
+    expect(analyseDeliverables(text).deliverables.map((d) => d.type)).toContain(type);
+  });
+});
+
+describe('defect 10 — a generic mention that lands in an earlier brief field', () => {
+  /*
+   * The shape of brief 7599b3fb, whose discovery-authored acceptance line
+   * names the deliverables before the scope names their kind.
+   */
+  const BRIEF_7599 = brief({
+    acceptanceCriteria: ['Two separate documents exist, one per system.', 'State the assumptions behind each.'],
+    proposedScope: 'Produce two separate engineering briefs from the PAC company context only.',
+  });
+
+  const criteria = deriveCriteria({
+    taskKind: 'investigation',
+    brief: BRIEF_7599,
+    description: null,
+    externalResearchAvailable: false,
+    expectedArtefactTypes: ['investigation_report', 'engineering_brief'],
+  });
+
+  it('requires the two briefs asked for and not two documents as well', () => {
+    expect(artefactCriteria(criteria)).toEqual(['engineering_briefx2']);
+    expect(requiredArtefacts(criteria)).toBe(2);
+  });
+
+  it('says in the criterion why the earlier mention added nothing', () => {
+    const resolution = analyseDeliverables(contractTextOf(BRIEF_7599)).resolutions.find((r) =>
+      /documents/i.test(r.phrase),
+    );
+    expect(resolution?.relationship).toBe('explanatory');
+    expect(resolution?.resolvedTo).toBe('engineering_brief');
+  });
+
+  it('decides this wording rather than asking a human about it', () => {
+    expect(analyseDeliverables(contractTextOf(BRIEF_7599)).ambiguities).toEqual([]);
+    expect(deliverableClarifications({ brief: BRIEF_7599 })).toEqual([]);
+  });
+
+  it('derives the same contract whichever order the two mentions appear in', () => {
+    const summarise = (text: string) =>
+      analyseDeliverables(text)
+        .deliverables.map((d) => `${d.type}x${d.count}`)
+        .sort();
+
+    const specificFirst = 'Two separate engineering briefs, one per system.\nTwo separate documents exist, one per system.';
+    const genericFirst = 'Two separate documents exist, one per system.\nTwo separate engineering briefs, one per system.';
+
+    expect(summarise(genericFirst)).toEqual(summarise(specificFirst));
+    expect(summarise(genericFirst)).toEqual(['engineering_briefx2']);
+  });
+
+  /*
+   * And the invariant that stops the fix from becoming defect 9 in reverse: a
+   * generic mention whose count does NOT match is a real, separate request and
+   * must survive.
+   */
+  it('keeps a generic mention whose count contradicts the specific one', () => {
+    const analysis = analyseDeliverables(
+      'Three separate documents, one per site.\nProduce two separate engineering briefs.',
+    );
+    expect(analysis.deliverables.find((d) => d.type === 'document')?.count).toBe(3);
+    expect(analysis.deliverables.find((d) => d.type === 'engineering_brief')?.count).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+/**
+ * The two production briefs, read verbatim out of the deployment database.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THESE ARE QUOTED IN FULL AND NOT SUMMARISED
+ *
+ * Defect 10 exists because defect 9's proof used the wording the REPORT quoted
+ * rather than the wording the DATABASE holds. The report's version — "Two
+ * distinct documents, not one consolidated report" — is a sentence no brief
+ * ever contained. Every assertion below therefore runs over the real `content`
+ * jsonb of briefs `47ff5d0f…` and `7599b3fb…`, copied without tidying: the
+ * capitalised TWO, the em dash, the colons after "Brief 1", the proper name
+ * "Project Document Controller" with a container noun inside it, and both
+ * refusals in the forms the requester actually typed.
+ *
+ * The contract both briefs describe is the same: TWO engineering briefs, one
+ * per system, and nothing else. That is what D.21.8 specifies and what these
+ * assert.
+ * ---------------------------------------------------------------------------
+ */
+describe('defect 10 — the production briefs, verbatim from the deployment database', () => {
+  const SCOPE_47FF =
+    "Write TWO separate engineering briefs about PAC's own internal tooling, using only the PAC company context — no external research of any kind. Brief 1: the PAC Project Registry. Brief 2: the Project Document Controller. A single combined document covering both is explicitly NOT what is wanted. Each brief needs a section 'Purpose' and a section 'Assumptions and unknowns'.";
+  const BRIEF_47FF = brief({
+    acceptanceCriteria: [
+      'Two separate brief documents exist, one for the PAC Project Registry and one for the Project Document Controller.',
+      "Each brief contains a section titled 'Purpose'.",
+      "Each brief contains a section titled 'Assumptions and unknowns'.",
+      'No content or research from outside the PAC company context is used.',
+      'No single document merges both systems.',
+    ],
+    proposedScope: SCOPE_47FF,
+    userObjective: SCOPE_47FF,
+    desiredBehaviour:
+      'Two distinct brief documents are created, one per system (PAC Project Registry; Project Document Controller). ' +
+      "Each brief must include a 'Purpose' section and an 'Assumptions and unknowns' section.",
+  });
+
+  const SCOPE_7599 =
+    "Write TWO separate engineering briefs about PAC's own internal tooling, using only the PAC company context — no external research of any kind. Brief 1: the PAC Project Registry. Brief 2: the Project Document Controller. Each brief needs a section 'Purpose' and a section 'Assumptions and unknowns'.";
+  const BRIEF_7599 = brief({
+    acceptanceCriteria: [
+      'Two separate documents exist, each dedicated to one system',
+      "Each document contains a 'Purpose' section",
+      "Each document contains an 'Assumptions and unknowns' section",
+      'No content is derived from external research',
+    ],
+    proposedScope: SCOPE_7599,
+    userObjective: SCOPE_7599,
+    desiredBehaviour:
+      "Two distinct documents are created, one per system, each containing a 'Purpose' section and an " +
+      "'Assumptions and unknowns' section.",
+  });
+
+  const criteriaFor = (content: ReturnType<typeof brief>) =>
+    deriveCriteria({
+      taskKind: 'investigation',
+      brief: content,
+      description: null,
+      externalResearchAvailable: false,
+      expectedArtefactTypes: ['investigation_report', 'engineering_brief'],
+    });
+
+  it.each([
+    ['47ff5d0f', () => BRIEF_47FF],
+    ['7599b3fb', () => BRIEF_7599],
+  ])('requires two engineering briefs and nothing else for brief %s', (_id, content) => {
+    const criteria = criteriaFor(content());
+    expect(artefactCriteria(criteria)).toEqual(['engineering_briefx2']);
+    expect(requiredArtefacts(criteria)).toBe(2);
+  });
+
+  it('does not require the combined document brief 47ff5d0f explicitly refuses', () => {
+    const analysis = analyseDeliverables(contractTextOf(BRIEF_47FF));
+    expect(analysis.deliverables.map((d) => d.artefactType)).not.toContain('markdown_document');
+  });
+
+  it.each([
+    ['47ff5d0f', () => BRIEF_47FF],
+    ['7599b3fb', () => BRIEF_7599],
+  ])('decides brief %s rather than asking a human about it', (_id, content) => {
+    expect(analyseDeliverables(contractTextOf(content())).ambiguities).toEqual([]);
+    expect(deliverableClarifications({ brief: content() })).toEqual([]);
+  });
+
+  /*
+   * Sections are not defect 10's business, and this asserts only that they were
+   * left alone. What the real wording DID expose while these were being written
+   * is recorded as commissioning defect 11: `SECTION_PHRASES` is a fixed
+   * vocabulary, so the "Purpose" section both briefs name in so many words
+   * reaches no criterion at all. That is a requirement dropped from the
+   * contract rather than one invented, which is the Part F direction and the
+   * worse of the two — but it is a different defect, and fixing it under cover
+   * of this one is how a commissioning pass stops being reviewable.
+   */
+  it('leaves the sections it does derive untouched', () => {
+    const sections = criteriaFor(BRIEF_47FF)
+      .filter((c): c is Extract<AcceptanceCriterion, { kind: 'named_section' }> => c.kind === 'named_section')
+      .map((c) => c.section);
+    expect(sections).toContain('Assumptions');
+  });
+
+  it('still derives no external-source criterion, which was defect 8', () => {
+    expect(criteriaFor(BRIEF_47FF).map((c) => c.kind)).not.toContain('external_sources');
+    expect(criteriaFor(BRIEF_7599).map((c) => c.kind)).not.toContain('external_sources');
+  });
+});

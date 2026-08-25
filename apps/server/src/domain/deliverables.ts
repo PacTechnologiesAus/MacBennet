@@ -296,7 +296,13 @@ const QUALIFIER_WORDS = new Set([
  * them is the requester referring to a thing they have already asked for, which
  * is the single most reliable signal available that a mention is not new.
  */
-const BACK_REFERENCE_WORDS = new Set(['the', 'those', 'these', 'this', 'that', 'said', 'aforementioned', 'above', 'same', 'both']);
+const BACK_REFERENCE_WORDS = new Set([
+  'the', 'those', 'these', 'this', 'that', 'said', 'aforementioned', 'above', 'same', 'both',
+  // "Each document contains a 'Purpose' section" distributes over a set the
+  // brief has already introduced. It announces nothing new, which is what
+  // every other word here has in common.
+  'each',
+]);
 
 /** Words that introduce a noun phrase. Used to tell a noun from a verb. */
 const DETERMINERS = new Set([
@@ -362,6 +368,43 @@ function negatedDeliverable(text: string, index: number): boolean {
   const preceding = text.slice(Math.max(0, index - 30), index).toLowerCase();
   const tail = preceding.split(/[^a-z']+/).filter(Boolean).slice(-3);
   return tail.some((word) => NEGATORS.includes(word));
+}
+
+/**
+ * The refusal idiom that sits AFTER the noun it refuses.
+ *
+ * `negatedDeliverable` reads backwards, and commissioning defect 10 was the
+ * half of English it therefore could not see. The database wording for the
+ * brief behind defect 9 does not say "not one consolidated report" — the
+ * report quoted a paraphrase. It says:
+ *
+ *   "A single combined document covering both is explicitly NOT what is wanted."
+ *
+ * Same refusal, opposite side of the noun, and the sentence declining a
+ * combined document required one.
+ *
+ * The anchor is deliberately the WANTING word and not the negator. "a report
+ * that is not longer than five pages" and "the report is not final until
+ * reviewed" both carry `is not` and both genuinely ask for a report; reading a
+ * bare trailing negation as a refusal would drop them, and dropping a requested
+ * deliverable is the original Part F failure — the worse of the two
+ * directions. So this matches the shape that only ever refuses: a copula
+ * governing the noun, a negator, and then a word about being asked for.
+ * Anything less certain keeps the deliverable.
+ */
+const REFUSAL_AFTER =
+  /^\s*(?:[a-z][a-z'’-]*\s+){0,4}?\b(?:is|are|was|were)\b\s+(?:[a-z][a-z'’-]*\s+){0,3}?\b(?:not|never)\b\s+(?:[a-z][a-z'’-]*\s+){0,3}?\b(?:wanted|required|needed|necessary|expected|acceptable|sought)\b/i;
+
+/**
+ * Whether the clause following a deliverable noun refuses it.
+ *
+ * Bounded by the clause the noun sits in, because a refusal in the NEXT
+ * sentence is about something else: "Produce two briefs. External research is
+ * not required." asks for two briefs.
+ */
+function refusedAfterDeliverable(text: string, end: number): boolean {
+  const clause = /^[^.;:,\n]*/.exec(text.slice(end, end + 90))?.[0] ?? '';
+  return REFUSAL_AFTER.test(clause);
 }
 
 const CONSUMING_VERBS = new Set([
@@ -626,8 +669,10 @@ export function extractDeliverableCandidates(text: string): DeliverableCandidate
     // writes "research the external engineering brief" meaning a source.
     if (match.spec.generic && lead.isSource) continue;
 
-    // A deliverable being refused is not a deliverable being asked for.
+    // A deliverable being refused is not a deliverable being asked for,
+    // whichever side of the noun the refusal was written on.
     if (negatedDeliverable(body, match.start)) continue;
+    if (refusedAfterDeliverable(body, match.end)) continue;
 
     /*
      * A container noun being used as a VERB is not a deliverable either.
@@ -761,6 +806,45 @@ const modifierSignature = (candidate: DeliverableCandidate): string =>
     .trim();
 
 /**
+ * How many artefacts a set of mentions of ONE type requires.
+ *
+ * MAX across sentences, SUM within one — the brief's fields restate the same
+ * request three or four times, so summing across them would multiply every
+ * count by the number of fields that mention it, while inside a single sentence
+ * "a document for the client and a document for the internal team" really is
+ * two, and what says so is that the two mentions carry different modifiers.
+ *
+ * Shared, because commissioning defect 10 found the forward pass measuring
+ * "how many were already asked for" a second, narrower way — the sum over the
+ * nearest sentence holding a specific. For brief 7599b3fb that sentence was
+ * "Each brief needs a section 'Purpose'", giving one, so a closing
+ * "Two distinct documents are created" matched nothing and became two more
+ * required artefacts. Two definitions of the same quantity is how that happens.
+ */
+const aggregateCount = (mentions: readonly DeliverableCandidate[]): number => {
+  const bySentence = new Map<number, DeliverableCandidate[]>();
+  for (const mention of mentions) {
+    const list = bySentence.get(mention.sentence) ?? [];
+    list.push(mention);
+    bySentence.set(mention.sentence, list);
+  }
+
+  let count = 0;
+  for (const list of bySentence.values()) {
+    const signatures = list.map(modifierSignature);
+    const allDistinct =
+      list.length > 1 &&
+      signatures.every((signature) => signature.length > 0) &&
+      new Set(signatures).size === signatures.length;
+    const sentenceCount = allDistinct
+      ? list.reduce((total, mention) => total + mention.count, 0)
+      : Math.max(...list.map((mention) => mention.count));
+    count = Math.max(count, sentenceCount);
+  }
+  return count;
+};
+
+/**
  * Decides what each candidate means, and returns only what actually creates a
  * requirement.
  */
@@ -839,6 +923,15 @@ export function normaliseDeliverables(text: string, candidates: DeliverableCandi
       ? sameSentence
       : priorSpecifics.filter((s) => s.sentence === nearest.sentence);
     const priorTotal = scope.reduce((total, s) => total + s.count, 0);
+    /*
+     * And the same quantity aggregation will actually derive for that type.
+     * `priorTotal` is a local reading — the sentence nearest the mention — and
+     * defect 10 showed it going out of step with the contract whenever the
+     * sentence that established a count was not the sentence that last touched
+     * the type. Either reading matching is evidence of a restatement.
+     */
+    const establishedTotal = aggregateCount(priorSpecifics.filter((s) => s.type === nearest.type));
+    const matchesPrior = candidate.count === priorTotal || candidate.count === establishedTotal;
     const nearestDescription = describeCount(nearest.count, nearest.label);
 
     // The marker itself, not the whole gap, so the reason a human reads says
@@ -877,7 +970,7 @@ export function normaliseDeliverables(text: string, candidates: DeliverableCandi
       continue;
     }
 
-    if ((candidate.backReference || enumerating) && candidate.countExplicit && candidate.count === priorTotal) {
+    if ((candidate.backReference || enumerating) && candidate.countExplicit && matchesPrior) {
       retracted.add(candidate);
       resolutions.push({
         phrase: candidate.phrase,
@@ -925,7 +1018,7 @@ export function normaliseDeliverables(text: string, candidates: DeliverableCandi
      *      new and nothing pointing back. "two briefs and documentation".
      * ---------------------------------------------------------------------
      */
-    const repeatedCount = candidate.countExplicit && candidate.count > 1 && candidate.count === priorTotal;
+    const repeatedCount = candidate.countExplicit && candidate.count > 1 && matchesPrior;
     const bareContainer = !candidate.countExplicit && !modifierSignature(candidate);
 
     if (!repeatedCount && !bareContainer) {
@@ -1013,6 +1106,83 @@ export function normaliseDeliverables(text: string, candidates: DeliverableCandi
     }
   }
 
+  // --- Backward pass, over EVERY generic: the forward pass's restatement
+  //     branches in the direction they were never given ----------------------
+
+  /*
+   * Commissioning defect 10, second half.
+   *
+   * The loop above walks specifics and looks at the ONE generic immediately
+   * before each of them. Brief 7599b3fb walks straight past it: its acceptance
+   * criteria say "Two separate documents exist, each dedicated to one system"
+   * and then twice more "Each document contains ...", so by the time the scope
+   * names those documents as engineering briefs, the nearest preceding generic
+   * is an "Each document" and the mention that carries the count is three
+   * candidates back. Nothing folded, and defect 9's four-artefact false gap
+   * came back in full.
+   *
+   * `contractTextOf` concatenates acceptanceCriteria, proposedScope,
+   * userObjective and desiredBehaviour in that fixed order, so which side of a
+   * specific a generic falls on is decided by WHICH FIELD a writer happened to
+   * put it in and not by anything they meant. The forward pass already resolves
+   * this shape; it simply never ran in this direction. So it does now, over
+   * every generic rather than one per specific, with the same evidence the
+   * forward pass accepts and nothing weaker:
+   *
+   *   - a generic pointing back and carrying no count of its own restates what
+   *     it points at ("Each document contains a 'Purpose' section");
+   *   - a generic that points back or enumerates, carrying the SAME count as
+   *     the specific beside it, restates that specific ("Two separate
+   *     documents" against "TWO separate engineering briefs").
+   *
+   * A generic whose count differs, or which introduces itself with nothing but
+   * its own article, is a real and separate request and still survives here
+   * untouched. Dropping a requested deliverable is the Part F failure and the
+   * worse of the two directions, so this pass only ever folds on evidence.
+   */
+  for (const generic of kept.filter((k) => !k.specificType && !retracted.has(k))) {
+    const specific = kept.find(
+      (k) => k.specificType && !retracted.has(k) && k.span.start >= generic.span.end,
+    );
+    if (!specific) continue;
+
+    const enumeratingGeneric = generic.qualifiers.some((q) => ENUMERATING_QUALIFIERS.has(q));
+
+    if (generic.backReference && !generic.countExplicit) {
+      retracted.add(generic);
+      resolutions.push({
+        phrase: generic.phrase,
+        span: generic.span,
+        relationship: 'alias',
+        resolvedTo: specific.type,
+        confidence: 0.9,
+        reason:
+          `"${generic.phrase}" points back and names no new kind, so it is ` +
+          `${describeCount(specific.count, specific.label)} already required.`,
+      });
+      continue;
+    }
+
+    if (
+      (generic.backReference || enumeratingGeneric) &&
+      generic.countExplicit &&
+      specific.countExplicit &&
+      generic.count === specific.count
+    ) {
+      retracted.add(generic);
+      resolutions.push({
+        phrase: generic.phrase,
+        span: generic.span,
+        relationship: 'explanatory',
+        resolvedTo: specific.type,
+        confidence: 0.85,
+        reason:
+          `"${generic.phrase}" counts out the same ${specific.count} already required as ` +
+          `${plural(specific.label, specific.count)}, and adds no kind of its own, so it restates them.`,
+      });
+    }
+  }
+
   // --- Aggregation ---------------------------------------------------------
 
   const surviving = kept.filter((k) => !retracted.has(k));
@@ -1037,25 +1207,7 @@ export function normaliseDeliverables(text: string, candidates: DeliverableCandi
      * and a document for the internal team" is two documents, and the thing
      * that says so is that the two mentions carry different modifiers.
      */
-    const bySentence = new Map<number, DeliverableCandidate[]>();
-    for (const mention of mentions) {
-      const list = bySentence.get(mention.sentence) ?? [];
-      list.push(mention);
-      bySentence.set(mention.sentence, list);
-    }
-
-    let count = 0;
-    for (const list of bySentence.values()) {
-      const signatures = list.map(modifierSignature);
-      const allDistinct =
-        list.length > 1 &&
-        signatures.every((signature) => signature.length > 0) &&
-        new Set(signatures).size === signatures.length;
-      const sentenceCount = allDistinct
-        ? list.reduce((total, mention) => total + mention.count, 0)
-        : Math.max(...list.map((mention) => mention.count));
-      count = Math.max(count, sentenceCount);
-    }
+    const count = aggregateCount(mentions);
 
     const first = mentions[0]!;
     const folded = resolutions.filter((r) => r.resolvedTo === type && r.relationship !== 'contains');
